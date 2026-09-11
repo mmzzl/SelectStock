@@ -1,0 +1,20 @@
+# 插件化量化选股系统 - 运行依赖
+# 按需安装：核心骨架可先只装 pandas/pyyaml，akshare/fastapi 按运行形态选装
+pandas>=2.0
+pyyaml>=6.0
+numpy>=1.24        # mock_source 演示例程需要
+
+# akshare 行情数据源（HTTP 接入 Web 时才需要）
+akshare>=1.15
+
+# Web HTTP 接口（入口 api.py）
+fastapi>=0.100
+uvicorn>=0.23
+
+# K线指标预计算脚本 scripts/build_kline_features.py
+TA-Lib>=0.4.28
+pymongo>=4.0
+pyarrow>=14.0
+
+# LLM 新闻解读 scripts/analyze_news_llm.py（智谱 zai-sdk）
+zai-sdk>=0.2.3

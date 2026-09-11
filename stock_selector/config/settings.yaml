@@ -1,0 +1,38 @@
+# 插件化量化选股系统 - 全局配置
+# 配置项分为三类：全局配置、数据源配置、策略参数
+
+# 数据源配置
+# type: ak => akshare 行情接口; 预留 file/db 等数据源，切换数据源不影响选股策略
+datasource:
+  type: ak
+  # akshare 行情接口参数
+  ak:
+    start_date: "20240101"
+    adjust: "qfq"          # 前复权
+    # 单次拉取 K 线数量，不宜过大以免超时
+    fetch_rows: 300
+
+# 策略执行配置
+selector:
+  # 默认执行全部策略；可通过命令行/接口参数指定策略名称覆盖
+  default_strategies: ["trend_rebound", "box_oscillate"]
+  # 单股票处理失败时是否继续（稳定性保证）
+  tolerate_errors: true
+  # 分批拉取股票数量上限（0 表示不限制）
+  stock_limit: 0
+
+# 策略参数（各策略插件可通过 self.config 读取）
+strategy_params:
+  # 趋势回踩策略
+  trend_rebound:
+    period: 20            # 均线周期
+    pullback_pct: 0.05    # 回踩幅度（5%）
+  # 箱体震荡策略
+  box_oscillate:
+    period: 30            # 箱体统计周期
+    breakout_pct: 0.02    # 突破阈值（2%）
+
+# HTTP 服务配置
+server:
+  host: "0.0.0.0"
+  port: 8000

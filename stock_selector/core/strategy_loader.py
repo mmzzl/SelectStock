@@ -1,0 +1,52 @@
+"""动态插件加载器。
+
+运行时扫描 strategies 目录下所有策略文件，动态导入、校验契约、生成策略注册表。
+新增策略无需手动 import，零配置注册。
+"""
+
+import importlib
+import inspect
+import pkgutil
+from collections import OrderedDict
+
+from .base_strategy import BaseSelectStrategy
+from .. import strategies as strategies_pkg
+
+
+class StrategyLoader:
+    """扫描并加载所有策略插件的加载器。"""
+
+    def __init__(self, strategy_params: dict | None = None):
+        self._params = strategy_params or {}
+        self._registry: OrderedDict[str, type[BaseSelectStrategy]] = OrderedDict()
+
+    def load_all(self) -> "StrategyLoader":
+        """扫描 strategies 包下所有模块，注册满足契约的策略类。"""
+        for mod_info in pkgutil.iter_modules(strategies_pkg.__path__):
+            module = importlib.import_module(f"{strategies_pkg.__name__}.{mod_info.name}")
+            for _, obj in inspect.getmembers(module, inspect.isclass):
+                if self._is_valid_strategy(obj):
+                    # 实例化以获取名称，避免重复注册
+                    instance = obj(config=self._params.get(obj.__name__.lower(), None))
+                    self._registry[instance.name] = obj
+        return self
+
+    def _is_valid_strategy(self, cls) -> bool:
+        """校验是否为有效策略类：继承基类、非抽象、非基类本身。"""
+        return (
+            issubclass(cls, BaseSelectStrategy)
+            and cls is not BaseSelectStrategy
+            and not inspect.isabstract(cls)
+        )
+
+    def names(self) -> list[str]:
+        """返回所有已注册策略名称。"""
+        return list(self._registry.keys())
+
+    def create(self, name: str) -> BaseSelectStrategy:
+        """按名称创建策略实例。"""
+        name = name.strip().lower()
+        cls = self._registry.get(name)
+        if cls is None:
+            raise KeyError(f"未找到策略插件: {name}，可用: {', '.join(self.names())}")
+        return cls(config=self._params.get(name, None))

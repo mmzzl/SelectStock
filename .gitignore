@@ -1,0 +1,15 @@
+# 生成数据 / 日志（不纳入版本库）
+data/
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
