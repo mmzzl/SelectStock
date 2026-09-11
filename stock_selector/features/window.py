@@ -61,7 +61,6 @@ def compute_window_features(df: pd.DataFrame, code: str) -> pd.DataFrame:
     vol_ratio = v / vol_ma5.replace(0, np.nan)
     feat["vol_ratio_avg"] = vol_ratio.rolling(WINDOW).mean()
 
-    pct_abs = pct.abs()
     up_vol = v.where(pct > 0, 0.0)
     dn_vol = v.where(pct < 0, 0.0)
     up_sum = up_vol.rolling(WINDOW).sum()
