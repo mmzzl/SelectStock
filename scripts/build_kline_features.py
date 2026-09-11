@@ -22,6 +22,8 @@ import yaml
 from pymongo import MongoClient
 from tqdm import tqdm
 
+from stock_selector.features.base_columns import add_base_columns
+
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = ROOT / "data" / "stock_kline"
 LOG_DIR = ROOT / "logs"
@@ -60,7 +62,8 @@ INDICATOR_FUNCS = {
 
 BASE_COLUMNS = ["code", "name", "date", "open", "high", "low", "close", "volume", "amount"]
 INDICATOR_COLUMNS = list(INDICATOR_FUNCS.keys()) + ["kdj_j", "vol_ma5", "last_close"]
-OUTPUT_COLUMNS = BASE_COLUMNS + INDICATOR_COLUMNS
+DERIVED_COLUMNS = ["pct", "lu", "vol_ratio", "pos60"]
+OUTPUT_COLUMNS = BASE_COLUMNS + INDICATOR_COLUMNS + DERIVED_COLUMNS
 
 
 def load_config() -> dict:
@@ -126,6 +129,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out["kdj_j"] = out["kdj_k"] * 3 - out["kdj_d"] * 2
     out["vol_ma5"] = df["volume"].astype(float).rolling(5).mean()
     out["last_close"] = df["close"].astype(float).shift(1)
+    out = add_base_columns(out)
     return out[OUTPUT_COLUMNS]
 
 
