@@ -16,6 +16,12 @@ from stock_selector.features.base_columns import (
 WINDOW = 20
 VOL_CLIP_MED = 8
 
+FEATURE_COLUMNS = [
+    "pct_20d", "slope_20d", "pos_60d", "ma5_ma20", "vol_ratio_avg",
+    "up_day_vol_ratio", "vol_slope", "vol_corr_pct", "drawdown_20d",
+    "test_limit_cnt", "limit_up_early", "max_gain_3d",
+]
+
 
 def clean_volume(df: pd.DataFrame) -> pd.DataFrame:
     """Clip volume to 8x rolling(20) median. Returns a copy."""
