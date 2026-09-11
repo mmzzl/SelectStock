@@ -45,14 +45,29 @@ def compute_window_features(df: pd.DataFrame, code: str) -> pd.DataFrame:
 
     def _slope(series, w):
         vals = series.to_numpy(dtype=float)
-        out = np.full(len(vals), np.nan)
-        x = np.arange(w, dtype=float)
-        for i in range(w - 1, len(vals)):
-            seg = vals[i - w + 1 : i + 1]
-            if np.isnan(seg).any():
-                continue
-            m = np.polyfit(x, seg, 1)[0]
-            out[i] = m / np.nanmean(seg)
+        n = len(vals)
+        out = np.full(n, np.nan)
+        pos = np.arange(n, dtype=float)
+        finite = np.isfinite(vals)
+        y = np.where(finite, vals, 0.0)
+        cum_y = np.cumsum(y)
+        cum_py = np.cumsum(pos * y)
+        cum_p2 = np.cumsum(pos * pos)
+        ss_y = np.concatenate([[0.0], cum_y[: n - w]])
+        ss_py = np.concatenate([[0.0], cum_py[: n - w]])
+        ss_p2 = np.concatenate([[0.0], cum_p2[: n - w]])
+        i = np.arange(w - 1, n, dtype=float)
+        sy = cum_y[w - 1 :] - ss_y
+        spy = cum_py[w - 1 :] - ss_py
+        sp2 = cum_p2[w - 1 :] - ss_p2
+        sx = i * w - w * (w - 1) / 2.0
+        var_x = sp2 / w - (sx / w) ** 2
+        cov = spy / w - (sx / w) * (sy / w)
+        mean_y = sy / w
+        res = (cov / var_x) / mean_y
+        good = np.convolve(finite.astype(float), np.ones(w, dtype=float), mode="valid") >= w
+        res[~good] = np.nan
+        out[w - 1 :] = res
         return pd.Series(out, index=series.index)
 
     feat["slope_20d"] = _slope(c, WINDOW)
