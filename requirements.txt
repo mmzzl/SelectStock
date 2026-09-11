@@ -18,3 +18,7 @@ pyarrow>=14.0
 
 # LLM 新闻解读 scripts/analyze_news_llm.py（智谱 zai-sdk）
 zai-sdk>=0.2.3
+
+# Naive Bayes 训练 scripts/train_bayes.py + models/（连板吸筹效应识别）
+scikit-learn>=1.4
+joblib>=1.3
