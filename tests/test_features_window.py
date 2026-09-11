@@ -118,10 +118,11 @@ def _write_parquet(dirpath, code, df):
 
 
 def test_build_dataset(tmp_path):
-    _write_parquet(tmp_path, "600000", _mk("600000", n=100, limup_days=range(90, 94)))
-    _write_parquet(tmp_path, "300750", _mk("300750", n=100))
+    _write_parquet(tmp_path, "600000", _mk_label("600000", n=90, limup_days=range(80, 85)))
+    _write_parquet(tmp_path, "300750", _mk_label("300750", n=90))
     ds = build_dataset(tmp_path)
     assert {"code", "date", "label"} <= set(ds.columns)
     assert set(FEATURES) <= set(ds.columns)
-    assert ds["label"].dropna().isin([0, 1]).all()
+    assert set(ds["code"]) == {"600000", "300750"}
+    assert set(ds["label"]) == {0, 1}
     assert len(ds) > 0

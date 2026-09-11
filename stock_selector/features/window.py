@@ -159,6 +159,9 @@ def _process_one(path: Path) -> Optional[pd.DataFrame]:
 
         feat_cols = [c for c in merged.columns if c not in ("code", "date", "label")]
         merged = merged.dropna(subset=feat_cols)
+        merged = merged.dropna(subset=["label"])
+        if merged.empty:
+            return None
 
         return merged[["code", "date"] + feat_cols + ["label"]]
     except Exception as exc:
@@ -168,17 +171,18 @@ def _process_one(path: Path) -> Optional[pd.DataFrame]:
 
 
 def build_dataset(
-    kline_dir: Path, processes: int = 8, limit: int = 0
+    kline_dir: Path, processes: int = 4, limit: int = 0
 ) -> pd.DataFrame:
     """Scan parquet files and build the full market feature+label dataset."""
     paths = sorted(Path(kline_dir).glob("*.parquet"))
     if limit > 0:
         paths = paths[:limit]
 
+    dfs = []
     with mp.Pool(processes) as pool:
-        results = pool.map(_process_one, paths)
-
-    dfs = [r for r in results if r is not None]
+        for r in pool.imap_unordered(_process_one, paths):
+            if r is not None and not r.empty:
+                dfs.append(r)
     if not dfs:
         return pd.DataFrame()
     return pd.concat(dfs, ignore_index=True)
