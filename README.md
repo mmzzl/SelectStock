@@ -127,3 +127,28 @@ python scripts/analyze_news_llm.py --stats trend --code BK0464 --start 2026-09-0
 - 非 dict 元素 → 跳过并 WARNING
 
 日志输出到 `logs/news_analyze_YYYYMMDD.log`。
+
+## session-context：跨会话上下文维护
+
+开发过程中由 AI 维护两层知识，断线/重开对话后不丢上下文：
+
+| 层 | 位置 | 内容 |
+|---|---|---|
+| 任务进度（临时） | `.opencode/session-context/active-<task>.md` | 当前任务目标、进度、下一步、阻塞 |
+| 项目经验（永久） | `memory/`（`MEMORY.md` 索引 + `project/` 事实条目） | 架构决策、红线、代码库约定，跨任务可复用 |
+
+### 手动命令
+
+| 你说 | 行为 |
+|---|---|
+| `保存上下文` / `checkpoint` | 盘点后把当前任务进度写入 active 文件 |
+| `恢复上下文` / `resume` | 盘点并列出所有活跃任务，继续指定任务 |
+| `查看上下文` / `context` | 显示当前 active 文件 |
+| `沉淀` / `sediment` | 任务结束仪式：可复用经验写入 `memory/`，删除该 active 文件 |
+
+### 自动模式（无需手动触发）
+
+- 完成任务步骤 / 做架构决策 / 学到代码库模式 / 用户纠正 → AI 立即写入 active 或 memory
+- 检测到切换新任务 → 自动 mini-沉淀旧任务并开新 active 文件
+
+> `active-*.md` 无文件 = 无活跃任务。新对话想自主续上次任务时，先让我读 `.opencode/session-context/` 和 `memory/MEMORY.md`。

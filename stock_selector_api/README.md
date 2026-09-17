@@ -17,6 +17,7 @@
 | 通知组件 | 企微/钉钉/飞书 机器人 webhook + 邮箱 SMTP 四类渠道，AES-GCM 加密落盘；订阅策略按事件+渠道+节流分发，登录失败/锁定/任务失败自动触发通知 |
 | 无构建前端 | 原生 JS + hash 路由，登录页 / 动态侧栏 / 用户/角色/菜单/示例设备管理页全内置 |
 | 示例模块 | 设备管理完整 CRUD，作为「新增一个功能」的标准模板 |
+| 持仓诊断 | 外部契约接口 `POST /api/portfolio/analyze`（代理插件、幂等重放、零后端判定/收益）+ `GET /api/portfolio/runs`（按 user_id 隔离），双表落库 |
 | 部署就绪 | systemd unit + 安装/卸载脚本，适配 CentOS 物理机 |
 
 ## 快速开始（开发）
@@ -159,6 +160,63 @@ interval = 300s
 ```
 
 启动时解析并注册到 APScheduler；`enable=false` 即停用，无需改代码。新增任务三步：写 `scheduler/tasks/xxx.py` 异步函数 → 在 inputs.conf 加一节 → 重启。
+
+### 6. 持仓诊断（portfolio 契约接口）
+
+面向外部系统的**持仓诊断代理接口**：判定（sell/hold/add）与收益/市值 100% 收敛到插件（`services/portfolio_plugin.py`），后端只做**代理 + 落库 + 展示**，不做任何判定/收益公式（红线 R1）。
+
+- 路由挂载：外部契约前缀 `/api`（不走 `/api/v1`，不挂密码到期网关）。由 `backend/main.py` 的 `app.include_router(portfolio_router, prefix="/api")` 挂载。
+- 插件模式：`config.plugin_mode`，默认 `mock`（确定性判定 + 收益快照，离线可跑契约测试）；真实插件接通后 `.env` 置 `PLUGIN_MODE=http`（HTTP 代理到 `plugin_base_url`，M2 范畴）。
+- 幂等重放：**幂等键由服务端计算** —— 对 holdings 规范化（排序 + code/name/quantity/cost_price）取 `holdings_md5` 作 `batch_id`；同 `(user_id, natural_day, batch_id)` 重复调用复用既有 `run_id`，不重复建 run/明细。客户端传的 `user_holdings_md5`/`portfolio_snapshot_md5` 仅兼容放行、不参与键构造。
+- M1 为**同步代理**：成功后 `status=completed`；插件失败则 run 置 `failed` 并返回 502。
+- 数据表：`portfolio_diag_runs`（run 头，唯一键 `(user_id, natural_day, batch_id)`）+ `portfolio_diag_results`（明细，唯一键 `(run_id, code)`）。
+
+**`POST /api/portfolio/analyze`** — 提交持仓获取诊断判定 + 收益快照：
+
+```bash
+curl -s http://localhost:8000/api/portfolio/analyze \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "user_id": "u_1001",
+    "natural_day": "2026-09-17",
+    "holdings": [
+      {"code": "600519", "name": "贵州茅台", "quantity": 100, "cost_price": 1688.0},
+      {"code": "000858", "name": "五粮液",    "quantity": 50,  "cost_price": 142.0}
+    ]
+  }'
+```
+
+响应（`data` 结构）：
+
+```json
+{
+  "success": true, "code": 0, "message": "成功",
+  "data": {
+    "run_id": "xxx",
+    "status": "completed",
+    "results": [
+      {"code": "600519", "name": "贵州茅台", "action": "sell", "action_reason": "...",
+       "latest_price": 1696.44, "quantity": 100, "holding_pnl": 844.0, "pnl_pct": 0.5, "suggestion": ""}
+    ],
+    "summary": {
+      "action_counts": {"sell": 1, "hold": 1, "add": 0},
+      "total_market_value": 176815.0, "total_pnl": 915.0, "holding_count": 2
+    }
+  }
+}
+```
+
+同一 `user_id + natural_day + holdings` 重复调用 → 返回相同 `run_id`（幂等重放）。
+
+**`GET /api/portfolio/runs`** — 按 user_id 隔离的诊断历史列表：
+
+```bash
+curl -s "http://localhost:8000/api/portfolio/runs?user_id=u_1001&page=1&size=20"
+```
+
+响应 `data` 为分页对象：`{"items": [...], "total": N, "page": 1, "size": 20}`，`items` 仅含该 `user_id` 的 run（越权不可见他人，鉴权收敛由 M3 补强）。
+
+相关文件：`backend/db/sql/portfolio.py`、`backend/schemas/portfolio.py`、`backend/repositories/portfolio.py`、`backend/services/portfolio_service.py`、`backend/services/portfolio_plugin.py`、`backend/api/v1/portfolio.py`。
 
 ## 生产部署（CentOS 物理机）
 
