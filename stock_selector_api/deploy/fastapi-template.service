@@ -1,0 +1,24 @@
+[Unit]
+Description=FastAPI 安全管控平台模板
+After=network.target
+
+[Service]
+Type=simple
+# 部署路径在 /opt/fastapi-template，按实际修改；install.sh 会自动替换
+User=admin
+Group=admin
+WorkingDirectory=/opt/fastapi-template/backend
+EnvironmentFile=/opt/fastapi-template/.env
+# 默认 SQLite：必须单 worker（多 worker 会重复执行定时任务、SQLite 有写锁竞争风险）
+# 若切换到 MongoDB 且任务依赖较长：可改 --workers N，但需确认定时任务幂等或在独立进程运行
+ExecStart=/opt/fastapi-template/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
+Restart=on-failure
+RestartSec=3
+# 基础安全加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/fastapi-template/data
+
+[Install]
+WantedBy=multi-user.target

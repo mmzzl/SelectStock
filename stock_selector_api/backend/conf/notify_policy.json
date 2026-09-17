@@ -1,0 +1,52 @@
+{
+  "is_on": false,
+  "events": {
+    "account_locked": {
+      "is_on": false,
+      "interval": {
+        "value": 0,
+        "unit": "m"
+      }
+    },
+    "login_failure": {
+      "is_on": false,
+      "interval": {
+        "value": 0,
+        "unit": "m"
+      }
+    },
+    "task_failed": {
+      "is_on": false,
+      "interval": {
+        "value": 0,
+        "unit": "m"
+      }
+    },
+    "custom": {
+      "is_on": false,
+      "interval": {
+        "value": 0,
+        "unit": "m"
+      }
+    }
+  },
+  "channels": {
+    "wecom": {
+      "is_on": false,
+      "channel_key": "wecom_ops"
+    },
+    "dingtalk": {
+      "is_on": false,
+      "channel_key": "ding_ops"
+    },
+    "feishu": {
+      "is_on": false,
+      "channel_key": "feishu_ops"
+    },
+    "email": {
+      "is_on": false,
+      "channel_key": "smtp_main",
+      "to": ["ops@corp.com"]
+    }
+  }
+}

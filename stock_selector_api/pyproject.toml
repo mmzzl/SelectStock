@@ -1,0 +1,40 @@
+[project]
+name = "fastapi-template"
+version = "0.1.0"
+description = "开箱即用的 FastAPI 后端模板：三档角色RBAC + JWT/Session 双认证 + SQLite/MongoDB 可切换 + 动态菜单 + inputs.conf 风格定时任务"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "sqlalchemy>=2.0",
+    "aiosqlite>=0.20",
+    "motor>=3.4",
+    "pwdlib[argon2]>=0.2",
+    "pyjwt>=2.8",
+    "loguru>=0.7",
+    "apscheduler>=3.10,<4",
+    "python-multipart>=0.0.9",
+    "pillow>=10.1",
+    "cryptography>=42.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",
+    "alembic>=1.13",
+]
+
+[tool.setuptools]
+packages = { find = { where = ["backend"] } }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["backend/tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

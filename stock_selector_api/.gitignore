@@ -1,0 +1,17 @@
+# 数据文件
+data/*.db
+data/*.sqlite
+data/logs/
+.env
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+.idea/
+.vscode/

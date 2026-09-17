@@ -1,0 +1,42 @@
+{
+  "wecom": [
+    {
+      "key": "wecom_ops",
+      "name": "运维值班群",
+      "webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=贴你的群机器人key",
+      "enabled": true
+    }
+  ],
+  "dingtalk": [
+    {
+      "key": "ding_ops",
+      "name": "安全值班群",
+      "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=贴你的机器人token",
+      "secret": "",
+      "enabled": true
+    }
+  ],
+  "feishu": [
+    {
+      "key": "feishu_ops",
+      "name": "平台通知群",
+      "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/贴你的webhook",
+      "secret": "",
+      "enabled": true
+    }
+  ],
+  "email": [
+    {
+      "key": "smtp_main",
+      "name": "主邮箱",
+      "host": "smtp.corp.com",
+      "port": 465,
+      "use_ssl": true,
+      "username": "noreply@corp.com",
+      "password": "",
+      "from_email": "noreply@corp.com",
+      "from_name": "安全管控平台",
+      "enabled": true
+    }
+  ]
+}

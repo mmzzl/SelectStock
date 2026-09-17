@@ -13,3 +13,6 @@ venv/
 .idea/
 .vscode/
 *.swp
+
+# Agent 会话/工具缓存（不入版本库）
+.superpowers/
