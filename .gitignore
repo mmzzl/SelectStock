@@ -16,3 +16,4 @@ venv/
 
 # Agent 会话/工具缓存（不入版本库）
 .superpowers/
+.cospowers/
