@@ -80,8 +80,8 @@ class Settings(BaseSettings):
     notify_state_file: str = str(BACKEND_DIR.parent / "data" / "notify_send_state.json")
     schedule_enabled: bool = True
 
-    # ---------- 持仓诊断插件（M1 默认 mock；M2 接入真实插件端口后置 env）----------
-    plugin_mode: str = "mock"             # mock | http
+    # ---------- 持仓诊断插件（M2 起默认接真实插件；测试 conftest 强制 mock）----------
+    plugin_mode: str = "http"              # http（本机插件，默认 8001）| mock（测试确定性）
     plugin_base_url: str = "http://localhost:8001"
 
     # 部署
