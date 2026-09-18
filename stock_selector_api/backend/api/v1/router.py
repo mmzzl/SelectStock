@@ -10,6 +10,7 @@ from api.v1 import (
     sys_permissions,
     notify,
     devices,
+    holdings,
 )
 from core.dependencies import ensure_password_current
 
@@ -28,5 +29,8 @@ api_router.include_router(notify.router, dependencies=_password_gate)
 
 # —— 示例业务模块 ——
 api_router.include_router(devices.router, dependencies=_password_gate)
+
+# —— 持仓模块 ——
+api_router.include_router(holdings.router, dependencies=_password_gate)
 
 # 新增模块后追加：api_router.include_router(your_module_router)
