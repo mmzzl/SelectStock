@@ -1,37 +1,28 @@
-"""services/holdings_service.py — 持仓维护：属性校验、上限 200、CSV 导入（行级容错）。"""
+"""services/holdings_service.py — 持仓 CRUD + 上限 + CSV 导入（REQ-018）。"""
 from __future__ import annotations
 
 import csv
 import io
+import re
 
 from core.exceptions import BizError
 from repositories import holdings_repo
-from schemas.holdings import ImportResult
 
 MAX_HOLDINGS = 200
-
-
-def _validate_row(row: dict) -> str | None:
-    if not row["code"]:
-        return "股票代码为空"
-    qty = row["quantity"]
-    if qty is None or qty < 0:
-        return f"数量非法:{row['quantity']!r}"
-    cost = row["cost_price"]
-    if cost is None or cost < 0:
-        return f"成本价非法:{row['cost_price']!r}"
-    return None
+_CODE_RE = re.compile(r"^\d{6}$")
 
 
 async def create_holding(user_id: str, data: dict) -> dict:
-    if await holdings_repo.find_by_user_code(user_id, data["code"]):
-        raise BizError("持仓已存在", code=400, status_code=400)
     if await holdings_repo.count_by_user(user_id) >= MAX_HOLDINGS:
-        raise BizError("最多维护 200 只股票持仓", code=400, status_code=400)
+        raise BizError(f"持仓已达 {MAX_HOLDINGS} 条上限")
+    if await holdings_repo.find_by_user_code(user_id, data["code"]):
+        raise BizError("该股票已在持仓列表中")
     return await holdings_repo.create({"user_id": user_id, **data})
 
 
-async def list_holdings(user_id: str) -> list[dict]:
+async def list_holdings(user_id: str, enabled_only: bool = False) -> list[dict]:
+    if enabled_only:
+        return await holdings_repo.list_enabled(user_id)
     return await holdings_repo.list_by_user(user_id)
 
 
@@ -40,58 +31,86 @@ async def find_by_user_code(user_id: str, code: str) -> dict | None:
 
 
 async def update_holding(user_id: str, holding_id: str, data: dict) -> dict:
-    if not await holdings_repo.get(holding_id):
+    h = await holdings_repo.get(holding_id)
+    if not h or h["user_id"] != user_id:
         raise BizError("持仓不存在", code=404, status_code=404)
     return await holdings_repo.update(holding_id, data)
 
 
 async def delete_holding(user_id: str, holding_id: str) -> None:
-    if not await holdings_repo.delete(holding_id):
+    h = await holdings_repo.get(holding_id)
+    if not h or h["user_id"] != user_id:
         raise BizError("持仓不存在", code=404, status_code=404)
+    await holdings_repo.delete(holding_id)
 
 
-async def delete_all(user_id: str) -> None:
+async def delete_all(user_id: str) -> int:
+    """清空某用户全部持仓（测试与导入替换用）。"""
     rows = await holdings_repo.list_by_user(user_id)
     for r in rows:
         await holdings_repo.delete(r["id"])
+    return len(rows)
 
 
-async def parse_import(text: str) -> ImportResult:
-    rows = list(csv.DictReader(io.StringIO(text)))
-    if not rows:
-        raise BizError("CSV 无数据行", code=400, status_code=400)
-    if set(rows[0].keys()) != {"代码", "名称", "数量", "成本价"}:
-        raise BizError("CSV 表头必须为:代码,名称,数量,成本价", code=400, status_code=400)
-    result = ImportResult(total=len(rows))
-    for i, r in enumerate(rows, start=2):
-        try:
-            code = (r["代码"] or "").strip()
-            name = (r["名称"] or "").strip()
-            quantity = int((r["数量"] or "").strip())
-            cost = float((r["成本价"] or "").strip())
-        except (TypeError, ValueError):
-            result.errors.append(f"第{i}行:数值格式非法")
+def _validate_row(row: dict, errs: list[str], lineno: int) -> dict | None:
+    code = str(row.get("code", "")).strip()
+    if not _CODE_RE.match(code):
+        errs.append(f"第{lineno}行: code 需为6位数字")
+        return None
+    try:
+        quantity = int(str(row.get("quantity", "")).strip())
+    except (TypeError, ValueError):
+        quantity = -1
+    if quantity < 0:
+        errs.append(f"第{lineno}行: quantity 需为非负整数")
+        return None
+    try:
+        cost = round(float(str(row.get("cost_price", "")).strip()), 4)
+    except (TypeError, ValueError):
+        errs.append(f"第{lineno}行: cost_price 需为数字")
+        return None
+    if cost < 0:
+        errs.append(f"第{lineno}行: cost_price 需非负")
+        return None
+    return {"code": code, "name": str(row.get("name", ""))[:64],
+            "quantity": quantity, "cost_price": cost}
+
+
+def parse_import(text: str, strategy: str) -> dict:
+    """解析券商 CSV：表头 code,name,quantity,cost_price。逐行校验，错误不中断。"""
+    if strategy not in ("upsert", "skip"):
+        raise BizError("strategy 需为 upsert|skip")
+    reader = csv.DictReader(io.StringIO(text.strip()))
+    headers = {h.strip() for h in reader.fieldnames} if reader.fieldnames else set()
+    if headers != {"code", "name", "quantity", "cost_price"}:
+        raise BizError("CSV 表头需为 code,name,quantity,cost_price")
+    result = {"total": 0, "valid": 0, "updated": 0, "skipped": 0, "errors": [], "_items": []}
+    for lineno, row in enumerate(reader, start=2):
+        result["total"] += 1
+        item = _validate_row(row, result["errors"], lineno)
+        if item is None:
             continue
-        err = _validate_row({"code": code, "quantity": quantity, "cost_price": cost})
-        if err:
-            result.errors.append(f"第{i}行:{err}")
-            continue
-        result.valid += 1
-        result.items.append({"code": code, "name": name, "quantity": quantity, "cost_price": cost})
+        result["valid"] += 1
+        result["_items"].append(item)
     return result
 
 
-async def apply_import(user_id: str, parsed: ImportResult) -> ImportResult:
-    if parsed.errors:
-        return parsed
-    if await holdings_repo.count_by_user(user_id) + parsed.valid > MAX_HOLDINGS:
-        raise BizError("导入后将超过 200 只上限", code=400, status_code=400)
-    result = ImportResult(total=parsed.total, valid=parsed.valid)
-    for item in parsed.items:
-        exist = await holdings_repo.find_by_user_code(user_id, item["code"])
-        if exist:
-            await holdings_repo.update(exist["id"], item)
+async def apply_import(user_id: str, text: str, strategy: str) -> dict:
+    """解析并落库：upsert=已存在则更新，skip=已存在跳过；超上限拒绝。"""
+    parsed = parse_import(text, strategy)
+    if parsed["errors"]:
+        return {k: v for k, v in parsed.items() if k != "_items"}
+    if await holdings_repo.count_by_user(user_id) + parsed["valid"] > MAX_HOLDINGS:
+        raise BizError(f"导入将超出 {MAX_HOLDINGS} 条上限")
+    for it in parsed["_items"]:
+        existing = await holdings_repo.find_by_user_code(user_id, it["code"])
+        if existing and strategy == "skip":
+            parsed["skipped"] += 1
+            continue
+        if existing:
+            await holdings_repo.update(existing["id"], it)
+            parsed["updated"] += 1
         else:
-            await holdings_repo.create({"user_id": user_id, **item})
-        result.updated += 1
-    return result
+            await holdings_repo.create({"user_id": user_id, **it})
+            parsed["updated"] += 1
+    return {k: v for k, v in parsed.items() if k != "_items"}

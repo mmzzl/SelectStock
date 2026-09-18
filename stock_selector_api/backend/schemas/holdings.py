@@ -1,4 +1,4 @@
-"""schemas/holdings.py — 持仓写白名单 / API 入参 / 读模型 / 导入结果。"""
+"""schemas/holdings.py — 持仓写白名单 / API 入参 / 读模型。"""
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
@@ -42,12 +42,3 @@ class HoldingOut(ORMModel):
     quantity: int
     cost_price: float
     enabled: bool
-
-
-class ImportResult(BaseModel):
-    total: int
-    valid: int = 0
-    updated: int = 0
-    skipped: int = 0
-    errors: list[str] = []
-    items: list[dict] = []
