@@ -8,6 +8,13 @@
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)   # judge.py 复用 stock_selector.backtest.rule_eval
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
