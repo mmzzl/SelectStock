@@ -8,6 +8,7 @@ from db.sql.captcha import Captcha
 from db.sql.login_lock import LoginLock
 from db.sql.password_history import PasswordHistory
 from db.sql.portfolio import PortfolioDiagResult, PortfolioDiagRun
+from db.sql.holdings import Holding
 
 __all__ = [
     "Base",
@@ -22,6 +23,7 @@ __all__ = [
     "PasswordHistory",
     "PortfolioDiagRun",
     "PortfolioDiagResult",
+    "Holding",
     "user_roles",
     "role_permissions",
 ]
