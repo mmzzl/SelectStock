@@ -7,9 +7,10 @@
 
 from fastapi import APIRouter, Query
 
+from core.exceptions import BizError
 from core.response import ok, paged
 from schemas.portfolio import AnalyzeBody
-from services import portfolio_service
+from services import diag_service, portfolio_service
 
 router = APIRouter(prefix="/portfolio", tags=["持仓诊断"])
 
@@ -30,3 +31,11 @@ async def list_runs(
 ) -> dict:
     items, total = await portfolio_service.list_runs(user_id, page, size)
     return ok(paged(items, total, page, size))
+
+
+@router.get("/diag/{run_id}", summary="诊断运行明细（外部契约）")
+async def diag_detail(run_id: str) -> dict:
+    run = await diag_service.diag_detail(run_id)
+    if not run:
+        raise BizError("诊断运行不存在", code=404, status_code=404)
+    return ok(run)

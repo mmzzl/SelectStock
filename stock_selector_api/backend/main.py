@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from config import settings, BACKEND_DIR
+from api.external import router as external_router
 from api.v1.router import api_router
 from api.v1.portfolio import router as portfolio_router
 from core.logger import setup_logging, log
@@ -80,6 +81,8 @@ def create_app() -> FastAPI:
     app.include_router(api_router, prefix=settings.api_prefix)
     # 持仓诊断外部契约路由（方案 §2/§3）：POST /api/portfolio/analyze · GET /api/portfolio/runs
     app.include_router(portfolio_router, prefix="/api")
+    # M3 外部调度契约：POST /api/external/portfolio/diag
+    app.include_router(external_router, prefix="/api")
 
     # 托管无构建前端（若 frontend/static 存在）
     if FRONTEND_DIR.is_dir():
