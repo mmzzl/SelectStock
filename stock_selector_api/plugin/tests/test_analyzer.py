@@ -1,8 +1,5 @@
 """test_analyzer.py"""
-import pytest
-
 from portfolio.analyzer import analyze_holdings
-from portfolio.rules import load_rules
 
 
 class FakeProvider:
