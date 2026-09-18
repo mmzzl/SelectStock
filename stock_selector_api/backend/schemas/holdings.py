@@ -46,7 +46,8 @@ class HoldingOut(ORMModel):
 
 class ImportResult(BaseModel):
     total: int
-    valid: int
+    valid: int = 0
     updated: int = 0
     skipped: int = 0
     errors: list[str] = []
+    items: list[dict] = []

@@ -73,6 +73,16 @@ async def _clean_login_locks():
 
 
 @pytest.fixture(autouse=True)
+async def _clean_holdings_each():
+    """每个测试前后清空 holdings 表：避免共享内存库残留持仓行跨用例污染。"""
+    from repositories import holdings_repo
+
+    await holdings_repo._delete_from("holdings", {})
+    yield
+    await holdings_repo._delete_from("holdings", {})
+
+
+@pytest.fixture(autouse=True)
 async def _reset_notify_each():
     """每个测试前重置通知策略与节流状态：避免订阅开关/发送时间点跨用例污染。"""
     from services import notify_service
