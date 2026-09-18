@@ -16,6 +16,7 @@ from repositories.login_lock import LoginLockRepo
 from repositories.password_history import PasswordHistoryRepo
 from repositories.rbac import RbacRepo
 from repositories.portfolio import PortfolioDiagResultRepo, PortfolioDiagRunRepo
+from repositories.holdings import HoldingRepo, holdings_repo
 
 # 单例（各自持有无状态方法，可安全复用）
 users = UserRepo()
@@ -30,11 +31,13 @@ password_history = PasswordHistoryRepo()
 rbac = RbacRepo()
 portfolio_runs = PortfolioDiagRunRepo()
 portfolio_results = PortfolioDiagResultRepo()
+holdings_repo = HoldingRepo()
 
 __all__ = [
     "UserRepo", "RoleRepo", "PermissionRepo", "MenuRepo", "DeviceRepo", "SessionRepo",
     "CaptchaRepo", "LoginLockRepo", "PasswordHistoryRepo", "RbacRepo",
-    "PortfolioDiagRunRepo", "PortfolioDiagResultRepo",
+    "PortfolioDiagRunRepo", "PortfolioDiagResultRepo", "HoldingRepo",
     "users", "roles", "permissions", "menus", "devices", "sessions", "captchas",
     "login_locks", "password_history", "rbac", "portfolio_runs", "portfolio_results",
+    "holdings_repo",
 ]
