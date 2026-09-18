@@ -129,8 +129,8 @@ async def _run_diag(run_id: str, user_id: str, natural_day: str, key: tuple) -> 
         logger.exception("外部诊断失败: %s", run_id)
         try:
             await portfolio_runs.update(run_id, {"status": "failed", "error": str(exc)[:512]})
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as uexc:  # noqa: BLE001
+            logger.error("写入失败状态也失败: %s: %s", run_id, uexc)
     finally:
         _RUNNING.discard(key)
 

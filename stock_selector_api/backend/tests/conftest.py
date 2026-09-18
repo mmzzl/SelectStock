@@ -1,21 +1,29 @@
-"""pytest fixtures：内存 SQLite(StaticPool 共享连接) + seed + AsyncClient。
+"""pytest fixtures：会话级 SQLite 测试库（临时文件 + WAL） + seed + AsyncClient。
 
-测试固定使用 sqlite 内存库，保证无外部依赖可离线跑通。
+测试固定使用 sqlite，保证无外部依赖可离线跑通。
 AUTH_MODE 可在用例内切换 settings.auth_mode（默认 jwt）。
+M3 起背景任务（asyncio.create_task）会与测试等待并发访问 DB：
+  - 单连接 StaticPool：并发 AsyncSession 交错事务，偶发提交丢失；
+  - 共享内存多连接：并发写锁导致 "database table is locked"。
+文件库 + WAL + busy_timeout 等价生产连接池语义，读写互不阻塞。
 """
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 from config import settings
+
+_TEST_DB: str | None = None
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _test_env(tmp_path_factory):
-    """强制测试环境：sqlite 内存 + 关闭调度器 + 通知配置/策略落到临时目录（不污染仓库 conf 样例）。"""
+    """强制测试环境：sqlite 文件库 + 关闭调度器 + 通知配置/策略落到临时目录（不污染仓库 conf 样例）。"""
+    global _TEST_DB
     settings.db_backend = "sqlite"
+    _TEST_DB = str(tmp_path_factory.mktemp("db") / "test.db")
     settings.database_url = None  # get_engine 被替换，此值不再使用
     settings.schedule_enabled = False
     settings.plugin_mode = "mock"
@@ -26,18 +34,21 @@ def _test_env(tmp_path_factory):
 
     save_policy({})
     yield
+    _TEST_DB = None
 
 
 @pytest.fixture(scope="session", autouse=True)
-async def _init_db():
-    """用共享内存引擎建表 + seed。"""
+async def _init_db(_test_env):
+    """用临时文件引擎建表 + seed（多连接 + busy_timeout，并发安全）。"""
     import db.base as dbb
     from db.sql import Base
 
     engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+        f"sqlite+aiosqlite:///{_TEST_DB}",
+        connect_args={"check_same_thread": False, "timeout": 30},
+        poolclass=AsyncAdaptedQueuePool,
+        pool_size=10,
+        max_overflow=0,
     )
     dbb._engine = engine
 

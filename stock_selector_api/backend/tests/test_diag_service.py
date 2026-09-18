@@ -21,6 +21,7 @@ async def _seed():
     yield
     await portfolio_runs._delete_from("portfolio_diag_runs", {})
     await portfolio_results._delete_from("portfolio_diag_results", {})
+    await holdings_repo._delete_from("holdings", {})
 
 
 async def test_first_diag_creates_run_and_completes(monkeypatch):
@@ -113,4 +114,10 @@ async def test_single_flight_rejects_concurrent(monkeypatch):
     with pytest.raises(BizError):
         await diag_service.trigger_diag("u1", "2026-09-13")
     release.set()
-    await t1
+    first = await t1
+    for _ in range(100):
+        r = await portfolio_runs.get(first["run_id"])
+        if r["status"] in ("completed", "failed"):
+            break
+        await asyncio.sleep(0.02)
+    assert r["status"] == "completed"
