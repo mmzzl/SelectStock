@@ -9,6 +9,7 @@ from db.sql.login_lock import LoginLock
 from db.sql.password_history import PasswordHistory
 from db.sql.portfolio import PortfolioDiagResult, PortfolioDiagRun
 from db.sql.holdings import Holding
+from db.sql.trades import TradeRecord
 
 __all__ = [
     "Base",
@@ -24,6 +25,7 @@ __all__ = [
     "PortfolioDiagRun",
     "PortfolioDiagResult",
     "Holding",
+    "TradeRecord",
     "user_roles",
     "role_permissions",
 ]
