@@ -84,6 +84,33 @@ class Settings(BaseSettings):
     plugin_mode: str = "http"              # http（本机插件，默认 8001）| mock（测试确定性）
     plugin_base_url: str = "http://localhost:8001"
 
+    # ---------- 选股插件（薄代理，端口 8002）----------
+    selection_plugin_mode: str = "http"        # http（本机选股插件 8002）| mock（测试确定性）
+    selection_plugin_base_url: str = "http://localhost:8002"
+
+    # ---------- 交割单解析（券商列别名；键为内部规范名）----------
+    trades_columns: dict = {
+        "trade_date": ["成交日期", "成交时间"],
+        "stock_code": ["证券代码", "股票代码", "代码"],
+        "stock_name": ["证券名称", "股票名称", "名称"],
+        "direction": ["买卖标志", "买卖方向", "成交类别"],
+        "quantity": ["成交数量", "数量"],
+        "price": ["成交价格", "价格"],
+        "amount": ["成交金额", "金额"],
+        "commission": ["手续费", "佣金"],
+        "stamp_tax": ["印花税"],
+        "transfer_fee": ["过户费"],
+        "settled_amount": ["结算金额", "发生金额"],
+    }
+
+    # ---------- 版本升级中心（自托管）----------
+    # 用 as_posix() 归一为 / 分隔：Windows 下仍满足「路径含 /upgrade」契约，且 pathlib 兼容
+    upgrade_upload_dir: str = (BACKEND_DIR.parent / "data" / "uploads" / "upgrade").as_posix()
+
+    # ---------- 定时任务（盘后）----------
+    daily_diag_time: str = "18:00"
+    daily_selection_time: str = "17:30"
+
     # 部署
     service_user: str = "admin"
     service_group: str = "admin"

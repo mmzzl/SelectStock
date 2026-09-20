@@ -5,7 +5,7 @@
 内部统一调用内核 run_select()，保证与命令行结果 100% 一致。
 
 启动：
-    python -m uvicorn stock_selector.api:app --host 0.0.0.0 --port 8000
+    python -m uvicorn stock_selector.api:app --host 0.0.0.0 --port 8002
 """
 
 from fastapi import FastAPI
