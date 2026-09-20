@@ -6,7 +6,8 @@ import io
 import re
 
 from core.exceptions import BizError
-from repositories import holdings_repo
+from repositories import holdings_repo, portfolio_results, portfolio_runs, trades_repo
+from services import portfolio_plugin
 
 MAX_HOLDINGS = 200
 _CODE_RE = re.compile(r"^\d{6}$")
@@ -22,8 +23,41 @@ async def create_holding(user_id: str, data: dict) -> dict:
 
 async def list_holdings(user_id: str, enabled_only: bool = False) -> list[dict]:
     if enabled_only:
-        return await holdings_repo.list_enabled(user_id)
-    return await holdings_repo.list_by_user(user_id)
+        rows = await holdings_repo.list_enabled(user_id)
+    else:
+        rows = await holdings_repo.list_by_user(user_id)
+    return await _attach_diag_snapshot(user_id, rows)
+
+
+async def _attach_diag_snapshot(user_id: str, rows: list[dict]) -> list[dict]:
+    """最近一次诊断 run 明细附到持仓行（latest_price/holding_pnl/pnl_pct/action）。
+    无诊断 run 时原样返回（R1-2：后端不计算，仅透传插件落库的快照）。"""
+    if not rows:
+        return rows
+    runs, _ = await portfolio_runs.list_by_user(user_id, page=1, size=1)
+    if not runs:
+        return rows
+    latest = runs[0]
+    results = await portfolio_results.list_by_run(latest["run_id"])
+    by_code = {r["code"]: r for r in results}
+    for h in rows:
+        snap = by_code.get(h["code"])
+        for key in ("latest_price", "holding_pnl", "pnl_pct", "action", "action_reason", "suggestion"):
+            h[key] = snap.get(key) if snap else None
+        h["diag_run_id"] = latest["run_id"]
+    return rows
+
+
+async def pnl(user_id: str, natural_day: str) -> dict:
+    """利润分析：透传持仓诊断插件 pnl 单点口径（后端零算术，R1-2）。"""
+    trades = await trades_repo.list_all_by_user(user_id)
+    holdings = await holdings_repo.list_enabled(user_id)
+    return await portfolio_plugin.call_plugin_pnl({
+        "user_id": user_id,
+        "natural_day": natural_day,
+        "trades": trades,
+        "holdings": holdings,
+    })
 
 
 async def find_by_user_code(user_id: str, code: str) -> dict | None:

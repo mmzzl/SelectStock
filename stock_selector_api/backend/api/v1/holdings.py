@@ -17,6 +17,12 @@ async def list_holdings(user: CurrentUserDep):
     return ok(rows)
 
 
+@router.get("/pnl", summary="利润分析（代理持仓诊断插件 pnl，零算术）")
+async def holdings_pnl(user: CurrentUserDep, natural_day: str):
+    data = await holdings_service.pnl(user.id, natural_day)
+    return ok(data)
+
+
 @router.post("", summary="新增持仓")
 async def create_holding(user: CurrentUserDep, body: HoldingIn):
     h = await holdings_service.create_holding(user.id, body.model_dump())
