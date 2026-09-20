@@ -16,6 +16,7 @@ async def create_all() -> None:
         async with get_engine().begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
             await conn.run_sync(_ensure_user_password_changed_at)
+            await conn.run_sync(_ensure_holdings_derived_columns)
         log.info("SQLite 建表完成")
     else:
         from db.mongo.indexes import ensure_indexes
@@ -36,6 +37,16 @@ def _ensure_user_password_changed_at(sync_conn) -> None:
         text("UPDATE users SET password_changed_at = COALESCE(created_at, CURRENT_TIMESTAMP) "
              "WHERE password_changed_at IS NULL")
     )
+
+
+def _ensure_holdings_derived_columns(sync_conn) -> None:
+    """老库补列：现有 holdings 表新增推导标记列（幂等）。"""
+    from sqlalchemy import inspect, text
+
+    cols = {c["name"] for c in inspect(sync_conn).get_columns("holdings")}
+    for col, ddl in (("derived_from_trades", "BOOLEAN"), ("last_derived_at", "DATETIME")):
+        if col not in cols:
+            sync_conn.execute(text(f"ALTER TABLE holdings ADD COLUMN {col} {ddl}"))
 
 
 async def init_database() -> None:

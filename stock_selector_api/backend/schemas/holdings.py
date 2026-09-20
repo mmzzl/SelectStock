@@ -1,6 +1,8 @@
 """schemas/holdings.py — 持仓写白名单 / API 入参 / 读模型。"""
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 from schemas.common import ORMModel
@@ -15,6 +17,8 @@ class HoldingCreate(BaseModel):
     quantity: int = Field(ge=0)
     cost_price: float = Field(ge=0)
     enabled: bool = True
+    derived_from_trades: bool = False
+    last_derived_at: datetime | None = None
 
 
 class HoldingIn(BaseModel):
@@ -25,6 +29,8 @@ class HoldingIn(BaseModel):
     quantity: int = Field(ge=0)
     cost_price: float = Field(ge=0)
     enabled: bool = True
+    derived_from_trades: bool = False
+    last_derived_at: datetime | None = None
 
 
 class HoldingUpdate(BaseModel):
@@ -32,6 +38,8 @@ class HoldingUpdate(BaseModel):
     quantity: int | None = Field(default=None, ge=0)
     cost_price: float | None = Field(default=None, ge=0)
     enabled: bool | None = None
+    derived_from_trades: bool | None = None
+    last_derived_at: datetime | None = None
 
 
 class HoldingOut(ORMModel):
@@ -42,3 +50,5 @@ class HoldingOut(ORMModel):
     quantity: int
     cost_price: float
     enabled: bool
+    derived_from_trades: bool = False
+    last_derived_at: datetime | None = None
