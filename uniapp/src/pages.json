@@ -1,0 +1,26 @@
+{
+  "pages": [
+    { "path": "pages/login/index", "style": { "navigationBarTitleText": "登录" } },
+    { "path": "pages/holdings/index", "style": { "navigationBarTitleText": "持仓" } },
+    { "path": "pages/holdings/edit", "style": { "navigationBarTitleText": "编辑持仓" } },
+    { "path": "pages/holdings/import", "style": { "navigationBarTitleText": "交割单导入" } },
+    { "path": "pages/trades/index", "style": { "navigationBarTitleText": "交易记录" } },
+    { "path": "pages/profit/index", "style": { "navigationBarTitleText": "利润分析" } },
+    { "path": "pages/selection/index", "style": { "navigationBarTitleText": "选股" } },
+    { "path": "pages/selection/history", "style": { "navigationBarTitleText": "选股历史" } },
+    { "path": "pages/diag/index", "style": { "navigationBarTitleText": "诊断历史" } },
+    { "path": "pages/diag/detail", "style": { "navigationBarTitleText": "诊断明细" } },
+    { "path": "pages/messages/index", "style": { "navigationBarTitleText": "消息" } },
+    { "path": "pages/mine/index", "style": { "navigationBarTitleText": "我的" } },
+    { "path": "pages/mine/password", "style": { "navigationBarTitleText": "修改密码" } }
+  ],
+  "tabBar": {
+    "list": [
+      { "pagePath": "pages/holdings/index", "text": "持仓" },
+      { "pagePath": "pages/selection/index", "text": "选股" },
+      { "pagePath": "pages/diag/index", "text": "诊断" },
+      { "pagePath": "pages/messages/index", "text": "消息" },
+      { "pagePath": "pages/mine/index", "text": "我的" }
+    ]
+  }
+}
