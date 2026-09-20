@@ -38,6 +38,26 @@ class AnalyzeBody(BaseModel):
     holdings: list[HoldingIn] = Field(min_length=1)
 
 
+class TradeIn(BaseModel):
+    trade_date: str = Field(min_length=8, max_length=16)
+    stock_code: str = Field(min_length=1, max_length=16)
+    stock_name: str = Field(default="", max_length=64)
+    direction: str = Field(min_length=3, max_length=8)
+    price: float = Field(ge=0)
+    quantity: int = Field(ge=0)
+    commission: float = Field(default=0.0)
+    stamp_tax: float = Field(default=0.0)
+    transfer_fee: float = Field(default=0.0)
+    settled_amount: float = Field(default=0.0)
+
+
+class PnlBody(BaseModel):
+    user_id: str = Field(min_length=1, max_length=64)
+    natural_day: str = Field(min_length=8, max_length=16)
+    trades: list[TradeIn] = Field(default_factory=list)
+    holdings: list[HoldingIn] = Field(default_factory=list)
+
+
 @app.post("/api/portfolio/analyze")
 async def analyze(body: AnalyzeBody) -> dict:
     try:
@@ -48,6 +68,21 @@ async def analyze(body: AnalyzeBody) -> dict:
     except PricingError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     return out
+
+
+@app.post("/api/portfolio/pnl")
+async def pnl(body: PnlBody) -> dict:
+    from portfolio.pricing import latest_price
+    from portfolio.realized import compute_pnl
+
+    try:
+        return compute_pnl(
+            [t.model_dump() for t in body.trades],
+            [h.model_dump() for h in body.holdings],
+            lambda code: latest_price(code, body.natural_day),
+        )
+    except PricingError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
 
 
 if __name__ == "__main__":
