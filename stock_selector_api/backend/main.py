@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from config import settings, BACKEND_DIR
+from api.app_version import APP_VERSION, router as app_version_router
 from api.external import router as external_router
 from api.v1.router import api_router
 from api.v1.portfolio import router as portfolio_router
@@ -87,6 +88,8 @@ def create_app() -> FastAPI:
     from api.ws_notify import router as ws_router
 
     app.include_router(ws_router)
+    # M5 公开版本检查（uniapp 启动升级）：/api/app/latest · /api/app/version
+    app.include_router(app_version_router)
 
     # 托管无构建前端（若 frontend/static 存在）
     if FRONTEND_DIR.is_dir():
