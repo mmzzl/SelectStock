@@ -83,6 +83,10 @@ def create_app() -> FastAPI:
     app.include_router(portfolio_router, prefix="/api")
     # M3 外部调度契约：POST /api/external/portfolio/diag
     app.include_router(external_router, prefix="/api")
+    # M2 WS 通知端点：/ws/notify（首帧鉴权 → hello → ping/pong；须在静态挂载之前）
+    from api.ws_notify import router as ws_router
+
+    app.include_router(ws_router)
 
     # 托管无构建前端（若 frontend/static 存在）
     if FRONTEND_DIR.is_dir():
