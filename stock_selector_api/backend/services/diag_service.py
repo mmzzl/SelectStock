@@ -10,7 +10,7 @@ import time
 
 from core.exceptions import BizError
 from repositories import holdings_repo, portfolio_results, portfolio_runs
-from services import portfolio_plugin
+from services import inbox_notify, portfolio_plugin
 
 logger = logging.getLogger("diag_service")
 
@@ -125,12 +125,23 @@ async def _run_diag(run_id: str, user_id: str, natural_day: str, key: tuple) -> 
             "total_pnl": float(summary.get("total_pnl", 0.0)),
             "plugin_time_ms": plugin_ms,
         })
+        await inbox_notify.notify_user(
+            user_id, "portfolio_diag_completed", "持仓诊断完成",
+            f"共诊断 {len(plugin_out['results'])} 只持仓，建议卖出 "
+            f"{summary.get('action_counts', {}).get('sell', 0)} 只",
+            related_type="portfolio_diag_runs", related_id=run_id)
     except Exception as exc:  # noqa: BLE001
         logger.exception("外部诊断失败: %s", run_id)
         try:
             await portfolio_runs.update(run_id, {"status": "failed", "error": str(exc)[:512]})
         except Exception as uexc:  # noqa: BLE001
             logger.error("写入失败状态也失败: %s: %s", run_id, uexc)
+        try:
+            await inbox_notify.notify_user(
+                user_id, "portfolio_diag_failed", "持仓诊断失败", str(exc)[:512],
+                related_type="portfolio_diag_runs", related_id=run_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("诊断失败通知发送失败: %s", run_id)
     finally:
         _RUNNING.discard(key)
 
