@@ -11,6 +11,7 @@ from db.sql.portfolio import PortfolioDiagResult, PortfolioDiagRun
 from db.sql.holdings import Holding
 from db.sql.trades import TradeRecord
 from db.sql.inbox import InboxMessage
+from db.sql.selection import SelectJob, SelectResult
 
 __all__ = [
     "Base",
@@ -28,6 +29,8 @@ __all__ = [
     "Holding",
     "TradeRecord",
     "InboxMessage",
+    "SelectJob",
+    "SelectResult",
     "user_roles",
     "role_permissions",
 ]
