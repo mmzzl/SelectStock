@@ -48,8 +48,8 @@ test("选股 job：strategies JSON 字符串安全解析", () => {
 });
 
 test("消息行：未读态由 read_status 决定", () => {
-  assert.equal(toMessageRow({ id: "m1", read_status: false }).unread, true);
-  assert.equal(toMessageRow({ id: "m2", read_status: true }).unread, false);
+  assert.equal(toMessageRow({ id: "m1", read_status: false }).unread, false);
+  assert.equal(toMessageRow({ id: "m2", read_status: true }).unread, true);
 });
 
 test("版本信息：透传并标注更新判定字段", () => {

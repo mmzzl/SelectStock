@@ -73,7 +73,7 @@ export function toSelectionResultRow(s) {
 export function toMessageRow(s) {
   return {
     id: s.id, eventCode: s.event_code || "", title: s.title || "", content: s.content || "",
-    unread: !s.read_status,
+    unread: Boolean(s.read_status),   // 后端 read_status: True=未读（read_at is None）
     createdAt: s.created_at || null,
   };
 }
