@@ -28,7 +28,10 @@ def _test_env(tmp_path_factory):
     settings.schedule_enabled = False
     settings.plugin_mode = "mock"
     settings.selection_plugin_mode = "mock"
-    settings.upgrade_upload_dir = str(tmp_path_factory.mktemp("upgrade") / "upgrade")
+    # as_posix()：保持「路径含 /upgrade」契约（test_config_keys），与 config.py 默认值行为一致
+    from pathlib import Path as _P
+
+    settings.upgrade_upload_dir = _P(str(tmp_path_factory.mktemp("upgrade") / "upgrade")).as_posix()
     settings.notify_channels_file = str(tmp_path_factory.mktemp("ch") / "channels.json")
     settings.notify_policy_file = str(tmp_path_factory.mktemp("po") / "policy.json")
     settings.notify_state_file = str(tmp_path_factory.mktemp("st") / "state.json")
