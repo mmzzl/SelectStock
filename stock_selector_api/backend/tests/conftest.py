@@ -28,6 +28,7 @@ def _test_env(tmp_path_factory):
     settings.schedule_enabled = False
     settings.plugin_mode = "mock"
     settings.selection_plugin_mode = "mock"
+    settings.upgrade_upload_dir = str(tmp_path_factory.mktemp("upgrade") / "upgrade")
     settings.notify_channels_file = str(tmp_path_factory.mktemp("ch") / "channels.json")
     settings.notify_policy_file = str(tmp_path_factory.mktemp("po") / "policy.json")
     settings.notify_state_file = str(tmp_path_factory.mktemp("st") / "state.json")
