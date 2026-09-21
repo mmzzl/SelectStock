@@ -12,6 +12,7 @@ from api.v1 import (
     devices,
     holdings,
     trades,
+    messages,
 )
 from core.dependencies import ensure_password_current
 
@@ -36,5 +37,8 @@ api_router.include_router(holdings.router, dependencies=_password_gate)
 
 # —— 交易记录 / 交割单导入模块 ——
 api_router.include_router(trades.router, dependencies=_password_gate)
+
+# —— 站内信模块 ——
+api_router.include_router(messages.router, dependencies=_password_gate)
 
 # 新增模块后追加：api_router.include_router(your_module_router)
