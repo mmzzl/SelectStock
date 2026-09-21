@@ -1,0 +1,32 @@
+// uniapp/src/composables/useClient.js
+import { createClient } from "../api/client.js";
+import { holdingsApi } from "../api/holdings.js";
+import { tradesApi } from "../api/trades.js";
+import { selectionApi } from "../api/selection.js";
+import { messagesApi } from "../api/messages.js";
+import { upgradeApi } from "../api/upgrade.js";
+import { loadSession, clearSession, setSession } from "../store/session.js";
+
+const BASE = globalThis.__VITE_API_BASE__ || "";
+
+let _cached = null;
+export function useClient() {
+  if (_cached) return _cached;
+  const client = createClient({
+    baseUrl: BASE,
+    getToken: () => loadSession().token,
+    onUnauthorized: () => {
+      clearSession();
+      globalThis.uni?.reLaunch?.({ url: "/pages/login/index" });
+    },
+  });
+  _cached = {
+    client, setSession,
+    holdings: holdingsApi(client),
+    trades: tradesApi(client),
+    selection: selectionApi(client),
+    messages: messagesApi(client),
+    upgrade: upgradeApi(client),
+  };
+  return _cached;
+}
