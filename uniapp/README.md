@@ -26,4 +26,4 @@
 
 ## 风险
 - 离线装包：结构 + 纯逻辑可验证，UI 打包留待联网。
-- 契约以 backend 实际代码为准（已修正：诊断明细路由为 `/api/v1/portfolio/diag/{run_id}`；`read_status: true` 表示未读）。
+- 契约以 backend 实际代码为准（已修正：诊断历史/明细路由为 `/api/portfolio/runs`、`/api/portfolio/diag/{run_id}`（无 v1 前缀）；`read_status: true` 表示未读）。

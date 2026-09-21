@@ -15,6 +15,7 @@ onShow(async () => {
     runs.value = (data.items || []).map(toSelectionJobRow);
   } catch (e) { err.value = e.message; }
 });
+const ST_TEXT = { done: "完成", running: "进行中", queued: "排队中", failed: "失败" };
 async function toggle(j) {
   expanded.value = expanded.value === j.jobId ? null : j.jobId;
   if (expanded.value) {
@@ -29,11 +30,29 @@ async function toggle(j) {
   <view class="p">
     <text v-if="err" class="err">{{ err }}</text>
     <view v-for="j in runs" :key="j.jobId" class="card" @click="toggle(j)">
-      <text>{{ j.createdAt || '' }} · {{ j.status }} · {{ j.strategies.join('/') }} · {{ j.resultCount }} 条</text>
+      <view class="row1">
+        <text>{{ j.strategies.join('/') || '全部策略' }}</text>
+        <text class="st" :class="j.status"><text class="dot" />{{ ST_TEXT[j.status] || j.status }}</text>
+      </view>
+      <view class="row1" style="margin-top:4rpx">
+        <text class="time">{{ j.createdAt || '' }}</text>
+        <text class="reason">{{ j.resultCount }} 条结果</text>
+      </view>
       <view v-if="expanded === j.jobId">
-        <view v-for="r in detailResults" :key="r.code">{{ r.name }}（{{ r.code }}）{{ r.signal }}</view>
+        <view v-for="r in detailResults" :key="r.code" class="sub">
+          <text class="badge sig">{{ r.signal }}</text>
+          <text>{{ r.name }}（{{ r.code }}）</text>
+        </view>
+        <view v-if="!detailResults.length" class="reason" style="padding:10rpx 0">暂无结果明细</view>
       </view>
     </view>
     <view v-if="!runs.length" class="empty">暂无选股记录</view>
   </view>
 </template>
+<style>
+.sub {
+  display: flex; align-items: center; gap: 16rpx;
+  border-top: 2rpx solid #f0f2f7; padding: 16rpx 0 4rpx;
+}
+.sub text { margin: 0; }
+</style>

@@ -43,16 +43,52 @@ function startPoll(jobId) {
 const goHistory = () => uni.navigateTo({ url: "/pages/selection/history" });
 </script>
 <template>
-  <view class="p">
-    <view v-for="s in strategies" :key="s" class="chip" :class="{ on: chosen.includes(s) }"
-          @click="chosen = chosen.includes(s) ? chosen.filter(x => x !== s) : [...chosen, s]">{{ s }}</view>
-    <button :disabled="polling" @click="trigger">{{ polling ? "选股中…" : "开始选股" }}</button>
-    <button size="mini" @click="goHistory">历史回看</button>
-    <text v-if="err" class="err">{{ err }}</text>
-    <view v-for="r in results" :key="r.code" class="card">
-      <text>{{ r.name }}（{{ r.code }}）信号：{{ r.signal }}</text>
-      <text class="reason">{{ r.reason }}</text>
+  <view>
+    <view class="band">
+      <view class="band-in">
+        <view>
+          <view class="bt">智能选股</view>
+          <view class="bs">选择策略后触发 · 结果由选股插件产出</view>
+        </view>
+        <button class="band-btn" @click="goHistory">历史回看</button>
+      </view>
     </view>
-    <view v-if="job && !results.length && job.status !== 'done'" class="empty">任务 {{ job.status }}…</view>
+
+    <view class="p">
+      <view class="card">
+        <view class="sec" style="margin-top:0">选择策略（不选则全部）</view>
+        <view>
+          <view v-for="s in strategies" :key="s" class="chip" :class="{ on: chosen.includes(s) }"
+                @click="chosen = chosen.includes(s) ? chosen.filter(x => x !== s) : [...chosen, s]">{{ s }}</view>
+          <text v-if="!strategies.length" class="reason">策略列表加载中或插件不可用</text>
+        </view>
+        <button class="btn-big" :disabled="polling" @click="trigger">
+          {{ polling ? "选股中，请稍候…" : "开 始 选 股" }}
+        </button>
+        <view v-if="job" class="row1" style="margin-top:8rpx">
+          <text class="st" :class="job.status"><text class="dot" />任务 {{ job.status }}</text>
+          <text class="time">{{ job.jobId }}</text>
+        </view>
+      </view>
+
+      <text v-if="err" class="err">{{ err }}</text>
+
+      <view v-if="results.length" class="sec">选股结果（{{ results.length }} 只）</view>
+      <view v-for="(r, i) in results" :key="r.code" class="card">
+        <view class="row1">
+          <text><text class="rank">{{ i + 1 }}</text> {{ r.name }}（{{ r.code }}）</text>
+          <text class="badge sig">{{ r.signal }}</text>
+        </view>
+        <text class="reason">{{ r.reason }}</text>
+      </view>
+      <view v-if="job && !results.length && polling" class="empty">全市场扫描中，请稍候…</view>
+    </view>
   </view>
 </template>
+<style>
+.rank {
+  display: inline-block; width: 40rpx; height: 40rpx; line-height: 40rpx;
+  text-align: center; border-radius: 10rpx;
+  background: #eef3ff; color: #2b5cff; font-size: 24rpx; font-weight: 700;
+}
+</style>

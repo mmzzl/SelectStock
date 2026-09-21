@@ -28,7 +28,8 @@ page {
   display: block;
   margin: 8rpx 0;
 }
-.card text:first-child {
+.card > text:first-child,
+.row1 > text:first-child {
   font-size: 32rpx;
   font-weight: 600;
   color: #1f2329;
@@ -149,4 +150,103 @@ button[disabled] {
 .unread {
   color: #1f2329;
   font-weight: 700;
+}
+
+/* ---------- Tab 页顶部渐变横幅 ---------- */
+.band {
+  background: linear-gradient(135deg, #2b5cff, #5b8cff);
+  color: #fff;
+  padding: 48rpx 40rpx 96rpx;
+}
+.band-in { display: flex; align-items: center; justify-content: space-between; }
+.band .bt { font-size: 40rpx; font-weight: 700; letter-spacing: 2rpx; }
+.band .bs { font-size: 24rpx; opacity: 0.85; margin-top: 8rpx; }
+.band .band-btn {
+  background: rgba(255, 255, 255, 0.22); color: #fff;
+  border-radius: 999rpx; padding: 10rpx 30rpx; font-size: 24rpx; margin: 0;
+  border: 2rpx solid rgba(255, 255, 255, 0.45);
+}
+
+/* 宫格快捷菜单（上探覆盖横幅底部） */
+.menu-grid {
+  display: flex; background: #fff; border-radius: 24rpx;
+  margin: -56rpx 28rpx 8rpx; padding: 30rpx 0 22rpx;
+  box-shadow: 0 8rpx 28rpx rgba(31, 35, 41, 0.07);
+  max-width: 824px;
+}
+.mi { flex: 1; text-align: center; }
+.mi:active { opacity: 0.7; }
+.mi .ic {
+  width: 76rpx; height: 76rpx; border-radius: 50%;
+  margin: 0 auto 12rpx; display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 32rpx; font-weight: 600;
+}
+.mi .mt { font-size: 24rpx; color: #5c6470; }
+.ic.b1 { background: linear-gradient(135deg, #2b5cff, #5b8cff); }
+.ic.b2 { background: linear-gradient(135deg, #1fa35f, #4cc98a); }
+.ic.b3 { background: linear-gradient(135deg, #ff9f2e, #ffc06a); }
+.ic.b4 { background: linear-gradient(135deg, #8a5cf6, #b08cff); }
+
+/* 卡片首行：左标题右徽章 */
+.row1 { display: flex; align-items: center; justify-content: space-between; }
+
+/* 建议/方向徽章 */
+.badge {
+  font-size: 22rpx; padding: 6rpx 20rpx; border-radius: 999rpx; font-weight: 400;
+  flex-shrink: 0; margin: 0; display: inline-block;
+}
+.badge.sell { color: #e64545; background: #fdecec; }
+.badge.hold { color: #2b5cff; background: #eef3ff; }
+.badge.add  { color: #1fa35f; background: #e8f7ee; }
+.badge.none { color: #8a919f; background: #f0f2f7; }
+.badge.buy  { color: #e64545; background: #fdecec; }
+.badge.sig  { color: #8a5cf6; background: #f1ecfd; }
+
+/* 涨跌色（A股习惯：红涨绿跌） */
+.up { color: #e64545 !important; }
+.down { color: #1fa35f !important; }
+
+/* 三列统计 */
+.kv3 { display: flex; margin-top: 14rpx; }
+.kv3 .k { flex: 1; text-align: center; }
+.kv3 .n { display: block; font-size: 34rpx; font-weight: 700; color: #1f2329; }
+.kv3 .l { font-size: 22rpx; color: #8a919f; }
+.kv3 .k + .k { border-left: 2rpx solid #f0f2f7; }
+
+/* 状态点 */
+.st { display: inline-flex; align-items: center; gap: 12rpx; font-size: 24rpx; color: #5c6470; }
+.st .dot { width: 16rpx; height: 16rpx; border-radius: 50%; background: #8a919f; display: inline-block; margin: 0; }
+.st.completed .dot, .st.done .dot { background: #1fa35f; }
+.st.running .dot, .st.queued .dot { background: #2b5cff; animation: pulse 1s infinite; }
+.st.failed .dot { background: #e64545; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+/* 未读红点 */
+.dot-red, .card .dot-red {
+  width: 16rpx; height: 16rpx; border-radius: 50%;
+  background: #e64545; display: inline-block; margin: 0 14rpx 0 0; flex-shrink: 0;
+}
+
+/* 时间戳 */
+.time { font-size: 22rpx; color: #a2a9b5; flex-shrink: 0; margin: 0; }
+
+/* 区块标题 */
+.sec {
+  font-size: 26rpx; color: #5c6470; font-weight: 600;
+  margin: 30rpx 4rpx 14rpx;
+}
+
+/* 大主按钮 */
+.btn-big {
+  width: 100%; line-height: 3.1; margin: 24rpx 0 8rpx;
+  background: linear-gradient(90deg, #2b5cff, #5b8cff);
+  color: #fff; border-radius: 18rpx; font-size: 32rpx; letter-spacing: 6rpx;
+  box-shadow: 0 10rpx 26rpx rgba(43, 92, 255, 0.28);
+}
+.btn-big[disabled] { opacity: 0.55; box-shadow: none; }
+
+/* 成功提示 */
+.ok {
+  display: block; color: #1fa35f; background: #e8f7ee;
+  border-radius: 12rpx; padding: 14rpx 20rpx; margin: 18rpx 0; font-size: 26rpx;
 }

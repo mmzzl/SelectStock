@@ -10,7 +10,7 @@ import { loadSession } from "../../store/session.js";
 const rows = ref([]); const unread = ref(0); const loaded = ref(false);
 const err = ref("");
 const { messages } = useClient();
-const WS_URL = globalThis.__VITE_WS_URL__ || "ws://127.0.0.1:8000/ws/notify";
+const WS_URL = globalThis.__VITE_WS_URL__ || "ws://127.0.0.1:18080/ws/notify";
 let sock = null;
 
 async function reload(sinceId) {
@@ -58,16 +58,40 @@ async function readAll() {
 }
 </script>
 <template>
-  <view class="p">
-    <view class="bar">
-      <text>未读 {{ unread }}</text>
-      <button size="mini" @click="readAll">全部已读</button>
+  <view>
+    <view class="band">
+      <view class="band-in">
+        <view>
+          <view class="bt">消息中心</view>
+          <view class="bs">
+            <text v-if="unread">{{ unread }} 条未读</text>
+            <text v-else>全部已读</text>
+          </view>
+        </view>
+        <button class="band-btn" @click="readAll">全部已读</button>
+      </view>
     </view>
-    <text v-if="err" class="err">{{ err }}</text>
-    <view v-for="m in rows" :key="m.id" class="card" @click="read(m)">
-      <text :class="{ unread: m.unread }">{{ m.title }}</text>
-      <text class="reason">{{ m.content }}</text>
+
+    <view class="p">
+      <text v-if="err" class="err">{{ err }}</text>
+      <view v-for="m in rows" :key="m.id" class="card msg" @click="read(m)">
+        <view class="row1">
+          <view class="msg-t">
+            <text v-if="m.unread" class="dot-red" />
+            <text class="title" :class="{ unread: m.unread }">{{ m.title }}</text>
+          </view>
+          <text class="time">{{ m.createdAt || "" }}</text>
+        </view>
+        <text class="reason">{{ m.content }}</text>
+      </view>
+      <view v-if="loaded && !rows.length" class="empty">
+        <view>暂无消息</view>
+        <view class="reason">诊断/选股完成等事件会自动送达</view>
+      </view>
     </view>
-    <view v-if="loaded && !rows.length" class="empty">暂无消息</view>
   </view>
 </template>
+<style>
+.msg .msg-t { display: flex; align-items: center; flex: 1; overflow: hidden; }
+.msg .title { font-size: 30rpx; color: #1f2329; }
+</style>
