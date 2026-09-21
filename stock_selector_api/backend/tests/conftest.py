@@ -27,6 +27,7 @@ def _test_env(tmp_path_factory):
     settings.database_url = None  # get_engine 被替换，此值不再使用
     settings.schedule_enabled = False
     settings.plugin_mode = "mock"
+    settings.selection_plugin_mode = "mock"
     settings.notify_channels_file = str(tmp_path_factory.mktemp("ch") / "channels.json")
     settings.notify_policy_file = str(tmp_path_factory.mktemp("po") / "policy.json")
     settings.notify_state_file = str(tmp_path_factory.mktemp("st") / "state.json")
