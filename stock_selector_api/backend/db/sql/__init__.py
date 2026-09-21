@@ -10,6 +10,7 @@ from db.sql.password_history import PasswordHistory
 from db.sql.portfolio import PortfolioDiagResult, PortfolioDiagRun
 from db.sql.holdings import Holding
 from db.sql.trades import TradeRecord
+from db.sql.inbox import InboxMessage
 
 __all__ = [
     "Base",
@@ -26,6 +27,7 @@ __all__ = [
     "PortfolioDiagResult",
     "Holding",
     "TradeRecord",
+    "InboxMessage",
     "user_roles",
     "role_permissions",
 ]

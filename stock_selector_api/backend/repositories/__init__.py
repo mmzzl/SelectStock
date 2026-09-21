@@ -18,6 +18,7 @@ from repositories.rbac import RbacRepo
 from repositories.portfolio import PortfolioDiagResultRepo, PortfolioDiagRunRepo
 from repositories.holdings import HoldingRepo, holdings_repo
 from repositories.trades import TradeRepo, trades_repo
+from repositories.inbox import InboxRepo, inbox_repo
 
 # 单例（各自持有无状态方法，可安全复用）
 users = UserRepo()
@@ -41,5 +42,5 @@ __all__ = [
     "PortfolioDiagRunRepo", "PortfolioDiagResultRepo", "HoldingRepo", "TradeRepo",
     "users", "roles", "permissions", "menus", "devices", "sessions", "captchas",
     "login_locks", "password_history", "rbac", "portfolio_runs", "portfolio_results",
-    "holdings_repo", "trades_repo",
+    "holdings_repo", "trades_repo", "inbox_repo",
 ]
