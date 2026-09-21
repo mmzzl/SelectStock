@@ -1,0 +1,152 @@
+/* uniapp/src/styles/common.css —— 全局样式系统（H5/App 通用，rpx 单位） */
+
+page {
+  background: #f4f6fb;
+  color: #1f2329;
+  font-size: 28rpx;
+  line-height: 1.6;
+}
+
+/* 页面容器：桌面宽度收口居中 */
+.p {
+  padding: 28rpx;
+  padding-bottom: 60rpx;
+  max-width: 880px;
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+
+/* 卡片 */
+.card {
+  background: #fff;
+  border-radius: 20rpx;
+  padding: 26rpx;
+  margin: 22rpx 0;
+  box-shadow: 0 4rpx 18rpx rgba(31, 35, 41, 0.06);
+}
+.card text {
+  display: block;
+  margin: 8rpx 0;
+}
+.card text:first-child {
+  font-size: 32rpx;
+  font-weight: 600;
+  color: #1f2329;
+}
+
+/* 次级说明文字 */
+.reason {
+  color: #8a919f;
+  font-size: 24rpx;
+}
+
+/* 顶部工具条 */
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16rpx;
+  background: #fff;
+  border-radius: 20rpx;
+  padding: 20rpx;
+  box-shadow: 0 4rpx 18rpx rgba(31, 35, 41, 0.06);
+}
+.bar input {
+  flex: 0 0 auto;
+  min-width: 160rpx;
+  background: #f4f6fb;
+  border-radius: 12rpx;
+  padding: 12rpx 20rpx;
+}
+.bar picker text {
+  color: #2b5cff;
+  padding: 12rpx 20rpx;
+  background: #eef3ff;
+  border-radius: 12rpx;
+}
+
+/* 表单 */
+.form {
+  background: #fff;
+  border-radius: 20rpx;
+  padding: 26rpx;
+  margin: 22rpx 0;
+  box-shadow: 0 4rpx 18rpx rgba(31, 35, 41, 0.06);
+}
+.form input {
+  background: #f4f6fb;
+  border-radius: 12rpx;
+  padding: 18rpx 22rpx;
+  margin: 14rpx 0;
+}
+.form picker {
+  display: block;
+  background: #f4f6fb;
+  border-radius: 12rpx;
+  padding: 18rpx 22rpx;
+  margin: 14rpx 0;
+}
+
+/* 按钮统一 */
+button {
+  background: #2b5cff;
+  color: #fff;
+  border-radius: 14rpx;
+  font-size: 28rpx;
+  margin: 14rpx 0;
+  line-height: 2.6;
+}
+button[mini],
+button.size-mini,
+.bar button {
+  margin: 0;
+  line-height: 2;
+  font-size: 24rpx;
+}
+.bar button:not([type]) {
+  background: #eef3ff;
+  color: #2b5cff;
+}
+button[disabled] {
+  opacity: 0.5;
+}
+
+/* 策略选择 chip */
+.chip {
+  display: inline-block;
+  padding: 10rpx 28rpx;
+  margin: 8rpx 12rpx 8rpx 0;
+  border-radius: 999rpx;
+  background: #fff;
+  color: #5c6470;
+  border: 2rpx solid #e2e6ef;
+  font-size: 26rpx;
+}
+.chip.on {
+  background: #2b5cff;
+  color: #fff;
+  border-color: #2b5cff;
+}
+
+/* 错误 / 空态 */
+.err {
+  display: block;
+  color: #e64545;
+  background: #fdecec;
+  border-radius: 12rpx;
+  padding: 14rpx 20rpx;
+  margin: 18rpx 0;
+  font-size: 26rpx;
+}
+.empty {
+  text-align: center;
+  color: #a2a9b5;
+  padding: 80rpx 0;
+  font-size: 26rpx;
+}
+
+/* 消息未读强化 */
+.unread {
+  color: #1f2329;
+  font-weight: 700;
+}

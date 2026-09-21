@@ -14,7 +14,17 @@
     { "path": "pages/mine/index", "style": { "navigationBarTitleText": "我的" } },
     { "path": "pages/mine/password", "style": { "navigationBarTitleText": "修改密码" } }
   ],
+  "globalStyle": {
+    "navigationBarTitleText": "智能选股",
+    "navigationBarBackgroundColor": "#ffffff",
+    "navigationBarTextStyle": "black",
+    "backgroundColor": "#f4f6fb"
+  },
   "tabBar": {
+    "color": "#8a919f",
+    "selectedColor": "#2b5cff",
+    "backgroundColor": "#ffffff",
+    "borderStyle": "black",
     "list": [
       { "pagePath": "pages/holdings/index", "text": "持仓" },
       { "pagePath": "pages/selection/index", "text": "选股" },

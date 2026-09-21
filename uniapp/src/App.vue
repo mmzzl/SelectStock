@@ -28,3 +28,6 @@ export default {
 };
 </script>
 <template><view /></template>
+<style>
+@import "./styles/common.css";
+</style>
