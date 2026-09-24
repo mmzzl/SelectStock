@@ -8,6 +8,18 @@ function parseStrList(raw) {
   try { const v = JSON.parse(raw); return Array.isArray(v) ? v : []; } catch { return []; }
 }
 
+// 后端时间戳是 naive UTC（datetime.utcnow），直接展示会差 8 小时且带微秒尾巴；
+// 这里统一转本地时间并压到分钟精度。已带时区的字符串按原样解析。
+export function fmtTime(raw) {
+  if (!raw) return "";
+  const s = String(raw).trim().replace(" ", "T");
+  const t = Date.parse(/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s) ? s : s + "Z");
+  if (Number.isNaN(t)) return String(raw);
+  const d = new Date(t);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 export function toHoldingRow(s) {
   return {
     code: s.code,
@@ -67,7 +79,20 @@ export function toSelectionJobRow(s) {
 }
 
 export function toSelectionResultRow(s) {
-  return { code: s.code, name: s.name || s.code, signal: s.signal || "", reason: s.reason || "" };
+  return {
+    code: s.code, name: s.name || s.code, signal: s.signal || "", reason: s.reason || "",
+    // 选股插件 P1 富化字段；后端列名 rank_no（rank 是 SQL 保留字），这里统一回 rank
+    strategy: s.strategy || s.signal || "", asof: s.asof || "",
+    price: num(s.price), score: num(s.score), rank: num(s.rank ?? s.rank_no),
+  };
+}
+
+/** 插件 /strategy-detail 的一行 → 前端选项。中文标签只来自 description，不硬编码策略名。 */
+export function toStrategyOption(d) {
+  return {
+    name: d.name || "", label: (d.description || "").split("：")[0] || d.name || "",
+    desc: d.description || "", requiredRows: num(d.required_rows), asOf: Boolean(d.as_of),
+  };
 }
 
 export function toMessageRow(s) {

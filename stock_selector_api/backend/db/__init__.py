@@ -17,6 +17,7 @@ async def create_all() -> None:
             await conn.run_sync(Base.metadata.create_all)
             await conn.run_sync(_ensure_user_password_changed_at)
             await conn.run_sync(_ensure_holdings_derived_columns)
+            await conn.run_sync(_ensure_select_result_columns)
         log.info("SQLite 建表完成")
     else:
         from db.mongo.indexes import ensure_indexes
@@ -47,6 +48,20 @@ def _ensure_holdings_derived_columns(sync_conn) -> None:
     for col, ddl in (("derived_from_trades", "BOOLEAN"), ("last_derived_at", "DATETIME")):
         if col not in cols:
             sync_conn.execute(text(f"ALTER TABLE holdings ADD COLUMN {col} {ddl}"))
+
+
+def _ensure_select_result_columns(sync_conn) -> None:
+    """老库补列：select_results 承接选股插件的富化字段（幂等）。
+
+    插件侧字段叫 rank，但 rank 是 SQL 保留字（窗口函数），落库列名为 rank_no。
+    """
+    from sqlalchemy import inspect, text
+
+    cols = {c["name"] for c in inspect(sync_conn).get_columns("select_results")}
+    for col, ddl in (("strategy", "VARCHAR(64) DEFAULT ''"), ("asof", "VARCHAR(16) DEFAULT ''"),
+                     ("price", "FLOAT"), ("score", "FLOAT"), ("rank_no", "INTEGER")):
+        if col not in cols:
+            sync_conn.execute(text(f"ALTER TABLE select_results ADD COLUMN {col} {ddl}"))
 
 
 async def init_database() -> None:

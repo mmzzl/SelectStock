@@ -152,13 +152,24 @@ uniapp  ──/api/v1/selection/*──►  后端 stock_selector_api  ──HTT
 后端 `services/selection_service.py` 的消费方式决定了返回结构不能随意改：
 
 - `GET /api/strategy/list` 的 `data` **必须是 `list[str]`**，后端直接 `list(...)` 当下拉数据源。
-- `POST /api/selector/run` 后端目前只映射 `code/name/signal/reason` 四个字段（`signal` 缺省回落到 `action`），
-  落库到 `select_results`（也只有这 4 列），httpx 超时 600s。
-  插件新增的 `strategy/asof/price/score/rank` 会被后端**直接丢弃**，要上屏必须补后端列与前端映射。
+- `GET /api/strategy/detail` 由后端 `GET /api/v1/selection/strategy-detail` 透传（mock 模式返回内置
+  假数据），前端用它把英文策略名映射成中文短标签，客户端不硬编码策略名。
+- `POST /api/selector/run` 后端映射 `code/name/signal/reason` + P1 富化字段
+  `strategy/asof/price/score/rank`（`signal` 缺省回落到 `action`），落库到 `select_results`，
+  httpx 超时 600s。`rank` 是 SQL 保留字，**列名/API 字段名为 `rank_no`**，
+  由 uniapp `logic/view.js` 归一回 `rank`。
 - 后端 job 状态机 `queued/running/done/failed`，`_inflight` 单飞（同一时刻只有一个选股在跑）。
 
 因此**扩充返回字段是一次三方联动**：插件 `SelectResult` → 后端 `select_results` 的幂等 `ALTER TABLE`
 → uniapp `logic/view.js` 的展示映射。改结构请三处同步，否则新字段会被后端丢弃、前端不可见。
+后端落库是**写入白名单**（`SelectResultCreate` 未声明的字段静默丢弃），所以加字段必须同时改
+`db/sql/selection.py`、`schemas/selection.py`、`selection_service._http_run` 三处。
+
+本地起一套互不干扰的验证链路：插件 `python -m stock_selector.main --port 18003`；
+后端 `SELECTION_PLUGIN_BASE_URL=http://127.0.0.1:18003 DATABASE_URL=... uvicorn main:app --port 18085`
+（注意 `backend/main.py` 的 `__main__` 分支写死 8000，换端口必须走 uvicorn 命令行）；
+前端 `VITE_PROXY_TARGET=http://127.0.0.1:18085 npx vite`（`vite.config.js` 的 `/api`、`/ws` 代理与
+WS 地址都由该变量派生，默认仍指向 18080）。
 
 ### 数据源（`stock_selector/config/settings.yaml` 的 `datasource.type`）
 
@@ -371,17 +382,33 @@ python scripts/backtest_main.py --strategy trend_rebound --universe 500 \
   静默拒掉（96 笔 → 59 笔，且更差），CLI 现在会在开跑前打这条警告。回测数字对参数极敏感，
   换参数就是另一个结论，不能把上面任一串数字当成对策略的评价。
 - 回归四套全绿：根目录 `tests/` **194 项**（含 21 项同源回测测试，其中"未来行情不能改变历史
-  as-of 判据"是防泄漏的关键断言）、后端 **157**、诊断插件 **24**、uniapp **37**。
+  as-of 判据"是防泄漏的关键断言）、后端 **162**、诊断插件 **24**、uniapp **39**。
   插件接口新增字段是**向后兼容**的（在 `extra` 之后追加带默认值的字段），因此后端/前端测试不受影响。
+- 全链路实测（本机，插件 18003 → 后端 18085 → App 5174，`trend_rebound` 单策略）：一次选股落库
+  **500 条**，`rank_no` 按 `score` 降序连续、`asof` 全部为数据最新交易日，App 选股页与历史回看页
+  截图核对通过（名次/中文策略标签/基准价/信号强度/基准交易日均已上屏）。
+
+### 前端字段贯通（P1-7）
+
+| 层 | 位置 | 作用 |
+|---|---|---|
+| 插件 | `SelectResult`（`strategy/asof/price/score/rank`） | 唯一产出方，所有算术在此完成 |
+| 后端建表 | `db/sql/selection.py` + `db/__init__.py::_ensure_select_result_columns` | 新列 + 幂等 `ALTER TABLE`，老库直接升级 |
+| 后端写入 | `schemas/selection.py::SelectResultCreate` | **写入白名单**，未声明字段静默丢弃 |
+| 后端转发 | `services/selection_service.py::_http_run` | 插件 `rank` → 列 `rank_no` |
+| 后端接口 | `GET /api/v1/selection/strategy-detail` | 透传插件策略元信息给客户端 |
+| 客户端 | `logic/view.js::toSelectionResultRow/toStrategyOption/fmtTime` | 纯映射，不做计算；`rank_no`→`rank`，UTC→本地分钟 |
+| 页面 | `pages/selection/index.vue`、`history.vue` | 名次徽标、中文标签、基准价/强度/基准交易日 |
+
+两个刻意为之的细节：`score` 用三位小数展示（相邻名次常只差 0.001，两位会全显示成 1.00 而看不出排序）；
+`created_at` 是 naive UTC，展示前转本地并压到分钟，否则比本机时间早 8 小时。
 
 ### 已知限制（截至 2026-09-24）
 
 已解决（P1）：判据同源、`score/rank/asof/price/strategy` 回填、策略声明所需列与行数
-（`required_columns/required_rows` + `prepare()`）、回测 `--start/--end` 被忽略的缺陷。仍存在的：
+（`required_columns/required_rows` + `prepare()`）、回测 `--start/--end` 被忽略的缺陷、
+**新字段贯通到后端落库与 App 上屏**（P1-7）。仍存在的：
 
-- **新字段没有走完整条调用链**：后端 `select_results` 只落 `code/name/signal/reason` 四列，
-  uniapp `logic/view.js` 同样只映射这四项，因此 `score/rank/asof` 目前只在 CLI 与 `/api/selector/run`
-  可见，App 上屏需要补后端列 + 前端映射。
 - **评分饱和**：`box_oscillate` 的 `score` 在强势突破票上普遍顶到 1.0，跨策略排序退化成粗排序
   （同分项只按代码序），展示名次不等于强度名次。要让排名有意义需要连续化打分（分位/幅度裁剪）。
 - **新鲜度靠手工跑 `build_kline_features.py` 保证**：结果所有 `asof` 都来自数据源最新交易日，

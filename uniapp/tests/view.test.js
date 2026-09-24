@@ -1,7 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { toHoldingRow, toTradeRow, toPnlView, toSelectionJobRow, toSelectionResultRow,
-         toMessageRow, toDiagRow, toPreviewRow, toUpgradeInfo } from "../src/logic/view.js";
+         toMessageRow, toDiagRow, toPreviewRow, toUpgradeInfo, fmtTime } from "../src/logic/view.js";
+
+test("时间格式化：naive UTC 转本地、压到分钟；带时区/非法值不崩", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const expect = execFileSync(process.execPath, ["-e",
+    "const d=new Date(Date.parse('2026-09-24T11:19:38.450105Z'));" +
+    "const p=n=>String(n).padStart(2,'0');" +
+    "process.stdout.write(`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`);",
+  ], { encoding: "utf8" });
+  assert.equal(fmtTime("2026-09-24T11:19:38.450105"), expect);
+  assert.equal(fmtTime("2026-09-24 11:19:38"), expect);   // 空格分隔同样按 UTC 解析
+  assert.equal(fmtTime("2026-09-24T19:19:38+08:00"), expect);  // 已带时区不再补 Z
+  assert.equal(fmtTime(""), "");
+  assert.equal(fmtTime("不是时间"), "不是时间");
+});
 
 test("持仓行：快照字段透传，不重算", () => {
   const s = { code: "600519", name: "贵州茅台", cost: 1680.5, shares: 100,
@@ -81,7 +95,21 @@ test("诊断行：字段映射透传", () => {
 });
 
 test("选股结果行：字段映射透传", () => {
-  const s = { code: "600519", name: "茅台", signal: "trend_rebound", reason: "MACD金叉" };
-  const row = toSelectionResultRow(s);
-  assert.deepEqual(row, { code: "600519", name: "茅台", signal: "trend_rebound", reason: "MACD金叉" });
+  const row = toSelectionResultRow({ code: "600519", name: "茅台", signal: "trend_rebound", reason: "MACD金叉" });
+  assert.deepEqual(row, {
+    code: "600519", name: "茅台", signal: "trend_rebound", reason: "MACD金叉",
+    strategy: "trend_rebound", asof: "", price: null, score: null, rank: null,
+  });
+});
+
+test("选股结果行：插件富化字段落到 camelCase", () => {
+  const row = toSelectionResultRow({
+    code: "000001", name: "平安银行", signal: "trend_rebound", reason: "回踩 MA20",
+    strategy: "trend_rebound", asof: "2026-09-24", price: "11.20", score: 0.62, rank_no: 3,
+  });
+  assert.equal(row.strategy, "trend_rebound");
+  assert.equal(row.asof, "2026-09-24");
+  assert.equal(row.price, 11.2);        // 字符串价格必须转成数值
+  assert.equal(row.score, 0.62);
+  assert.equal(row.rank, 3);            // 后端列名 rank_no → 前端 rank
 });

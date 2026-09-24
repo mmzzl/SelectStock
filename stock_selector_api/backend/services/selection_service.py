@@ -30,12 +30,47 @@ async def list_strategies() -> list[str]:
     return ["trend_rebound", "box_oscillate"]
 
 
+# 插件未启时的兜底元信息，字段形状与 GET /api/strategy/detail 保持一致
+_MOCK_STRATEGY_DETAILS = [
+    {"name": "trend_rebound", "description": "趋势回踩：均线多头排列，股价回踩均线企稳", "as_of": True,
+     "required_columns": ["date", "open", "high", "low", "close", "volume"], "required_rows": 30,
+     "params": {"period": 20, "pullback_pct": 0.05}},
+    {"name": "box_oscillate", "description": "箱体震荡：区间突破上沿买入", "as_of": True,
+     "required_columns": ["date", "open", "high", "low", "close", "volume"], "required_rows": 40,
+     "params": {"period": 30, "breakout_pct": 0.02}},
+]
+
+
+async def list_strategy_details() -> list[dict]:
+    """策略元信息（中文说明/取数需求），前端拿它做中文标签，避免在客户端硬编码策略名。"""
+    if settings.selection_plugin_mode == "http":
+        url = settings.selection_plugin_base_url.rstrip("/") + "/api/strategy/detail"
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            body = resp.json()
+        return list(body.get("data") or [])
+    return _MOCK_STRATEGY_DETAILS
+
+
 async def _mock_run(strategies: list[str]) -> list[dict]:
     """确定性模拟结果（测试/插件未启时）。"""
     return [
-        {"code": "600519", "name": "贵州茅台", "signal": "趋势回踩", "reason": "mock: MA20 上穿"},
-        {"code": "000858", "name": "五粮液", "signal": "箱体突破", "reason": "mock: 突破箱顶"},
+        {"code": "600519", "name": "贵州茅台", "signal": "趋势回踩", "reason": "mock: MA20 上穿",
+         "strategy": "trend_rebound", "asof": "2026-09-24", "price": 1480.0, "score": 0.82,
+         "rank_no": 1},
+        {"code": "000858", "name": "五粮液", "signal": "箱体突破", "reason": "mock: 突破箱顶",
+         "strategy": "box_oscillate", "asof": "2026-09-24", "price": 128.5, "score": 1.0,
+         "rank_no": 2},
     ]
+
+
+def _num(value, integer: bool = False):
+    """插件给的可能是 str/None，落库前收敛成数值或 None（rank 走整数口径）。"""
+    try:
+        return None if value in (None, "") else (int(float(value)) if integer else float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 async def _http_run(strategies: list[str]) -> list[dict]:
@@ -50,6 +85,11 @@ async def _http_run(strategies: list[str]) -> list[dict]:
         "name": str(it.get("name", "")),
         "signal": str(it.get("signal", "") or it.get("action", "")),
         "reason": str(it.get("reason", "")),
+        "strategy": str(it.get("strategy", "")),
+        "asof": str(it.get("asof", "")),
+        "price": _num(it.get("price")),
+        "score": _num(it.get("score")),
+        "rank_no": _num(it.get("rank"), integer=True),
     } for it in items if it.get("code")]
 
 

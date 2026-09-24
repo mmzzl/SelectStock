@@ -1,5 +1,5 @@
 # db/sql/selection.py
-from sqlalchemy import Integer, String
+from sqlalchemy import Float, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.sql.base import Base, IdMixin, TimestampMixin, new_uuid
@@ -25,3 +25,10 @@ class SelectResult(Base, IdMixin, TimestampMixin):
     name: Mapped[str] = mapped_column(String(64), default="")
     signal: Mapped[str] = mapped_column(String(64), default="")
     reason: Mapped[str] = mapped_column(String(1024), default="")
+    # 选股插件 P1 富化字段。rank 是 SQL 保留字（窗口函数），列名用 rank_no，
+    # API 原样返回 rank_no，由客户端 logic/view.js 归一为 rank。
+    strategy: Mapped[str] = mapped_column(String(64), default="")
+    asof: Mapped[str] = mapped_column(String(16), default="")      # 信号基准交易日
+    price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rank_no: Mapped[int | None] = mapped_column(Integer, nullable=True)

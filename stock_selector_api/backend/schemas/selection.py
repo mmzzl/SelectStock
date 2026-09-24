@@ -17,3 +17,9 @@ class SelectResultCreate(BaseModel):
     name: str = Field(default="", max_length=64)
     signal: str = Field(default="", max_length=64)
     reason: str = Field(default="", max_length=1024)
+    # 选股插件 P1 富化字段；rank_no 对应插件的 rank（rank 是 SQL 保留字）
+    strategy: str = Field(default="", max_length=64)
+    asof: str = Field(default="", max_length=16)
+    price: float | None = None
+    score: float | None = None
+    rank_no: int | None = None

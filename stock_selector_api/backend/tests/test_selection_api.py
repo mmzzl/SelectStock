@@ -36,6 +36,18 @@ async def test_selection_detail_not_found_for_other_user(client, admin_headers):
     assert r.status_code == 404
 
 
+async def test_strategy_detail_shape_matches_plugin(client, admin_headers):
+    """前端靠 description 出中文标签，字段形状必须与插件 /api/strategy/detail 一致。"""
+    r = await client.get("/api/v1/selection/strategy-detail", headers=admin_headers)
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert {d["name"] for d in data} >= {"trend_rebound", "box_oscillate"}
+    for d in data:
+        assert {"name", "description", "as_of", "required_columns", "required_rows", "params"} <= set(d)
+        assert "：" in d["description"]          # 短标签 = 冒号前缀，页面按此切分
+        assert d["as_of"] is True and d["required_rows"] > 0
+
+
 async def test_selection_requires_auth(client):
     r = await client.post("/api/v1/selection/run", json={"strategies": []})
     assert r.status_code in (401, 403)

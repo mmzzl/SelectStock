@@ -74,6 +74,59 @@ async def test_strategies_mock():
     assert set(await selection_service.list_strategies()) >= {"trend_rebound", "box_oscillate"}
 
 
+class _StubResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+class _StubClient:
+    """替掉 httpx.AsyncClient：只验字段映射，不发真实请求。"""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, json=None):
+        return _StubResponse({"code": 0, "data": [
+            {"code": "000001", "name": "平安银行", "signal": "trend_rebound", "reason": "回踩 MA20",
+             "strategy": "trend_rebound", "asof": "2026-09-24",
+             "price": "11.20", "score": 0.62, "rank": "1", "extra": {}},
+            {"code": "", "signal": "box_oscillate"},      # 无代码脏行必须丢掉
+        ]})
+
+
+async def test_http_run_maps_enriched_fields(monkeypatch):
+    monkeypatch.setattr(selection_service.httpx, "AsyncClient", _StubClient)
+    rows = await selection_service._http_run(["trend_rebound"])
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["strategy"], row["asof"]) == ("trend_rebound", "2026-09-24")
+    assert row["price"] == 11.2 and row["score"] == 0.62 and row["rank_no"] == 1
+
+
+async def test_http_run_tolerates_missing_enriched_fields(monkeypatch):
+    """老插件/别的实现不给富化字段时，落库必须是 None 而不是把整个任务打挂。"""
+    class _BareClient(_StubClient):
+        async def post(self, url, json=None):
+            return _StubResponse({"code": 0, "data": [{"code": "000002", "signal": "box_oscillate"}]})
+
+    monkeypatch.setattr(selection_service.httpx, "AsyncClient", _BareClient)
+    row = (await selection_service._http_run([]))[0]
+    assert row["price"] is None and row["score"] is None and row["rank_no"] is None
+    assert row["strategy"] == "" and row["asof"] == ""
+
+
 async def test_mock_run_failure_notifies(monkeypatch):
     async def boom(strategies):
         raise RuntimeError("boom")

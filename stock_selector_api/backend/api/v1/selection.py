@@ -18,6 +18,11 @@ async def strategies(user: CurrentUserDep):
     return ok(await selection_service.list_strategies())
 
 
+@router.get("/strategy-detail", summary="策略元信息（中文说明/取数需求）")
+async def strategy_detail(user: CurrentUserDep):
+    return ok(await selection_service.list_strategy_details())
+
+
 @router.post("/run", summary="触发选股（后台任务）")
 async def run(user: CurrentUserDep, body: RunIn):
     return ok(await selection_service.start_run(user.id, body.strategies), message="选股任务已创建")
