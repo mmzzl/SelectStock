@@ -2,9 +2,23 @@
 # 配置项分为三类：全局配置、数据源配置、策略参数
 
 # 数据源配置
-# type: ak => akshare 行情接口; 预留 file/db 等数据源，切换数据源不影响选股策略
+# type: parquet => 本地指标宽表 data/stock_kline（离线、与回测/诊断同源，默认）
+#       mongo   => 直连 MongoDB stock_kline（行情最新，但单只冷读约 0.5s，全市场需 40 分钟，只宜少量代码）
+#       ak      => akshare 行情接口（需可访问外网；本机实测东财接口已不可达）
+#       mock    => 内置模拟数据（仅演示/测试）
+# 切换数据源不影响选股策略代码
 datasource:
-  type: ak
+  type: parquet
+  # 本地指标宽表源（由 scripts/build_kline_features.py 生成，注意数据新鲜度）
+  parquet:
+    dir: "data/stock_kline"
+    # 剪列读取：全 36 列全市场约 420s，6 列约 160s（后端超时 600s）
+    # 指标/规则/模型类策略需在此追加对应指标列
+    columns: ["date", "open", "high", "low", "close", "volume"]
+    rows: 120            # 只取最近 N 个交易日（均线/箱体策略够用；0=全量）
+  # MongoDB 日线源：连接参数缺省时读 config/config.yaml 的 mongodb 节
+  mongo:
+    rows: 120
   # akshare 行情接口参数
   ak:
     start_date: "20240101"
@@ -18,7 +32,7 @@ selector:
   default_strategies: ["trend_rebound", "box_oscillate"]
   # 单股票处理失败时是否继续（稳定性保证）
   tolerate_errors: true
-  # 分批拉取股票数量上限（0 表示不限制）
+  # 股票池数量上限（0 表示不限制）
   stock_limit: 0
 
 # 策略参数（各策略插件可通过 self.config 读取）

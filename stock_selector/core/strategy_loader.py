@@ -26,9 +26,8 @@ class StrategyLoader:
             module = importlib.import_module(f"{strategies_pkg.__name__}.{mod_info.name}")
             for _, obj in inspect.getmembers(module, inspect.isclass):
                 if self._is_valid_strategy(obj):
-                    # 实例化以获取名称，避免重复注册
-                    instance = obj(config=self._params.get(obj.__name__.lower(), None))
-                    self._registry[instance.name] = obj
+                    # 探测实例仅用于取策略名，参数由 create() 统一注入
+                    self._registry[obj().name] = obj
         return self
 
     def _is_valid_strategy(self, cls) -> bool:

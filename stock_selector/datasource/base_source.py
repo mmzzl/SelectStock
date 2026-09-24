@@ -36,3 +36,14 @@ class BaseDataSource(ABC):
             pandas.DataFrame 或 None（无数据时）。
         """
         raise NotImplementedError
+
+    def name_of(self, code: str) -> str:
+        """股票名称兜底：股票列表未携带名称时，由数据源在取数后提供。"""
+        return ""
+
+    def max_date(self) -> str | None:
+        """本次取数覆盖到的最晚交易日，用于向调用方暴露数据新鲜度。"""
+        return None
+
+    def close(self) -> None:
+        """释放底层连接；无连接的数据源无需覆盖。"""
