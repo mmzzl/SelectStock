@@ -1,9 +1,16 @@
-"""回测 CLI：读取 trading_rules + parquet 指标，运行回测并落库。
+"""回测 CLI：两种策略来源，同一个引擎。
+
+1) 缺省：读取 MongoDB trading_rules 的 buy/sell/add 表达式驱动（规则策略）
+2) --strategy NAME：直接复用选股插件里的 as-of 策略，做到"选股与回测同源可验证"
 
 用法:
     python scripts/backtest_main.py \
         --start 2025-09-01 --end 2026-09-01 \
         --capital 100000 --max-positions 5 --position-cap-pct 0.2
+
+    # 用选股策略回测（出场走机械规则），只取前 300 只股票
+    python scripts/backtest_main.py --strategy trend_rebound --universe 300 \
+        --start 2026-01-01 --end 2026-09-01 --max-hold-days 10 --stop-loss-pct 0.05
 """
 
 import argparse
@@ -19,9 +26,11 @@ from pymongo import MongoClient
 
 from stock_selector.backtest.broker import Broker
 from stock_selector.backtest.engine import BacktestEngine
+from stock_selector.backtest.kernel_strategy import KernelStrategy
 from stock_selector.backtest.provider import ParquetProvider
 from stock_selector.backtest.rules import RulesStrategy
 from stock_selector.backtest.store import BacktestStore
+from stock_selector.core.selector import create_strategy
 
 
 def load_mongo_config() -> dict:
@@ -58,18 +67,33 @@ def run_backtest(args) -> dict:
     client = get_client()
     database = load_mongo_config()["mongodb"]["database"]
     try:
-        rules = load_rules(client, database)
-        if not rules["buy"] or not rules["sell"]:
-            raise SystemExit("缺少 buy/sell 规则，无法回测")
-
         provider = ParquetProvider(ROOT / "data" / "stock_kline")
-        strategy = RulesStrategy(
-            provider=provider,
-            buy_rule=rules["buy"],
-            sell_rule=rules["sell"],
-            add_rule=rules["add"],
-            target_amount=args.target_amount,
-        )
+
+        if args.strategy:
+            selection_strategy = create_strategy(args.strategy)
+            strategy = KernelStrategy(
+                strategy=selection_strategy,
+                provider=provider,
+                target_amount=args.target_amount,
+                universe=provider.codes()[: args.universe] if args.universe else None,
+                max_hold_days=args.max_hold_days,
+                stop_loss_pct=args.stop_loss_pct,
+                take_profit_pct=args.take_profit_pct,
+            )
+            strategy_name = f"kernel:{args.strategy}"
+        else:
+            rules = load_rules(client, database)
+            if not rules["buy"] or not rules["sell"]:
+                raise SystemExit("缺少 buy/sell 规则，无法回测")
+            strategy = RulesStrategy(
+                provider=provider,
+                buy_rule=rules["buy"],
+                sell_rule=rules["sell"],
+                add_rule=rules["add"],
+                target_amount=args.target_amount,
+            )
+            strategy_name = "rules"
+
         engine = BacktestEngine(
             strategy=strategy,
             data=provider,
@@ -79,12 +103,16 @@ def run_backtest(args) -> dict:
             commission_rate=args.commission_rate,
             commission_min=args.commission_min,
             stamp_tax_rate=args.stamp_tax_rate,
-            strategy_name="rules",
+            strategy_name=strategy_name,
+            start_date=args.start,
+            end_date=args.end,
         )
         result = engine.run()
 
-        store = BacktestStore(client[database])
-        store.save_result(result)
+        if args.no_save:
+            print("--no-save：本次结果未写入 MongoDB")
+        else:
+            BacktestStore(client[database]).save_result(result)
         return result
     finally:
         client.close()
@@ -103,6 +131,16 @@ def main() -> None:
     parser.add_argument("--stamp-tax-rate", type=float, default=0.0005, help="卖出印花税率")
     parser.add_argument("--json", action="store_true", help="输出 JSON")
     parser.add_argument(
+        "--strategy",
+        default=None,
+        help="改用选股插件策略回测（如 trend_rebound / box_oscillate），缺省用 trading_rules",
+    )
+    parser.add_argument("--universe", type=int, default=0, help="同源回测只取前 N 只股票（0=全市场）")
+    parser.add_argument("--max-hold-days", type=int, default=10, help="持有 N 个交易日后清仓（0=关闭）")
+    parser.add_argument("--stop-loss-pct", type=float, default=0.05, help="止损幅度（0=关闭）")
+    parser.add_argument("--take-profit-pct", type=float, default=0.0, help="止盈幅度（0=关闭）")
+    parser.add_argument("--no-save", action="store_true", help="只回测不落库（调试/CI）")
+    parser.add_argument(
         "--start-capital",
         type=float,
         default=100000.0,
@@ -112,6 +150,15 @@ def main() -> None:
 
     if args.start_capital != 100000.0:
         args.capital = args.start_capital
+
+    if args.strategy and args.target_amount >= args.capital * args.position_cap_pct:
+        # 单票上限按总资产校验，贴边的参数会在净值一旦回撤后静默拒掉所有买入，看起来像"没有信号"
+        print(
+            f"警告: --target-amount {args.target_amount:.0f} ≥ 单票上限 "
+            f"{args.capital * args.position_cap_pct:.0f}（capital × position_cap_pct），"
+            f"净值回落后成交会被上限拒绝而大幅减少，请把单笔金额调到该上限以下。",
+            file=sys.stderr,
+        )
 
     result = run_backtest(args)
 
@@ -131,6 +178,12 @@ def main() -> None:
     print(f"task_id    : {result.task_id}")
     print(f"strategy   : {result.strategy}")
     print(f"period     : {result.start_date} ~ {result.end_date}")
+    if args.strategy:
+        print(
+            "exit       : "
+            f"max_hold_days={args.max_hold_days} stop_loss={args.stop_loss_pct} "
+            f"take_profit={args.take_profit_pct}（出场为机械规则，与选股判据无关）"
+        )
     print("--- metrics ---")
     for k, v in result.metrics.items():
         print(f"  {k:16s}: {v}")

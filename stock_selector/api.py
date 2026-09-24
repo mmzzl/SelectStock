@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from .core.selector import list_strategies, run_select
+from .core.selector import list_strategies, run_select, strategy_details
 
 app = FastAPI(title="插件化量化选股系统", version="0.1.0")
 
@@ -35,6 +35,12 @@ class RunRequest(BaseModel):
 def strategy_list():
     """获取所有可用选股策略（前端下拉展示）。"""
     return {"code": 0, "data": list_strategies()}
+
+
+@app.get("/api/strategy/detail")
+def strategy_detail():
+    """策略元数据：中文名/描述/判据形态/所需数据，供前端做标签映射。"""
+    return {"code": 0, "data": strategy_details()}
 
 
 @app.post("/api/selector/run")

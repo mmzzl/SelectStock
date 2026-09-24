@@ -14,6 +14,7 @@ from pathlib import Path
 from ..datasource import AKShareSource, BaseDataSource, MongoSource, ParquetSource
 from ..models import SelectResult
 from ..utils.io_helper import to_json
+from .base_strategy import BaseSelectStrategy
 from .strategy_loader import StrategyLoader
 
 logger = logging.getLogger("stock_selector")
@@ -87,6 +88,44 @@ def resolve_strategies(target: list[str] | str | None, loader: StrategyLoader,
     return names
 
 
+def create_strategy(name: str, config: dict | None = None) -> BaseSelectStrategy:
+    """按名创建策略实例，参数注入方式与内核完全一致（回测/脚本复用同一份配置）。"""
+    params = (config or _load_config()).get("strategy_params") or {}
+    return StrategyLoader(params).load_all().create(name)
+
+
+def strategy_details(config: dict | None = None) -> list[dict]:
+    """策略元数据（名称/中文描述/判据形态/所需数据），供前端做标签与文案映射。"""
+    params = (config or _load_config()).get("strategy_params") or {}
+    loader = StrategyLoader(params).load_all()
+    details = loader.describe()
+    for item in details:
+        item["params"] = params.get(item["name"]) or {}
+    return details
+
+
+def _requirements(instances) -> tuple[list[str], int]:
+    """汇总各策略的数据需求：列取并集、行数取最大值。"""
+    columns: list[str] = []
+    rows = 0
+    for _, strategy in instances:
+        for col in strategy.required_columns() or []:
+            if col not in columns:
+                columns.append(col)
+        rows = max(rows, int(strategy.required_rows() or 0))
+    return columns, rows
+
+
+def _rank(results: list[SelectResult]) -> list[SelectResult]:
+    """有评分则按分数降序赋 rank；全部无评分时保持产出顺序、rank 留空。"""
+    if not any(r.score is not None for r in results):
+        return results
+    results.sort(key=lambda r: (r.score is None, -(r.score or 0.0), r.code))
+    for position, item in enumerate(results, start=1):
+        item.rank = position
+    return results
+
+
 def run_select(
     strategies: list[str] | str | None = None,
     datasource: BaseDataSource | None = None,
@@ -122,6 +161,10 @@ def run_select(
     owns_source = datasource is None
     ds = datasource or _create_datasource(config)
     try:
+        # 策略声明的数据需求下发给数据源，避免剪列后策略取不到指标列而静默 0 命中
+        columns, rows = _requirements(instances)
+        ds.prepare(columns=columns, rows=rows)
+
         stock_list = ds.get_stock_list()
         limit = int(selector_cfg.get("stock_limit") or 0)
         if limit > 0:
@@ -165,7 +208,17 @@ def run_select(
                         r.name = stock.get("name") or ds.name_of(code)
                     if not r.signal:
                         r.signal = name
+                    if not r.strategy:
+                        r.strategy = name
+                    if r.price is None and "close" in df.columns:
+                        r.price = round(float(df["close"].iloc[-1]), 4)
                     results.append(r)
+
+        asof = ds.max_date() or ""
+        for r in results:
+            if not r.asof:
+                r.asof = asof
+        results = _rank(results)
 
         # 4. 全市场一条行情都没取到属于数据源故障，必须显式暴露而非返回空集
         if stock_list and loaded == 0:

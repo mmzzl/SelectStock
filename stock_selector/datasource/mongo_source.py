@@ -58,6 +58,17 @@ class MongoSource(BaseDataSource):
             self._client.close()
             self._client = None
 
+    def prepare(self, columns: list[str] | None = None, rows: int = 0) -> None:
+        """Mongo 源只有原始日线列，指标类策略在这里就被挡下，而不是每票抛 KeyError。"""
+        if rows:
+            self.rows = max(self.rows, int(rows))
+        missing = [c for c in (columns or []) if c not in COLUMNS]
+        if missing:
+            raise RuntimeError(
+                f"MongoSource 不提供指标列 {missing}（仅有 {COLUMNS}）；"
+                "需要 talib 指标的策略请把 datasource.type 设为 parquet"
+            )
+
     def get_stock_list(self) -> list[dict]:
         """股票列表与名称均取自 bk_stocks。"""
         seen: dict[str, str] = {}

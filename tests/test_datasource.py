@@ -49,6 +49,26 @@ class TestParquetSource:
         assert "close" in df.columns and "name" in df.columns
         assert "ma5" not in df.columns
 
+    def test_prepare_widens_pruned_read(self, provider_dir):
+        """内核下发的策略需求只放宽取数范围：列取并集、行数取最大。"""
+        ds = self.make(dir=provider_dir, columns=["date", "close"], rows=10)
+        ds.prepare(columns=["date", "close", "ma10"], rows=30)
+        assert ds.columns == ["date", "close", "ma10"]
+        assert ds.rows == 30
+
+    def test_prepare_never_narrows_full_read(self, provider_dir):
+        """未配置 columns 即读全列、rows=0 即不限行数，不能被策略声明缩小。"""
+        ds = self.make(dir=provider_dir)
+        ds.prepare(columns=["ma10"], rows=30)
+        assert ds.columns is None and ds.rows == 0
+
+    def test_declared_column_absent_from_file_falls_back_to_full_read(self, provider_dir):
+        """声明了本文件不存在的列时退回全列读取，而不是让整只股票取数失败。"""
+        ds = self.make(dir=provider_dir, columns=["date", "close"])
+        ds.prepare(columns=["ma20"], rows=0)
+        df = ds.get_kline("000001")
+        assert "ma20" not in df.columns and "ma10" in df.columns
+
     def test_relative_dir_resolves_against_repo_root(self):
         ds = self.make(dir="data/stock_kline")
         assert ds.dir.is_absolute()
@@ -96,6 +116,17 @@ class TestMongoSource:
         ds._client = object()          # 阻断真实连接，_db 已被替换
         ds._db = lambda: db
         return ds
+
+    def test_prepare_raises_on_indicator_columns(self):
+        """指标类策略配 Mongo 源必须在开工前就报清楚，而不是每票 KeyError 静默 0 命中。"""
+        ds = self.make(FakeDB())
+        with pytest.raises(RuntimeError, match="parquet"):
+            ds.prepare(columns=["date", "open", "high", "low", "close", "volume", "ma20"])
+
+    def test_prepare_accepts_base_columns_and_widens_rows(self):
+        ds = self.make(FakeDB())
+        ds.prepare(columns=["date", "close", "amount"], rows=250)
+        assert ds.rows == 250
 
     def test_normalize_code_variants(self):
         from stock_selector.datasource.mongo_source import normalize_code

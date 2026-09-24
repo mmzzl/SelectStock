@@ -3,6 +3,8 @@
 import pandas as pd
 import pytest
 
+from stock_selector.datasource.base_source import BaseDataSource
+
 
 def rising_df(rows=32, breakout=True):
     """构造同时命中趋势回踩与箱体突破的价格序列（供内核测试复用）。"""
@@ -19,10 +21,11 @@ def rising_df(rows=32, breakout=True):
     })
 
 
-class FakeSource:
-    """满足 BaseDataSource 契约的假数据源，记录取数次数。"""
+class FakeSource(BaseDataSource):
+    """满足 BaseDataSource 契约的假数据源，记录取数次数与内核下发的取数需求。"""
 
     def __init__(self, stocks=None, frame=None, fail_codes=(), empty=False):
+        super().__init__()
         self.stocks = stocks if stocks is not None else [
             {"code": "000001", "name": "平安银行"},
             {"code": "000002", "name": "万科A"},
@@ -32,6 +35,10 @@ class FakeSource:
         self.empty = empty
         self.calls: list[str] = []
         self.closed = False
+        self.prepared: dict = {}
+
+    def prepare(self, columns=None, rows=0):
+        self.prepared = {"columns": list(columns or []), "rows": rows}
 
     def get_stock_list(self):
         return list(self.stocks)
@@ -153,6 +160,75 @@ class TestRunSelect:
         monkeypatch.setattr(mod, "_create_datasource", lambda cfg: ds)
         mod.run_select(config=config())
         assert ds.closed is True
+
+    def test_datasource_told_what_strategies_need(self):
+        """内核把各策略的数据需求并集下发给数据源，避免剪列后策略静默 0 命中。"""
+        ds = FakeSource()
+        self.run(ds)
+        assert ds.prepared["rows"] == 40            # trend_rebound 30 / box_oscillate 40，取最大
+        assert {"date", "open", "high", "low", "close", "volume"} <= set(ds.prepared["columns"])
+
+    def test_result_metadata_backfilled(self):
+        results = self.run(FakeSource())
+        assert results
+        for r in results:
+            assert r.asof == "2026-09-11"           # 基准日来自数据源
+            assert r.price == pytest.approx(10.30)  # 基准日收盘价
+            assert r.strategy in {"trend_rebound", "box_oscillate"}
+
+    def test_results_sorted_by_score_with_rank(self):
+        results = self.run(FakeSource())
+        scores = [r.score for r in results]
+        assert all(s is not None for s in scores)
+        assert scores == sorted(scores, reverse=True)
+        assert [r.rank for r in results] == list(range(1, len(results) + 1))
+
+
+class TestRanking:
+    def test_unscored_results_sort_last_but_still_get_a_position(self):
+        from stock_selector.core.selector import _rank
+        from stock_selector.models import SelectResult
+
+        items = [
+            SelectResult(code="000002", name="", signal="s", reason=""),
+            SelectResult(code="000001", name="", signal="s", reason="", score=0.5),
+        ]
+        ranked = _rank(items)
+        assert [(r.code, r.rank) for r in ranked] == [("000001", 1), ("000002", 2)]
+
+    def test_no_scores_keeps_production_order(self):
+        from stock_selector.core.selector import _rank
+        from stock_selector.models import SelectResult
+
+        items = [SelectResult(code=c, name="", signal="s", reason="") for c in ("000002", "000001")]
+        assert [r.code for r in _rank(items)] == ["000002", "000001"]
+
+
+class TestStrategyContract:
+    def test_run_is_the_list_form_of_signal_at(self):
+        from stock_selector.core.selector import create_strategy
+
+        strategy = create_strategy("trend_rebound")
+        frame = rising_df()
+        assert strategy.run(frame) == [strategy.signal_at(frame)]
+
+    def test_unimplemented_strategy_warns_instead_of_silently_passing(self):
+        from stock_selector.core.base_strategy import BaseSelectStrategy
+
+        class Empty(BaseSelectStrategy):
+            pass
+
+        with pytest.warns(RuntimeWarning, match="不会产出"):
+            assert Empty().run(rising_df()) == []
+
+    def test_describe_reports_asof_and_data_needs(self):
+        from stock_selector.core.selector import strategy_details
+
+        by_name = {d["name"]: d for d in strategy_details()}
+        assert by_name["trend_rebound"]["as_of"] is True
+        assert by_name["trend_rebound"]["required_rows"] == 30
+        assert by_name["box_oscillate"]["required_rows"] == 40
+        assert by_name["trend_rebound"]["description"]
 
 
 class TestStrategyLoader:

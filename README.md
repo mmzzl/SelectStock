@@ -43,7 +43,7 @@ stock_selector/                  # 实现层：全部业务与算法
 ├── datasource/      # 数据源层：parquet / mongo / ak / mock，统一 BaseDataSource 契约
 ├── models/          # 标准化结果结构体 SelectResult
 ├── features/        # 指标与因子：base_columns 派生列 / window 12 因子 / modeling 拟合评估
-├── backtest/        # 回测：engine 逐日撮合 / broker 资金与 T+1 / rules + rule_eval 规则 DSL / metrics / store
+├── backtest/        # 回测：engine 逐日撮合 / broker 资金与 T+1 / rules + rule_eval 规则 DSL / kernel_strategy 同源适配 / metrics / store
 ├── news/            # 消息面：LLM 两层解读（fetch / analyze / targets / store / stats）
 └── utils/           # io_helper 等
 
@@ -74,9 +74,14 @@ data/stock_kline/{code}.parquet           # 5186 只 × 36 列 指标宽表（�
                                              + data/bayes_candidates/{date}.parquet
 ```
 
-**同源**是硬约束：选股、回测、诊断读同一批 parquet 文件、同一套列语义，
-`RuleEvaluator` 的指标白名单与 parquet 列一一对应 —— 这样"策略在历史上是否会买"和
-"策略今天选出什么"可互相验证。因此切换数据源不需要改任何策略代码，但换数据源会同时改变新鲜度与耗时。
+**同源**是硬约束，有两层含义：
+
+- **数据同源**：选股、回测、诊断读同一批 parquet 文件、同一套列语义，
+  `RuleEvaluator` 的指标白名单与 parquet 列一一对应。切换数据源不需要改任何策略代码，
+  但会同时改变新鲜度与耗时。
+- **判据同源**：策略的 as-of 判据 `signal_at(df)` 只有一份实现，实盘选股喂"整段历史"、
+  回测喂"≤基准日的切片"，同一段代码跑两次 —— 所以"策略历史上会不会买"与"今天选出什么"可互相印证，
+  不存在只在回测里成立的信号逻辑。详见下一节《选股与回测同源（as-of）》。
 
 ### 核心运行逻辑（内核 `run_select`）
 
@@ -85,15 +90,33 @@ data/stock_kline/{code}.parquet           # 5186 只 × 36 列 指标宽表（�
 2. `resolve_strategies()` 决定本次执行的策略：`None` 用 `settings.selector.default_strategies`；
    传了未注册的名字直接 `ValueError`（列出可用策略），避免静默空跑。
 3. 数据源：`datasource=` 参数优先（测试与回测可注入），否则按 `datasource.type` 创建；
-   只有自己创建的实例才在 `finally` 里 `close()`。
+   只有自己创建的实例才在 `finally` 里 `close()`。创建后先调 `ds.prepare()`，把各策略
+   `required_columns()/required_rows()` 的并集下发下去（**只放宽不收紧**），
+   避免"剪列后策略取不到指标列"被降级成静默 0 命中。
 4. **每股只取数一次**，内层遍历全部策略 —— IO 次数 = 股票数，与策略个数无关。
-5. 结果归位：策略可留空 `code/name/signal`，内核用取数上下文回填
-   （code ← 循环变量，name ← 股票列表或 `ds.name_of(code)`，signal ← 策略名）。
-6. 单只股票取数或策略求值异常：`tolerate_errors: true` 记警告继续，`false` 立即抛出；
+5. 结果归位：策略可留空 `code/name/signal/strategy/price`，内核用取数上下文回填
+   （code ← 循环变量，name ← 股票列表或 `ds.name_of(code)`，signal/strategy ← 策略名，
+   price ← 基准日收盘价），`asof` 统一取 `ds.max_date()`。
+6. 任一结果带 `score` 时按分数降序重排并赋 `rank`；全无分数则保持产出顺序。
+7. 单只股票取数或策略求值异常：`tolerate_errors: true` 记警告继续，`false` 立即抛出；
    股票池非空却 `loaded == 0` 视为数据源故障，抛 `RuntimeError`。
 
 结束时输出 `选股完成: 策略=… 股票池=… 有效=… 命中=… 失败=… 基准日=…`，
 基准日即 `ds.max_date()`，也就是这批信号对应的交易日。
+
+`SelectResult` 字段（前 4 个是对后端/前端的稳定契约，后面为可选增强）：
+
+| 字段 | 含义 |
+|---|---|
+| `code` / `name` | 股票代码、名称 |
+| `signal` | 信号标识（当前等于策略名） |
+| `reason` | 中文选股依据 |
+| `extra` | 策略自定义扩展字典 |
+| `strategy` | 产出该结果的策略名 |
+| `asof` | 基准交易日（信号对应哪天，不是"运行时间"） |
+| `price` | 基准日收盘价 |
+| `score` | 信号强度 0~1，策略未给则为 `None` |
+| `rank` | 名次，有评分时由内核按分数降序赋值 |
 
 ### 三种用法
 
@@ -114,7 +137,8 @@ python -m uvicorn stock_selector.api:app --host 127.0.0.1 --port 18002
 |---|---|
 | `GET /api/health` | 健康检查 |
 | `GET /api/strategy/list` | `{"code":0,"data":["box_oscillate","trend_rebound"]}`，后端下拉策略来源 |
-| `POST /api/selector/run` | 入参 `{"strategies":[...]}`（缺省用配置默认），返回 `data:[{code,name,signal,reason,extra}]` |
+| `GET /api/strategy/detail` | 每个策略的 `{name, description, as_of, required_columns, required_rows, params}`，前端做中文标签用 |
+| `POST /api/selector/run` | 入参 `{"strategies":[...]}`（缺省用配置默认），返回 `data:[{code,name,signal,reason,extra,strategy,asof,price,score,rank}]` |
 
 后端 `stock_selector_api` 通过环境变量 `SELECTION_PLUGIN_BASE_URL` 指向本服务，配置项
 `selection_plugin_mode: http|mock`。
@@ -128,8 +152,9 @@ uniapp  ──/api/v1/selection/*──►  后端 stock_selector_api  ──HTT
 后端 `services/selection_service.py` 的消费方式决定了返回结构不能随意改：
 
 - `GET /api/strategy/list` 的 `data` **必须是 `list[str]`**，后端直接 `list(...)` 当下拉数据源。
-- `POST /api/selector/run` 后端只映射 `code/name/signal/reason` 四个字段（`signal` 缺省回落到 `action`），
+- `POST /api/selector/run` 后端目前只映射 `code/name/signal/reason` 四个字段（`signal` 缺省回落到 `action`），
   落库到 `select_results`（也只有这 4 列），httpx 超时 600s。
+  插件新增的 `strategy/asof/price/score/rank` 会被后端**直接丢弃**，要上屏必须补后端列与前端映射。
 - 后端 job 状态机 `queued/running/done/failed`，`_inflight` 单飞（同一时刻只有一个选股在跑）。
 
 因此**扩充返回字段是一次三方联动**：插件 `SelectResult` → 后端 `select_results` 的幂等 `ALTER TABLE`
@@ -189,7 +214,7 @@ server: {host: "0.0.0.0", port: 8000}
 
 ### 策略插件层与新增策略
 
-策略只依赖一个抽象契约，框架不 import 任何具体策略（依赖倒置）：
+策略只依赖一个抽象契约，框架不 import 任何具体策略（依赖倒置）。**首选实现 as-of 判据 `signal_at`**：
 
 ```python
 # stock_selector/strategies/my_strategy.py
@@ -197,26 +222,62 @@ from ..core.base_strategy import BaseSelectStrategy
 from ..models.result import SelectResult
 
 class MyStrategy(BaseSelectStrategy):
-    def run(self, df) -> list[SelectResult]:
-        period = int(self.config.get("period", 20))   # 参数务必带默认值
-        ...
-        return [SelectResult(code="", name="", signal="my_strategy", reason="…")]
+    def required_rows(self) -> int:          # 判据需要多少回溯行（默认 120）
+        return 40
+
+    def signal_at(self, df) -> SelectResult | None:   # 只依据 df 判断"截至最后一行"是否出信号
+        close = float(df["close"].iloc[-1])
+        if not self.config.get("floor", 10) < close:
+            return None
+        return SelectResult(code="", name="", signal="my_strategy", score=0.8, reason="…")
 ```
 
 约定：
 
-- **放进目录即注册** —— `StrategyLoader` 运行时扫描 `strategies/`，无需改任何框架代码或 import 清单。
+- **放进目录即注册** —— `StrategyLoader` 运行时扫描 `strategies/`；两个判据都没实现的类
+  会被跳过并告警，不会以"永远 0 命中"的形式混进策略列表。
+- `signal_at(df)` 是**唯一 as-of 判据**：传入的 df 已按基准日截断，策略不感知日期、
+  也不访问 df 之外的数据。`run(df)` 默认就是它的列表化，需要一次产出多条结果时才覆盖 `run`。
 - `name` 默认由类名蛇形派生（`TrendRebound` → `trend_rebound`），是接口、参数、`signal` 三处共用的标识。
-- 参数来自 `settings.yaml` 的 `strategy_params.<策略名>`，通过 `self.config` 读取。
-- `code/name/signal` 可留空，内核按取数上下文回填；`reason` 是给人看的中文依据。
-- 当前两个内置策略：`trend_rebound`（MA20 斜率向上 + 回踩均线 ±5% 内 + 当日收阳企稳）、
-  `box_oscillate`（前 30 日箱体〔不含当日〕，收盘有效突破上沿 +2% 且前一日尚未破位）。
-- **局限**：策略看到的是"整段历史 + 最后一行"，判据落在最新交易日；逐日 as-of（只看 ≤T 的数据）
-  属于 P1，做完才能做到"同一策略既能选股又能被回测逐日验证"。
+- 参数来自 `settings.yaml` 的 `strategy_params.<策略名>`，通过 `self.config` 读取，务必带默认值。
+- `code/name/signal/strategy/price/asof/score/rank` 可由内核回填，策略通常只填 `signal/reason/score`。
+- 当前两个内置策略：`trend_rebound`（MA20 斜率向上 + 回踩均线 ±5% 内 + 当日收阳企稳，
+  score = 越贴近均线越高）、`box_oscillate`（前 30 日箱体〔不含当日〕，收盘有效突破上沿 +2%
+  且前一日尚未破位，score = 突破充分度 + 放量加成）。
 
 ```bash
-python -m pytest tests -q          # 内核/数据源/策略/特征/回测/消息面 160 项
+python -m pytest tests -q          # 内核/数据源/策略/特征/回测/消息面 192 项
 ```
+
+### 选股与回测同源（as-of）
+
+同一段 `signal_at` 代码有两个驱动器，这就是"策略在历史上会不会买"与"策略今天选出什么"能互相印证的原因：
+
+| 驱动器 | 取数 | 调用 |
+|---|---|---|
+| 实盘选股 `run_select()` | 数据源给整段历史（最后一行 = 最新交易日） | `run(df)` → `signal_at(df)` |
+| 同源回测 `KernelStrategy` | `ParquetProvider.window(code, T, rows)` 只给 ≤T 的切片 | `signal_at(切片)` |
+
+`stock_selector/backtest/kernel_strategy.py` 把选股策略接到回测引擎上：
+
+- **入场**与实盘逐字一致；基准日停牌（切片最后一行早于 T）不出信号，绝不用历史行冒充当日决策。
+- 候选按 `score` 降序提交，引擎受持仓只数限制从头成交，因此排序就是选股优先级。
+- **出场不在选股策略职责内**（策略只回答"此刻是否该买"），由适配器按
+  `max_hold_days / stop_loss_pct / take_profit_pct` 三条机械规则决定；
+  所以同源回测的收益数字依赖这组参数，不能只归因于策略本身。
+- 引擎开跑时通过 `attach_broker` 钩子把账户交给策略，用于读取持仓成本与买入日期。
+- 入场取数全部走策略自己的 `window()` 切片，因此 `KernelStrategy` 声明 `needs_market_prices = False`，
+  引擎据此跳过"逐日读遍全部 parquet"的全市场报价快照（规则策略缺省仍需要，行为不变）。
+  没有这一步时，500 只 × 半年区间的同源回测会退化成 5186 只 × 每日的掩码扫描，耗时从秒级涨到十几分钟。
+
+```bash
+# 用选股策略本身做回测（同一份判据），只取前 500 只股票，结果不落库
+python scripts/backtest_main.py --strategy trend_rebound --universe 500 \
+    --start 2026-03-02 --end 2026-09-24 \
+    --max-hold-days 10 --stop-loss-pct 0.05 --take-profit-pct 0.15 --no-save
+```
+
+> 缺省（不带 `--strategy`）仍是 `trading_rules` 表达式驱动的规则策略，两条路线共用同一个撮合引擎。
 
 ### 特征与模型层（`features/`）
 
@@ -237,21 +298,30 @@ python scripts/train_bayes.py --code 600519         # 单票 12 特征与打分�
 
 ### 回测
 
+两种策略来源共用同一个撮合引擎：
+
 ```bash
+# A. 规则驱动（缺省）：买卖条件读 MongoDB trading_rules
 python scripts/backtest_main.py --start 2025-09-01 --end 2026-09-01 \
     --capital 100000 --max-positions 5 --position-cap-pct 0.2
+
+# B. 选股插件驱动（同源，见上一节）
+python scripts/backtest_main.py --strategy trend_rebound --universe 500 \
+    --start 2026-03-02 --end 2026-09-24 --no-save
 ```
 
-买卖条件读 MongoDB `trading_rules`（`buy`/`sell`/`add` 布尔表达式，如
-`price <= ma10 * 0.8 and adx <= 25 * 1.15`），由 `RuleEvaluator` 在指标列白名单内求值；
-结果写入 `backtest_results` / `backtest_trades` / `backtest_equity`。
+规则模式的 `buy`/`sell`/`add` 是布尔表达式（如 `price <= ma10 * 0.8 and adx <= 25 * 1.15`），
+由 `RuleEvaluator` 在指标列白名单内求值；结果写入 `backtest_results` / `backtest_trades` /
+`backtest_equity`，`--no-save` 可只跑不落库。`--start/--end` 真正约束撮合区间（此前被忽略，
+回测实际跑满了全部历史），策略仍然能看到区间之前的数据用于指标预热。
 
 引擎逻辑（`backtest/engine.py`）—— 逐日推进，每一天严格按此顺序：
 
 1. `broker.settle()`：T+1 资金解冻（昨日卖款今日才并入可用 `cash`，当日卖出款进 `settling` 不可即用）。
 2. `evaluate_holdings()` 拿持仓迁移指令 → **先卖** → **再加仓**（`add` 不占持仓只数配额）。
 3. 仓位数未满 `max_positions` 时才 `propose_buys()` 买新标的，受 `position_cap_pct`
-   （单票成本 / 当前总资产）与 `target_amount`（每笔固定买入金额）约束。
+   （单票成本 / 当前总资产）与 `target_amount`（每笔固定买入金额）约束。买入前会给出
+   全市场报价快照，但策略可靠 `needs_market_prices = False` 声明不消费它来省掉这次全量读盘。
 4. 按 `cash + settling + 持仓市值` 记一个权益点。
 
 账户规则（`backtest/broker.py`）：以**当日收盘价**成交、按 100 股整手取整、佣金
@@ -262,8 +332,9 @@ python scripts/backtest_main.py --start 2025-09-01 --end 2026-09-01 \
 （按 245 交易日年化），`BacktestStore` 落 MongoDB。
 
 策略与引擎之间靠 `_StrategyProxy` 适配：引擎只认 `propose_buys(date, cash, prices)` 和
-`evaluate_holdings(date, holdings, prices)` 两个可选回调，没有的方法视为返回空列表 ——
-所以选股侧的 `BaseSelectStrategy` 与回测侧的规则策略是两套契约，**统一为同一个 as-of 策略接口是 P1 的核心工作**。
+`evaluate_holdings(date, holdings, prices)` 两个可选回调，没有的方法视为返回空列表。
+因此规则策略（`RulesStrategy`）与选股插件策略（`KernelStrategy`，入场即 `signal_at`）
+都能挂到同一个引擎上，撮合、资金、指标、落库完全共用。
 
 > ⚠️ `RuleEvaluator` 用 `eval()` 且已关闭 `__builtins__`、限制指标列白名单，但属性访问未收口。
 > 一旦 `trading_rules` 允许 App 端用户编辑，需先换成 ast 白名单求值（该决策尚未确定）。
@@ -276,18 +347,54 @@ python scripts/backtest_main.py --start 2025-09-01 --end 2026-09-01 \
 "新闻解读脚本"一节。目前消息面与选股内核**尚未打通** —— `watch_target` 的量还没有作为因子进入
 `SelectResult` 或规则表达式，属于 P2。
 
+### 实测记录（2026-09-24，本机全市场）
+
+- 数据：`build_kline_features.py` 补齐后 parquet 最新交易日 **2026-09-24**（5186 只 × 36 列）。
+- 选股：`python -m stock_selector.main`（默认两策略，进程内直接调 `run_select()`）耗时 **128.4s**，
+  命中 **567** 条（`box_oscillate` 67 / `trend_rebound` 500），`asof` 全部为 `2026-09-24`，
+  `rank` 连续且按 `score` 降序。
+- **同源互证（关键）**：把同一个 `trend_rebound` 判据放到历史区间逐日求值
+  （`ParquetProvider.window` 切片，前 300 只 × 144 个交易日），得到 **4344** 个信号、
+  日均 30.2 个 ⇒ 命中率 **10.1%**；而实盘 2026-09-24 全市场命中率是 500/5186 = **9.6%**。
+  两条独立路径的密度吻合，说明"回测里的策略"和"今天选出来的票"确实是同一份判据。
+- 同源回测（`--strategy trend_rebound --universe 500 --start 2026-03-02 --end 2026-09-24`，
+  出场 `max_hold_days=10 / stop 5% / take 15%`）：
+
+  | 参数 | 平仓笔数 | 总收益 | 胜率 | 盈亏比 | 最大回撤 |
+  |---|---|---|---|---|---|
+  | capital 100k, target 15k（上限不粘连） | 96 | **-21.6%** | 36.5% | 0.58 | — |
+  | capital 100k, target 20k（正好贴单票上限） | 59 | -26.2% | 32.2% | 0.42 | -26.8% |
+  | capital 200k, target 20k（上限宽松，仅半仓运作） | 100 | -16.1% | 34.0% | 0.59 | -16.7% |
+
+  两个结论：**①** 该判据配这组机械出场在本区间是亏的，P1 交付的是"可验证"，不是"能赚钱"；
+  **②** `target_amount` 贴着 `capital × position_cap_pct` 时，净值一回撤后续买入就会被单票上限
+  静默拒掉（96 笔 → 59 笔，且更差），CLI 现在会在开跑前打这条警告。回测数字对参数极敏感，
+  换参数就是另一个结论，不能把上面任一串数字当成对策略的评价。
+- 回归四套全绿：根目录 `tests/` **194 项**（含 21 项同源回测测试，其中"未来行情不能改变历史
+  as-of 判据"是防泄漏的关键断言）、后端 **157**、诊断插件 **24**、uniapp **37**。
+  插件接口新增字段是**向后兼容**的（在 `extra` 之后追加带默认值的字段），因此后端/前端测试不受影响。
+
 ### 已知限制（截至 2026-09-24）
 
-- **选股与回测尚未同源**：回测侧用 `trading_rules` 表达式驱动的规则策略，选股侧用 `BaseSelectStrategy`
-  看最后一行，两套契约没有合并，因此"回测验证过的信号"和"今天选出来的票"还不能互相印证（P1 核心项）。
-- 返回项只有 `code/name/signal/reason`，无评分/排名/基准交易日（`extra` 已预留但无策略写入）；
-  `signal` 是策略英文名（如 `trend_rebound`）而非中文，后端 `select_results` 也只落这 4 列。
-- 结果新鲜度受 parquet 更新进度限制，需自行保证 `build_kline_features.py` 已跑过；
+已解决（P1）：判据同源、`score/rank/asof/price/strategy` 回填、策略声明所需列与行数
+（`required_columns/required_rows` + `prepare()`）、回测 `--start/--end` 被忽略的缺陷。仍存在的：
+
+- **新字段没有走完整条调用链**：后端 `select_results` 只落 `code/name/signal/reason` 四列，
+  uniapp `logic/view.js` 同样只映射这四项，因此 `score/rank/asof` 目前只在 CLI 与 `/api/selector/run`
+  可见，App 上屏需要补后端列 + 前端映射。
+- **评分饱和**：`box_oscillate` 的 `score` 在强势突破票上普遍顶到 1.0，跨策略排序退化成粗排序
+  （同分项只按代码序），展示名次不等于强度名次。要让排名有意义需要连续化打分（分位/幅度裁剪）。
+- **新鲜度靠手工跑 `build_kline_features.py` 保证**：结果所有 `asof` 都来自数据源最新交易日，
   parquet 与 MongoDB 两侧会各自漂移，排查"信号不对"先看两边的最新日期。
-- 全市场单次 163s（后端超时 600s），串行、未做进程池并行，也没有"策略声明所需列"的机制 ——
-  用了指标列的策略必须手工把它们加进 `datasource.parquet.columns`，否则策略取不到该列，
-  异常会被 `tolerate_errors` 降级成每票一条 warning、整体表现为 0 命中。
-- 无 HTTP 回测入口（只能跑 CLI）、无数据刷新调度。
+- 全市场单次约 130–165s（后端超时 600s），串行、未做进程池并行。
+- **回测撮合仍是"当日收盘价成交"**：as-of 判据用的正是这根收盘 bar，等于假设你能以算出信号
+  那个价格成交，实盘只能在次日开盘后成交，因此所有收益数字都带一层乐观偏差。要贴近实盘
+  需要改成 T+1 开盘撮合（尚未做）。
+- `--universe N` 取的是**代码升序前 N 只**（`000001` 起），不是随机样本，跨策略/跨市场结论会偏；
+  样本外推要么传显式代码清单，要么补分层抽样。
+- `metrics.trade_count` 是**平仓笔数**（`closed_pnls` 长度），不是委托笔数；对照 `backtest_trades`
+  里的 buy/sell 行数看才完整。
+- 无 HTTP 回测入口（只能跑 CLI）、无数据刷新调度；消息面因子尚未进入选股/回测（P2）。
 - `settings.yaml` 的 `server.port` 默认 8000，本机该端口被一个无关服务占用，实际部署请用
   `--port` 覆盖（如 18000/18002）并让后端 `SELECTION_PLUGIN_BASE_URL` 指向同一端口。
 

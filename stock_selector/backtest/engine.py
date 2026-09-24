@@ -62,9 +62,15 @@ class BacktestEngine:
     def run(self) -> BacktestResult:
         broker = self.broker
         proxy = _StrategyProxy(self.strategy, self.data, self._known_price)
+        # 需要持仓成本/成交历史的策略（如复用选股插件策略的 KernelStrategy）自行认领账户
+        attach = getattr(self.strategy, "attach_broker", None)
+        if attach is not None:
+            attach(broker)
 
         equity_points: list[EquityPoint] = []
         dates = self._within_window(self.data.dates())
+        # 全市场逐日快照要读遍所有 parquet 并常驻内存，只用自带取数的策略（KernelStrategy）声明跳过
+        needs_market_prices = getattr(self.strategy, "needs_market_prices", True)
 
         for date in dates:
             broker.settle()
@@ -93,7 +99,7 @@ class BacktestEngine:
                                 pass
 
             if len(broker.positions) < broker.max_positions:
-                all_prices = self.data.prices(date)
+                all_prices = self.data.prices(date) if needs_market_prices else {}
                 buys = proxy.propose_buys(date, broker.cash, all_prices)
                 for o in buys:
                     if len(broker.positions) >= broker.max_positions:

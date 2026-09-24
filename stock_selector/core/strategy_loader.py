@@ -6,11 +6,14 @@
 
 import importlib
 import inspect
+import logging
 import pkgutil
 from collections import OrderedDict
 
 from .base_strategy import BaseSelectStrategy
 from .. import strategies as strategies_pkg
+
+logger = logging.getLogger("stock_selector")
 
 
 class StrategyLoader:
@@ -31,12 +34,24 @@ class StrategyLoader:
         return self
 
     def _is_valid_strategy(self, cls) -> bool:
-        """校验是否为有效策略类：继承基类、非抽象、非基类本身。"""
-        return (
-            issubclass(cls, BaseSelectStrategy)
-            and cls is not BaseSelectStrategy
-            and not inspect.isabstract(cls)
+        """校验是否为有效策略类：继承基类、非抽象、且至少实现了一侧判据。
+
+        只继承不实现任何判据的类会被跳过并告警——否则它会以"永远 0 命中"的
+        形式混进策略列表，故障要到线上才暴露。
+        """
+        if (
+            not issubclass(cls, BaseSelectStrategy)
+            or cls is BaseSelectStrategy
+            or inspect.isabstract(cls)
+        ):
+            return False
+        implements = (
+            cls.run is not BaseSelectStrategy.run
+            or cls.signal_at is not BaseSelectStrategy.signal_at
         )
+        if not implements:
+            logger.warning("策略 %s 未实现 signal_at()/run()，跳过注册", cls.__name__)
+        return implements
 
     def names(self) -> list[str]:
         """返回所有已注册策略名称。"""
@@ -49,3 +64,17 @@ class StrategyLoader:
         if cls is None:
             raise KeyError(f"未找到策略插件: {name}，可用: {', '.join(self.names())}")
         return cls(config=self._params.get(name, None))
+
+    def describe(self) -> list[dict]:
+        """各策略的自述元数据，供接口向前端暴露中文名与所需数据。"""
+        out = []
+        for name in self.names():
+            inst = self.create(name)
+            out.append({
+                "name": name,
+                "description": inst.description,
+                "as_of": type(inst).signal_at is not BaseSelectStrategy.signal_at,
+                "required_columns": inst.required_columns(),
+                "required_rows": inst.required_rows(),
+            })
+        return out

@@ -45,5 +45,12 @@ class BaseDataSource(ABC):
         """本次取数覆盖到的最晚交易日，用于向调用方暴露数据新鲜度。"""
         return None
 
+    def prepare(self, columns: list[str] | None = None, rows: int = 0) -> None:
+        """按策略声明补齐取数需求（只放宽、不收紧）。
+
+        内核在遍历股票前调用它，把各策略 required_columns/required_rows 的并集
+        下发给数据源。不支持剪列的数据源无需覆盖。
+        """
+
     def close(self) -> None:
         """释放底层连接；无连接的数据源无需覆盖。"""

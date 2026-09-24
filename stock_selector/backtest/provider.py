@@ -35,6 +35,26 @@ class ParquetProvider:
     def _files(self) -> list[Path]:
         return sorted(self.data_dir.glob("*.parquet"))
 
+    def codes(self) -> list[str]:
+        """数据面上全部股票代码（升序）。"""
+        return [path.stem for path in self._files()]
+
+    def window(self, code: str, date: str, rows: int = 0):
+        """as-of 切片：只返回 date 当日及之前的行，最多最近 rows 行。
+
+        这是"回测不得看未来"的唯一取数入口——任何按日求值的策略都应通过它取数据。
+        基准日停牌（当日无行）时返回的最后一行会早于 date，由调用方决定是否弃用。
+        """
+        df = self._load(code)
+        if df is None or df.empty:
+            return None
+        sub = df.loc[df["date"] <= date]
+        if sub.empty:
+            return None
+        if rows:
+            sub = sub.iloc[-rows:]
+        return sub.reset_index(drop=True)
+
     def dates(self) -> list[str]:
         if self._dates is not None:
             return self._dates

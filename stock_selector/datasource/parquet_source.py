@@ -44,6 +44,19 @@ class ParquetSource(BaseDataSource):
         """目录下是否存在可读的指标宽表。"""
         return self.dir.is_dir() and any(self.dir.glob("*.parquet"))
 
+    def prepare(self, columns: list[str] | None = None, rows: int = 0) -> None:
+        """把策略声明的列/行需求并入读取范围，只放宽不收紧。
+
+        配置的 columns 为空表示读全部列、rows=0 表示不限行数，两者都已经是最大
+        范围，不能被策略声明"缩小"。
+        """
+        if columns and self.columns is not None:
+            merged = list(self.columns)
+            merged.extend(c for c in columns if c not in merged)
+            self.columns = merged
+        if rows and self.rows:
+            self.rows = max(self.rows, int(rows))
+
     def get_stock_list(self) -> list[dict]:
         """股票列表来自文件名；名称在取行情时顺带登记（见 name_of）。"""
         if not self.dir.is_dir():

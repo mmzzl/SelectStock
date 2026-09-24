@@ -4,7 +4,7 @@
 对外唯一入口函数为 run_select()，保证多端结果一致。
 """
 
-from .core.selector import run_select
+from .core.selector import run_select, strategy_details
 
-__all__ = ["run_select"]
+__all__ = ["run_select", "strategy_details"]
 __version__ = "0.1.0"
