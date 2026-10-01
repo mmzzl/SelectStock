@@ -63,7 +63,7 @@ def load_rules(client, database: str) -> dict:
     return rules
 
 
-def run_backtest(args) -> dict:
+def run_backtest(args, progress_cb=None):
     client = get_client()
     database = load_mongo_config()["mongodb"]["database"]
     try:
@@ -106,6 +106,7 @@ def run_backtest(args) -> dict:
             strategy_name=strategy_name,
             start_date=args.start,
             end_date=args.end,
+            progress_cb=progress_cb,
         )
         result = engine.run()
 

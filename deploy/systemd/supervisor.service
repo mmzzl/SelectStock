@@ -1,0 +1,46 @@
+; supervisord 的 systemd 管理说明（本机实测 2026-09-30）
+;
+; unit 由 apt 包 supervisor 自带，已 enabled + active：
+;   Loaded: /lib/systemd/system/supervisor.service; enabled
+;   Active: active (running)   Main PID: 1316440 (supervisord)
+; 要管的调度器程序对应在 /etc/supervisor/conf.d/selectstock-scheduler.conf
+; （仓库副本见 ../selectstock-scheduler.conf）。
+;
+; ⚠ 不要在 /etc/systemd/system/ 下再建 supervisord.service：两个 unit 会各自拉起
+;    一个 supervisord，抢 /run/supervisor 的 socket，supervisorctl 结果不可预期。
+; 需要改启动行为时用 drop-in，别改原文件：
+;   sudo systemctl edit supervisor        # 生成 /etc/systemd/system/supervisor.service.d/override.conf
+;   sudo systemctl daemon-reload
+;
+; --- systemctl 层（管 supervisord 本身，开机自启就靠它）---
+;   sudo systemctl status supervisor
+;   sudo systemctl start|stop|restart supervisor
+;   sudo systemctl enable supervisor          # 已是 enabled
+;   journalctl -u supervisor -f               # supervisord 自身日志
+;
+; --- supervisorctl 层（管 scheduler 程序；socket 权限 0700，必须 sudo）---
+;   sudo supervisorctl status selectstock-scheduler
+;   sudo supervisorctl start|stop|restart selectstock-scheduler
+;   sudo supervisorctl reread && sudo supervisorctl update   # 改完 conf.d 后生效
+;   tail -f /data/work/SelectStock/logs/scheduler.out.log
+;
+; 关机后自动恢复的整条链路：systemd → supervisord → selectstock-scheduler → 5 个 cron/interval 任务
+; 爬虫写库依赖 lexmath-mongo 容器，实测 restart=unless-stopped，dockerd 起来后会自起，无需手工干预；
+; 但若有人 docker stop 过它，unless-stopped 不会恢复，需：
+;   docker start lexmath-mongo
+
+[Unit]
+Description=Supervisor process control system for UNIX
+Documentation=http://supervisord.org
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/supervisord -n -c /etc/supervisor/supervisord.conf
+ExecStop=/usr/bin/supervisorctl $OPTIONS shutdown
+ExecReload=/usr/bin/supervisorctl -c /etc/supervisor/supervisord.conf $OPTIONS reload
+KillMode=process
+Restart=on-failure
+RestartSec=50s
+
+[Install]
+WantedBy=multi-user.target

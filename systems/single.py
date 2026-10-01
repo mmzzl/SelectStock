@@ -30,6 +30,9 @@ else:
 
     def flock_exclusive(filepath):
         """Linux file lock using fcntl"""
+        file_dir = os.path.dirname(filepath)
+        if file_dir and not os.path.exists(file_dir):
+            os.makedirs(file_dir, exist_ok=True)
         pidfile = open(filepath, 'w')
         try:
             fcntl.flock(pidfile.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

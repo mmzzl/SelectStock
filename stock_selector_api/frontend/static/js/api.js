@@ -152,6 +152,16 @@
     createDevice: (d) => request('POST', '/devices', d),
     updateDevice: (id, d) => request('PUT', '/devices/' + id, d),
     deleteDevice: (id) => request('DELETE', '/devices/' + id),
+
+    // 回测（投递 Celery worker，后端只透传）
+    backtestOptions: () => request('GET', '/backtest/options'),
+    backtestWorkers: () => request('GET', '/backtest/workers'),
+    backtestRun: (params) => request('POST', '/backtest/run', { params }),
+    backtestRuns: (p) => request('GET', '/backtest/runs?page=' + (p.page || 1) + '&size=' + (p.size || 20)),
+    backtestRunDetail: (id) => request('GET', '/backtest/runs/' + encodeURIComponent(id)),
+
+    // 系统监控
+    systemMetrics: () => request('GET', '/system/metrics'),
   };
 
   window.API = api;

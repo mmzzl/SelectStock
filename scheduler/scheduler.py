@@ -190,7 +190,7 @@ def tasks_load_from_inputs(inputs):
             if options["enable"] == "false":
                 continue
         command =   result.group("command") if result else ""
-        command = os.path.join(home(), "apps", "api", command)
+        command = os.path.join(home(), command)
         script = f"{sys.executable} {command}"
         if "interval" in options:
             task = IntervalTask(script, options["interval"])

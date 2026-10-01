@@ -135,18 +135,18 @@
 
   // ---------- hash 路由 ----------
   function route() {
-    const hash = window.location.hash.replace(/^#/, '') || '/dashboard';
+    const raw = window.location.hash.replace(/^#/, '');
+    // 登录成功后 hash 停在 #/ ，与空 hash 一并归到工作台
+    const hash = !raw || raw === '/' ? '/dashboard' : raw;
     const page = PAGES[hash];
     const el = document.getElementById('content');
     const crumb = document.getElementById('crumb');
+    // 侧栏按当前路径重绘（未登录时没有 #sidebar，renderMenu 自行跳过）
+    renderMenu(menus, hash);
     if (!page) {
       if (el) el.innerHTML = '<div class="empty">页面不存在</div>';
       return;
     }
-    // 菜单高亮
-    document.querySelectorAll('.menu-item').forEach((x) => {
-      x.classList.toggle('active', (x.dataset.path || '') === hash);
-    });
     // breadcrumb
     const names = [];
     (function find(mms) {

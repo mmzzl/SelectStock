@@ -26,6 +26,7 @@ class BacktestEngine:
         strategy_name: str = "",
         start_date: str | None = None,
         end_date: str | None = None,
+        progress_cb=None,
     ) -> None:
         self.strategy = strategy
         self.data = data
@@ -41,6 +42,7 @@ class BacktestEngine:
         )
         self.task_id = task_id or str(uuid.uuid4())
         self.strategy_name = strategy_name or type(strategy).__name__
+        self.progress_cb = progress_cb
         self._initial_capital = float(capital)
         self.last_close: dict[str, float] = {}
 
@@ -69,10 +71,15 @@ class BacktestEngine:
 
         equity_points: list[EquityPoint] = []
         dates = self._within_window(self.data.dates())
+        total_dates = len(dates)
+        report_step = max(1, total_dates // 100)
         # 全市场逐日快照要读遍所有 parquet 并常驻内存，只用自带取数的策略（KernelStrategy）声明跳过
         needs_market_prices = getattr(self.strategy, "needs_market_prices", True)
 
-        for date in dates:
+        for idx, date in enumerate(dates, 1):
+            if self.progress_cb and (idx % report_step == 0 or idx == total_dates):
+                self.progress_cb(idx, total_dates, date)
+
             broker.settle()
 
             holdings = list(broker.positions)

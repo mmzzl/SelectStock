@@ -103,6 +103,16 @@ class Settings(BaseSettings):
         "settled_amount": ["结算金额", "发生金额"],
     }
 
+    # ---------- 回测（Celery worker 跑内核，后端只投递任务与查状态）----------
+    # 独立 redis db（db 3），与旧 stock_select 项目用的库隔离
+    celery_broker_url: str = "redis://127.0.0.1:6379/3"
+    celery_result_backend: str = "redis://127.0.0.1:6379/3"
+    celery_result_ttl: int = 7 * 24 * 3600     # 回测结果在 redis 里的保留时长
+    backtest_task_name: str = "backtest.run"   # worker 侧 task 名，后端按名 send_task
+    # 回测内核所在仓库根（含 scripts/backtest_main.py 与 data/stock_kline）
+    backtest_root: str = str(BACKEND_DIR.parent.parent)
+    backtest_summary_points: int = 120         # 净值曲线降采样点数，避免作业表塞整条曲线
+
     # ---------- 版本升级中心（自托管）----------
     # 用 as_posix() 归一为 / 分隔：Windows 下仍满足「路径含 /upgrade」契约，且 pathlib 兼容
     upgrade_upload_dir: str = (BACKEND_DIR.parent / "data" / "uploads" / "upgrade").as_posix()

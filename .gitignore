@@ -1,6 +1,11 @@
 # 生成数据 / 日志（不纳入版本库）
 data/
 logs/
+var/
+scripts/spider_progress.json
+# 第三方 TA-Lib C 源码树与下载包（本地编译依赖，40MB 产物不入库）
+scripts/ta-lib/
+scripts/ta-lib-*.tar.gz
 
 # Python
 __pycache__/

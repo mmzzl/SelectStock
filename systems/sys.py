@@ -1,4 +1,4 @@
 import os
 
 def home():
-    return os.path.join('d:/', 'select_stock').replace('\\', '/')
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

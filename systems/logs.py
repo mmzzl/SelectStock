@@ -63,7 +63,7 @@ class Log(object):
         :param level: 日志级别
         :return:
         """
-        filename = f"{home()}/apps/api/logs/sis_%s.log" % mode_name
+        filename = f"{home()}/logs/sis_%s.log" % mode_name
         log_dir = os.path.dirname(filename)
         if not os.path.exists(log_dir):
             os.makedirs(log_dir, exist_ok=True)

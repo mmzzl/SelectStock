@@ -12,6 +12,7 @@ from db.sql.holdings import Holding
 from db.sql.trades import TradeRecord
 from db.sql.inbox import InboxMessage
 from db.sql.selection import SelectJob, SelectResult
+from db.sql.backtest import BacktestJob
 from db.sql.upgrade import UpgradePackage
 
 __all__ = [
@@ -32,6 +33,7 @@ __all__ = [
     "InboxMessage",
     "SelectJob",
     "SelectResult",
+    "BacktestJob",
     "UpgradePackage",
     "user_roles",
     "role_permissions",

@@ -14,6 +14,8 @@ from api.v1 import (
     trades,
     messages,
     selection,
+    backtest,
+    system,
     upgrade,
 )
 from core.dependencies import ensure_password_current
@@ -45,6 +47,10 @@ api_router.include_router(messages.router, dependencies=_password_gate)
 
 # —— 选股模块 ——
 api_router.include_router(selection.router, dependencies=_password_gate)
+
+# —— 回测模块（Celery 投递）与系统监控 ——
+api_router.include_router(backtest.router, dependencies=_password_gate)
+api_router.include_router(system.router, dependencies=_password_gate)
 
 # —— 版本升级模块（超管） ——
 api_router.include_router(upgrade.router, dependencies=_password_gate)

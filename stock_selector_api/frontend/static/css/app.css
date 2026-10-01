@@ -34,14 +34,14 @@ a { color: #409eff; text-decoration: none; cursor: pointer; }
 
 /* ---------- 卡片 / 统计 ---------- */
 .card { background: #fff; border-radius: 6px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
-.cards { display: flex; gap: 16px; margin-bottom: 16px; }
-.card.num { flex: 1; text-align: center; }
+.cards { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 16px; }
+.card.num { flex: 1 1 180px; min-width: 180px; text-align: center; }
 .card.num b { display: block; font-size: 32px; color: #1890ff; margin-top: 8px; }
 .empty { color: #909399; text-align: center; padding: 40px; }
 .hint { color: #909399; font-size: 13px; margin-right: 8px; }
 
 /* ---------- 按钮 ---------- */
-.btn { display: inline-block; padding: 8px 16px; border: 1px solid #dcdfe6; border-radius: 4px; background: #fff; color: #303133; cursor: pointer; font-size: 14px; }
+.btn { display: inline-block; white-space: nowrap; padding: 8px 16px; border: 1px solid #dcdfe6; border-radius: 4px; background: #fff; color: #303133; cursor: pointer; font-size: 14px; }
 .btn:hover { border-color: #409eff; color: #409eff; }
 .btn.btn-primary { background: #1890ff; border-color: #1890ff; color: #fff; }
 .btn.btn-primary:hover { background: #40a9ff; }
@@ -50,7 +50,7 @@ a { color: #409eff; text-decoration: none; cursor: pointer; }
 .btn[disabled] { opacity: .5; cursor: not-allowed; }
 
 /* ---------- 工具栏 / 表格 ---------- */
-.toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
 .tbl-search { padding: 7px 10px; border: 1px solid #dcdfe6; border-radius: 4px; }
 .tbl { width: 100%; background: #fff; border-collapse: collapse; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
 .tbl th, .tbl td { padding: 12px; text-align: left; border-bottom: 1px solid #ebeef5; }

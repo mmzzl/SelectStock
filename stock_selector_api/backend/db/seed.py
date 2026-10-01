@@ -31,6 +31,11 @@ INIT_PERMISSIONS = [
     # 通知模块
     {"code": "sys:notify:list", "name": "通知配置查看", "module": "system"},
     {"code": "sys:notify:update", "name": "通知配置管理", "module": "system"},
+    # 系统监控
+    {"code": "sys:monitor:list", "name": "系统资源查看", "module": "system"},
+    # 回测模块
+    {"code": "backtest:list", "name": "回测任务查看", "module": "backtest"},
+    {"code": "backtest:run", "name": "发起回测", "module": "backtest"},
     # 设备模块（示例）
     {"code": "device:list", "name": "设备列表", "module": "device"},
     {"code": "device:create", "name": "新增设备", "module": "device"},
@@ -42,6 +47,7 @@ INIT_PERMISSIONS = [
 INIT_MENUS = [
     # 一级目录
     {"id": "m_dashboard", "name": "工作台", "menu_type": "menu", "path": "#/dashboard", "icon": "home", "parent_id": "", "sort_order": 1, "permission_code": "", "is_visible": True},
+    {"id": "m_backtest", "name": "回测", "menu_type": "menu", "path": "#/backtest", "icon": "chart", "parent_id": "", "sort_order": 3, "permission_code": "backtest:list", "is_visible": True},
     {"id": "m_device", "name": "资产管理", "menu_type": "dir", "path": "", "icon": "server", "parent_id": "", "sort_order": 2, "permission_code": "", "is_visible": True},
     {"id": "m_sys", "name": "系统管理", "menu_type": "dir", "path": "", "icon": "setting", "parent_id": "", "sort_order": 99, "permission_code": "", "is_visible": True},
     # 设备子菜单
@@ -52,6 +58,7 @@ INIT_MENUS = [
     {"id": "m_sys_menus", "name": "菜单管理", "menu_type": "menu", "path": "#/menus", "icon": "", "parent_id": "m_sys", "sort_order": 3, "permission_code": "sys:menu:list", "is_visible": True},
     {"id": "m_sys_notify", "name": "通知配置", "menu_type": "menu", "path": "#/notify/channels", "icon": "", "parent_id": "m_sys", "sort_order": 4, "permission_code": "sys:notify:list", "is_visible": True},
     {"id": "m_sys_notify_policy", "name": "订阅策略", "menu_type": "menu", "path": "#/notify/policy", "icon": "", "parent_id": "m_sys", "sort_order": 5, "permission_code": "sys:notify:list", "is_visible": True},
+    {"id": "m_sys_monitor", "name": "系统监控", "menu_type": "menu", "path": "#/system", "icon": "", "parent_id": "m_sys", "sort_order": 6, "permission_code": "sys:monitor:list", "is_visible": True},
 ]
 
 # 角色拥有的权限（按 code 关联），超级管理员不用绑定（is_superuser 通配）
@@ -59,10 +66,12 @@ ROLE_PERMISSION_CODES = {
     "superadmin": [],  # 通配 *
     "admin": [
         "sys:user:list", "sys:role:list", "sys:menu:list",
-        "sys:notify:list", "sys:notify:update",
+        "sys:notify:list", "sys:notify:update", "sys:monitor:list",
+        "backtest:list", "backtest:run",
         "device:list", "device:create", "device:update", "device:delete",
     ],
-    "readonly": ["device:list"],
+    # 只读：能看回测作业，不能发起回测；系统监控属运维信息，不授予只读档
+    "readonly": ["device:list", "backtest:list"],
 }
 
 INIT_DEVICES = [

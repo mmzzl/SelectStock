@@ -18,6 +18,11 @@ dependencies = [
     "python-multipart>=0.0.9",
     "pillow>=10.1",
     "cryptography>=42.0",
+    # 回测：后端只投递任务，计算在 celery worker（worker 还需仓库根 requirements 的内核依赖）
+    "celery>=5.3",
+    "redis>=5.0",
+    # 系统监控页采样
+    "psutil>=5.9",
 ]
 
 [project.optional-dependencies]
