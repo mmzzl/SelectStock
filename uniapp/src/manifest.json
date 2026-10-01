@@ -10,9 +10,7 @@
   "app-plus": {
     "distribute": {
       "android": {
-        "packagename": {
-          "name": "com.select.stock"
-        }
+        "packagename": "com.select.stock"
       }
     }
   }

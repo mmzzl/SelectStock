@@ -5,16 +5,13 @@ const uniPlugin = uni.default || uni;
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  // 默认打本机后端；并行验证改动时可指向另一端口（VITE_PROXY_TARGET=http://127.0.0.1:18081）
-  const target = env.VITE_PROXY_TARGET || "http://127.0.0.1:18080";
+  // dev 代理的后端；并行验证改动时可指向另一端口（VITE_PROXY_TARGET=http://127.0.0.1:8011）
+  const target = env.VITE_PROXY_TARGET || "http://127.0.0.1:8010";
   return {
     plugins: [uniPlugin()],
-    define: {
-      __VITE_API_BASE__: JSON.stringify(env.VITE_API_BASE || ""),
-      __VITE_WS_URL__: JSON.stringify(env.VITE_WS_URL || `${target.replace(/^http/, "ws")}/ws/notify`),
-      __H5_VER_CODE__: JSON.stringify(env.H5_VER_CODE || "100"),   // 与 manifest versionCode 同步
-      __APP_VER_CODE__: JSON.stringify(env.APP_VER_CODE || "100"), // 同上
-    },
+    // 构建期配置一律走 VITE_* + import.meta.env（Vite 自动注入并静态替换）。
+    // 注意：以前用 define 配 globalThis.__X__ 是无效的——define 只替换裸标识符，
+    // 成员表达式不替换，导致 API 地址与版本号注入一直是空的。
     server: {
       port: 5173,
       proxy: {

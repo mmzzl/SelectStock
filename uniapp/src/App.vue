@@ -5,7 +5,7 @@ import { useClient } from "./composables/useClient.js";
 import { checkUpdate } from "./logic/version.js";
 
 function h5VersionCheck() {
-  const local = Number(globalThis.__H5_VER_CODE__ || 100);   // 构建注入，缺省随 manifest
+  const local = Number(import.meta.env.VITE_H5_VER_CODE || 100);   // 构建注入，缺省随 manifest
   useClient().upgrade.latest({ platform: "h5", version_code: local })
     .then((info) => {
       const u = checkUpdate({ local, remote: info?.latest });   // 后端返回 {has_update, latest}

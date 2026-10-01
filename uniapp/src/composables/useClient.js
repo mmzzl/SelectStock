@@ -7,7 +7,7 @@ import { messagesApi } from "../api/messages.js";
 import { upgradeApi } from "../api/upgrade.js";
 import { loadSession, clearSession, setSession } from "../store/session.js";
 
-const BASE = globalThis.__VITE_API_BASE__ || "";
+const BASE = import.meta.env.VITE_API_BASE || "";
 
 let _cached = null;
 export function useClient() {

@@ -10,7 +10,7 @@ import { loadSession } from "../../store/session.js";
 const rows = ref([]); const unread = ref(0); const loaded = ref(false);
 const err = ref("");
 const { messages } = useClient();
-const WS_URL = globalThis.__VITE_WS_URL__ || "ws://127.0.0.1:18080/ws/notify";
+const WS_URL = import.meta.env.VITE_WS_URL || "ws://127.0.0.1:8010/ws/notify";
 let sock = null;
 
 async function reload(sinceId) {

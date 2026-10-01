@@ -42,7 +42,7 @@ function downloadAndInstall(url, md5, pkgType) {
   dtask.start();
 }
 function appUpdate() {
-  const local = Number(globalThis.__APP_VER_CODE__ || 100);
+  const local = Number(import.meta.env.VITE_APP_VER_CODE || 100);
   useClient().upgrade.latest({ platform: (isAndroidApp() ? "android" : "ios"), version_code: local })
     .then((info) => {
       const u = checkUpdate({ local, remote: info?.latest });
@@ -60,7 +60,7 @@ const checkUpgrade = appUpdate;
 
 // #ifndef APP-PLUS
 function checkUpgrade() {
-  const local = Number(globalThis.__H5_VER_CODE__ || 100);
+  const local = Number(import.meta.env.VITE_H5_VER_CODE || 100);
   useClient().upgrade.latest({ platform: "h5", version_code: local })
     .then((info) => {
       const u = checkUpdate({ local, remote: info?.latest });
