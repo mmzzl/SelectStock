@@ -28,6 +28,18 @@ function defaultAdapter() {
   };
 }
 
+// App 端（Android JS 核心）没有 URLSearchParams 全局，且调用方普遍传默认空对象，
+// 因此自己拼 query：空对象要得到 ""，undefined/null 一律跳过。
+function toQuery(query) {
+  const parts = [];
+  for (const k of Object.keys(query)) {
+    const v = query[k];
+    if (v === undefined || v === null) continue;
+    parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
+  }
+  return parts.length ? `?${parts.join("&")}` : "";
+}
+
 function handle({ statusCode, data }, { onUnauthorized }) {
   if (statusCode === 401) { onUnauthorized?.(); throw new UnauthorizedError(data?.message); }
   if (statusCode === 428) throw new PasswordExpiredError(data?.message);
@@ -43,9 +55,7 @@ export function createClient({ adapter, getToken, onUnauthorized, baseUrl = "" }
   const ad = adapter || defaultAdapter();
   return {
     async request(method, path, { query, body, header } = {}) {
-      const qs = query
-        ? "?" + new URLSearchParams(Object.entries(query).filter(([, v]) => v !== undefined)).toString()
-        : "";
+      const qs = query ? toQuery(query) : "";
       const token = getToken ? getToken() : "";
       const res = await ad.request({
         url: `${baseUrl}${path}${qs}`,
@@ -56,7 +66,7 @@ export function createClient({ adapter, getToken, onUnauthorized, baseUrl = "" }
       return handle(res, { onUnauthorized });
     },
     async upload(path, { filePath, name = "file", formData = {}, query, header = {} } = {}) {
-      const qs = query ? "?" + new URLSearchParams(Object.entries(query)).toString() : "";
+      const qs = query ? toQuery(query) : "";
       const token = getToken ? getToken() : "";
       const res = await ad.upload({
         url: `${baseUrl}${path}${qs}`,

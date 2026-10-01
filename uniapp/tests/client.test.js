@@ -99,3 +99,18 @@ test("领域 API 路径映射（契约消费）", async () => {
   await upgradeApi(c).latest({ platform: "h5", version_code: 1 });
   assert.equal(a.calls[4].url, "/api/app/latest?platform=h5&version_code=1");
 });
+test("App 端缺 URLSearchParams：空 query 不拼 ?，值自己编码", async () => {
+  const a = fakeAdapter();
+  const saved = globalThis.URLSearchParams;
+  delete globalThis.URLSearchParams; // Android JS 核心没有该全局
+  try {
+    const { holdingsApi } = await import("../src/api/holdings.js");
+    const api = holdingsApi(createClient({ adapter: a, getToken: () => "T" }));
+    await api.list();
+    assert.equal(a.calls[0].url, "/api/v1/holdings");
+    await api.pnl({ natural_day: "2026-09-20", note: "a b&c", skip: undefined });
+    assert.equal(a.calls[1].url, "/api/v1/holdings/pnl?natural_day=2026-09-20&note=a%20b%26c");
+  } finally {
+    globalThis.URLSearchParams = saved;
+  }
+});
