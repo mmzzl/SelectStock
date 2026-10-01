@@ -157,7 +157,8 @@
       return false;
     })(menus);
     if (crumb && names.length) crumb.textContent = names.join(' / ');
-    page.render(el, { user: currentUser, menus, refreshMenus }).catch((err) => {
+    // 页面 render 必须返回 Promise；包一层防止漏 return 时把异常抛给 boot 判定为未登录
+    Promise.resolve(page.render(el, { user: currentUser, menus, refreshMenus })).catch((err) => {
       if (el) el.innerHTML = '<div class="empty">加载失败: ' + AppUI.escapeHtml(err.message) + '</div>';
     });
   }

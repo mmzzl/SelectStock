@@ -29,13 +29,16 @@
         <div id="pl-list" class="muted">加载中…</div>
       </div>
       <div id="pl-editor"></div>`;
-    API.notifyEvents().then((d) => {
+    return API.notifyEvents().then((d) => {
       META = d;
       return Promise.all([API.notifyPolicies(), API.notifyChannels()]);
     }).then(([pl, chs]) => {
       LIST = pl; CHANNELS = chs;
       drawList();
-    }).catch(() => {});
+    }).catch((e) => {
+      const wrap = document.getElementById('pl-list');
+      if (wrap) wrap.innerHTML = '<div class="empty">加载失败: ' + esc(e.message) + '</div>';
+    });
   }
 
   function subscribedEvents(p) {

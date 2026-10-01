@@ -23,17 +23,18 @@
         <div id="ch-list"></div>
       </div>`;
 
-    const api = window.App ? App : {};
-    API.notifyEvents().then((d) => {
+    return API.notifyEvents().then((d) => {
       TYPES = d.channel_types;
       TYPES.forEach((t) => {
         const opt = document.createElement('option');
         opt.value = t.type; opt.textContent = t.label;
         document.getElementById('type-filter').appendChild(opt);
-        const meta = typeMeta(t.type);
       });
       refresh(el);
-    }).catch(() => {});
+    }).catch((e) => {
+      const wrap = document.getElementById('ch-list');
+      if (wrap) wrap.innerHTML = '<div class="empty">加载失败: ' + AppUI.escapeHtml(e.message) + '</div>';
+    });
 
     if (canWrite) {
       document.getElementById('add-ch').addEventListener('click', () => editChannel(el, null));
