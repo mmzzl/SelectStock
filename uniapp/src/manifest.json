@@ -1,17 +1,20 @@
 {
-  "name": "select-stock",
-  "appid": "",
-  "description": "智能选股客户端",
-  "versionName": "0.1.0",
-  "versionCode": "100",
-  "h5": {
-    "title": "智能选股"
-  },
-  "app-plus": {
-    "distribute": {
-      "android": {
-        "packagename": "com.select.stock"
-      }
+    "name" : "select-stock",
+    "appid" : "__UNI__9BE0E99",
+    "description" : "智能选股客户端",
+    "versionName" : "0.1.1",
+    "versionCode" : "101",
+    "h5" : {
+        "title" : "智能选股"
+    },
+    "app-plus" : {
+        "distribute" : {
+            "android" : {
+                "packagename" : "com.select.stock"
+            },
+            "ios" : {
+                "dSYMs" : false
+            }
+        }
     }
-  }
 }

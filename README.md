@@ -26,7 +26,7 @@
 
 四层职责严格单向：**脚本产数据 → 插件算信号 → 后端编排落库 → 前端展示**。
 下面一节先讲选股插件（数据流、内核、策略、回测），其后是各采集脚本的用法。
-本地多服务端口分配与联调清单见 `uniapp/README.md`；常驻进程拓扑、部署步骤与访问方式见文末「后台部署与运维」。
+本地多服务端口分配与联调清单见 `uniapp/README.md`；安卓 APK 的 HBuilderX 云打包步骤见 `uniapp/README.md`「安卓 App 出包」；常驻进程拓扑、部署步骤与访问方式见文末「后台部署与运维」。
 
 ## 插件化量化选股系统 stock_selector/
 
@@ -169,8 +169,8 @@ uniapp  ──/api/v1/selection/*──►  后端 stock_selector_api  ──HTT
 本地起一套互不干扰的验证链路：插件 `python -m stock_selector.main --port 18003`；
 后端 `SELECTION_PLUGIN_BASE_URL=http://127.0.0.1:18003 DATABASE_URL=... uvicorn main:app --port 18085`
 （注意 `backend/main.py` 的 `__main__` 分支写死 8000，换端口必须走 uvicorn 命令行）；
-前端 `VITE_PROXY_TARGET=http://127.0.0.1:18085 npx vite`（`vite.config.js` 的 `/api`、`/ws` 代理与
-WS 地址都由该变量派生，默认仍指向 18080）。
+前端 `VITE_PROXY_TARGET=http://127.0.0.1:18085 npx vite`（`vite.config.js` 的 `/api`、`/ws` 代理由
+该变量派生，不设置时默认 `http://127.0.0.1:8010`，即本机已部署的 API；生产地址走 `uniapp/.env.production`，见 `uniapp/README.md`）。
 
 ### 数据源（`stock_selector/config/settings.yaml` 的 `datasource.type`）
 
@@ -603,6 +603,7 @@ supervisord 本身由发行版自带的 `supervisor.service` 托管并已 `enabl
 ### 使用方法
 
 - 访问 **http://&lt;局域网IP&gt;:8080/**（备用直连 `:8010`，绕过 nginx）。默认账号 `admin / admin123`，登录后先改密码（要求 8 位以上、含大小写字母与数字）
+- **端口链路**：浏览器/手机只认 **8080**（`lexmath-nginx` 容器内 `listen 8080`，compose 映射 `8080:8080`，`/` 与 `/ws/` 都转发到 upstream `host.docker.internal:8010`，即宿主机上的 `selectstock-api`）。**8010 是后端内部端口**，平时不用直连；容器里必须写 `host.docker.internal` 而不是 `127.0.0.1`。uni-app App 端用的也是 8080 入口（`VITE_API_BASE=http://<局域网IP>:8080`，见 `uniapp/README.md`「安卓 App 出包」）
 - **回测页**：「发起回测」→ 填区间/资金/仓位/策略来源 → 列表每 4 秒轮询进度（`逐日撮合 i/N`）→ 「查看」看指标卡、净值曲线与最近 30 笔成交。全量明细在 Mongo `eastmoney_news.backtest_results / backtest_trades / backtest_equity`，作业表 `backtest_jobs` 只留精简摘要
 - **系统监控页**：CPU / 内存 / Swap / 各挂载分区使用率 / 后端进程 RSS，5 秒自动刷新，用来判断回测 worker 有没有把机器吃满
 - **权限**：`backtest:list` 看历史、`backtest:run` 发起回测、`sys:monitor:list` 看系统监控。admin 三样全有，readonly 只有 `backtest:list`
