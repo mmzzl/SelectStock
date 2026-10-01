@@ -19,13 +19,14 @@
                  ▼  HTTP /api/selector/run · /api/strategy/list
 编排层   stock_selector_api/  FastAPI 后端：任务编排 + select_jobs/select_results 落库，零财务计算
                  │  REST /api/v1/*  +  WebSocket /ws/notify
+                 │  └─ 回测经 Celery(Redis db3) 投递给 worker 进程跑 backtest_main.py，逐日进度回写 backtest_jobs
                  ▼
 展示层   uniapp/  Vue 移动端：只展示、不计算
 ```
 
 四层职责严格单向：**脚本产数据 → 插件算信号 → 后端编排落库 → 前端展示**。
 下面一节先讲选股插件（数据流、内核、策略、回测），其后是各采集脚本的用法。
-本地多服务端口分配与联调清单见 `uniapp/README.md`。
+本地多服务端口分配与联调清单见 `uniapp/README.md`；常驻进程拓扑、部署步骤与访问方式见文末「后台部署与运维」。
 
 ## 插件化量化选股系统 stock_selector/
 
@@ -350,6 +351,9 @@ python scripts/backtest_main.py --strategy trend_rebound --universe 500 \
 > ⚠️ `RuleEvaluator` 用 `eval()` 且已关闭 `__builtins__`、限制指标列白名单，但属性访问未收口。
 > 一旦 `trading_rules` 允许 App 端用户编辑，需先换成 ast 白名单求值（该决策尚未确定）。
 
+后台管理还有个「回测」页：参数白名单校验后投递 Celery 任务，由 worker 跑上面这套内核，
+逐日进度回显到页面，后端只投递与查状态、零计算。详见下文「后台部署与运维」一节。
+
 ### 消息面（`news/`）
 
 `stock_selector/news/` 是消息面两层解读的**实现层**（`fetch` 取 Mongo 新闻与自然日窗口、`analyze` 调 LLM、
@@ -550,6 +554,74 @@ python scripts/analyze_news_llm.py --stats trend --code BK0464 --start 2026-09-0
 - 非 dict 元素 → 跳过并 WARNING
 
 日志输出到 `logs/news_analyze_YYYYMMDD.log`。
+
+## 后台部署与运维（supervisor + nginx）
+
+整套后台由 supervisor 常驻五个进程，对外经 nginx 的 8080 端口反代（nginx 容器复用 `lex_math_new` 项目的 `lexmath-nginx`）。所有配置的源副本都在 `deploy/`，改完再拷去生效位置。
+
+| supervisor program | 端口 | 职责 | 配置副本 |
+|---|---|---|---|
+| `selectstock-api` | 8010 | FastAPI 后台 + 无构建前端（静态页同进程托管） | `deploy/selectstock-api.conf` |
+| `selectstock-celery-worker` | — | 真正跑回测内核的进程（Redis db3 队列，concurrency 1） | `deploy/selectstock-celery-worker.conf` |
+| `selectstock-plugin-selector` | 8002 | 选股内核的 HTTP 适配层，后端薄代理 | `deploy/selectstock-plugin-selector.conf` |
+| `selectstock-plugin-portfolio` | 8001 | 持仓诊断插件（判定与收益公式都在这里） | `deploy/selectstock-plugin-portfolio.conf` |
+| `selectstock-scheduler` | — | 采集调度：APScheduler 跑 `config/inputs.conf` 的 `script://` 任务 | `deploy/selectstock-scheduler.conf` |
+
+**端口为什么不是 8000**：文档约定后端占 8000，但本机 8000 已被 `/data/work/lex_math_new/backend` 占用，所以 API 改用 **8010**，对外统一走 nginx **8080**。换端口只需同时改 `deploy/selectstock-api.conf` 的 `--port` 与 `deploy/nginx/selectstock.conf` 的 upstream。
+
+### 前置条件
+
+- Redis 在 `127.0.0.1:6379`，回测任务用 **db 3**（与旧 `stock_select` 项目分库隔离），broker 与 result 同库
+- MongoDB（`lexmath-mongo` 容器）可达：内核从 `stock_kline` 读行情，结果写回 `eastmoney_news`
+- Python 依赖：API 侧 `celery / redis / psutil` 见 `stock_selector_api/pyproject.toml`；worker 还要仓库根 `requirements.txt` 里的内核依赖（pandas / pyarrow / pymongo 等）
+
+### 部署步骤
+
+```bash
+cd /data/work/SelectStock
+
+# 1) 依赖（已装可跳过）
+python3 -m pip install -e ./stock_selector_api          # API 侧：celery/redis/psutil
+python3 -m pip install -r requirements.txt              # worker 侧：回测与选股内核依赖
+
+# 2) 密钥：JWT_SECRET 放在不入库的 .env（缺省值会让任何人伪造令牌）
+python3 -c "import secrets,pathlib; p=pathlib.Path('stock_selector_api/.env'); \
+p.write_text('JWT_SECRET='+secrets.token_urlsafe(48)+chr(10)) if not p.exists() else print('已存在，跳过')"
+
+# 3) supervisor 五个常驻进程
+sudo cp deploy/selectstock-*.conf /etc/supervisor/conf.d/
+sudo supervisorctl reread && sudo supervisorctl update
+sudo supervisorctl status                               # 全部 RUNNING 才算起来
+
+# 4) nginx 反代（复用 lexmath-nginx 容器；compose 里需保留 "8080:8080" 端口映射）
+cp deploy/nginx/selectstock.conf /data/work/lex_math_new/deploy/nginx/conf.d/selectstock.conf
+docker exec lexmath-nginx nginx -t && docker exec lexmath-nginx nginx -s reload
+```
+
+supervisord 本身由发行版自带的 `supervisor.service` 托管并已 `enabled`，重启后五个进程自动拉起。`deploy/systemd/supervisor.service` 只是无系统包时的参考副本，不需要安装。
+
+### 使用方法
+
+- 访问 **http://&lt;局域网IP&gt;:8080/**（备用直连 `:8010`，绕过 nginx）。默认账号 `admin / admin123`，登录后先改密码（要求 8 位以上、含大小写字母与数字）
+- **回测页**：「发起回测」→ 填区间/资金/仓位/策略来源 → 列表每 4 秒轮询进度（`逐日撮合 i/N`）→ 「查看」看指标卡、净值曲线与最近 30 笔成交。全量明细在 Mongo `eastmoney_news.backtest_results / backtest_trades / backtest_equity`，作业表 `backtest_jobs` 只留精简摘要
+- **系统监控页**：CPU / 内存 / Swap / 各挂载分区使用率 / 后端进程 RSS，5 秒自动刷新，用来判断回测 worker 有没有把机器吃满
+- **权限**：`backtest:list` 看历史、`backtest:run` 发起回测、`sys:monitor:list` 看系统监控。admin 三样全有，readonly 只有 `backtest:list`
+- 8001 / 8002 两个插件只给后端内部调用，不要从浏览器访问，也不要对外网开放
+
+### 故障排查
+
+| 症状 | 查哪里 |
+|---|---|
+| 发起回测一直 `queued`、进度 0% | `sudo supervisorctl status selectstock-celery-worker`；页面顶部 worker chip 显示"不在线"就是没人消费，再确认 Redis 6379 与 db 3 |
+| 回测 `failed` | 作业「说明」列有错误摘要；`tail -50 logs/celery-worker.err.log` 看内核栈。`queued/running` 超 3 小时无状态会被自动判 failed，避免把用户的单飞位占死 |
+| 页面 502 / 打不开 | `tail -50 logs/api.err.log`，确认 8010 在听；再 `docker exec lexmath-nginx nginx -T \| grep 8080` 看反代 |
+| 改了 conf 不生效 | supervisor 要 `sudo supervisorctl reread && sudo supervisorctl update`；nginx 要 `nginx -t` 后 `nginx -s reload` |
+| 选股 / 持仓诊断报插件不可用 | 8001、8002 两个 program 是否 RUNNING |
+| 定时采集没跑 | `logs/scheduler.out.log`；`systems/conf.py` 对不存在的配置文件静默返回空 dict，先确认 `config/inputs.conf` 路径真的存在 |
+
+日志统一在 `logs/`：`api` / `celery-worker` / `plugin-selector` / `plugin-portfolio` / `scheduler` 各自的 `.out.log` 与 `.err.log`。
+
+> 注意有**两套互不重叠**的调度器：仓库根 `scheduler/scheduler.py` 跑 `config/inputs.conf` 的 `script://`（采集脚本）；后端进程内的 APScheduler 跑 `stock_selector_api/backend/conf/inputs.conf` 的 `task://`（设备巡检 5 分钟、17:30 选股、18:00 持仓诊断）。所以 API 进程要保持 `SCHEDULE_ENABLED=true`，同时**不要加 `--workers`**，否则定时任务会重复执行、SQLite 还会写锁竞争。
 
 ## session-context：跨会话上下文维护
 

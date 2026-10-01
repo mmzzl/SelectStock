@@ -59,10 +59,18 @@ def _load_raw() -> dict:
         return {}
     try:
         data = json.loads(p.read_text(encoding="utf-8") or "{}")
-        return data if isinstance(data, dict) else {}
     except (json.JSONDecodeError, OSError) as e:
         log.error("读取通知渠道配置失败: {} {}", p, e)
         return {}
+    if not isinstance(data, dict):
+        return {}
+    # 手改的配置文件里条目常漏 type；分桶键就是权威类型，补齐否则
+    # list_all/get_by_key 都匹配不上，策略页渠道下拉会整列空掉
+    for ctype, items in data.items():
+        for ch in items if isinstance(items, list) else []:
+            if isinstance(ch, dict):
+                ch["type"] = ctype
+    return data
 
 
 def _save_raw(data: dict) -> None:

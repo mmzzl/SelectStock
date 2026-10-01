@@ -54,8 +54,10 @@ a { color: #409eff; text-decoration: none; cursor: pointer; }
 .tbl-search { padding: 7px 10px; border: 1px solid #dcdfe6; border-radius: 4px; }
 .tbl { width: 100%; background: #fff; border-collapse: collapse; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
 .tbl th, .tbl td { padding: 12px; text-align: left; border-bottom: 1px solid #ebeef5; }
-.tbl th { background: #fafafa; color: #606266; font-weight: 500; }
+.tbl th { background: #fafafa; color: #606266; font-weight: 500; white-space: nowrap; }
 .tbl tr:hover td { background: #f5f7fa; }
+/* 窄屏下表格横向滚动，而不是把中文表头压成一字一行 */
+.tbl-scroll { overflow-x: auto; }
 .act { color: #409eff; margin-right: 12px; }
 
 /* ---------- 标签 / 分页 ---------- */

@@ -132,8 +132,8 @@
       [t.date, t.code, t.name, t.side, fmtMoney(t.price), t.shares, fmtMoney(t.amount),
         fmtMoney(t.fee), t.pnl === null || t.pnl === undefined ? '' : fmtMoney(t.pnl)]
         .map((v) => '<td>' + esc(v) + '</td>').join('') + '</tr>').join('');
-    return '<table class="tbl"><thead><tr>' + head.map((h) => '<th>' + h + '</th>').join('') +
-      '</tr></thead><tbody>' + rows + '</tbody></table>' +
+    return '<div class="tbl-scroll"><table class="tbl"><thead><tr>' + head.map((h) => '<th>' + h + '</th>').join('') +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
       '<div class="hint">仅展示最近 ' + trades.length + ' 笔，全量成交见回测结果库</div>';
   }
 

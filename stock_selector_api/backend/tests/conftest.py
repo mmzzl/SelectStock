@@ -33,11 +33,11 @@ def _test_env(tmp_path_factory):
 
     settings.upgrade_upload_dir = _P(str(tmp_path_factory.mktemp("upgrade") / "upgrade")).as_posix()
     settings.notify_channels_file = str(tmp_path_factory.mktemp("ch") / "channels.json")
-    settings.notify_policy_file = str(tmp_path_factory.mktemp("po") / "policy.json")
+    settings.notify_policies_file = str(tmp_path_factory.mktemp("po") / "policies.json")
     settings.notify_state_file = str(tmp_path_factory.mktemp("st") / "state.json")
-    from services.notify_service import save_policy
+    from services.notify import policies
 
-    save_policy({})
+    policies._save_raw([])
     yield
     _TEST_DB = None
 
@@ -100,11 +100,12 @@ async def _clean_holdings_each():
 
 @pytest.fixture(autouse=True)
 async def _reset_notify_each():
-    """每个测试前重置通知策略与节流状态：避免订阅开关/发送时间点跨用例污染。"""
+    """每个测试前重置订阅策略与节流状态：避免策略开关/发送时间点跨用例污染。"""
     from services import notify_service
+    from services.notify import policies
 
     notify_service._save_state({})
-    notify_service.save_policy({})
+    policies._save_raw([])
     yield
 
 

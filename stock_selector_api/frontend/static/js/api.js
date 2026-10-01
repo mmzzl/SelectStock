@@ -136,8 +136,11 @@
       : request('POST', '/notify/channels', data)),
     notifyChannelDelete: (key) => request('DELETE', '/notify/channels/' + encodeURIComponent(key)),
     notifyChannelTest: (key, text, to) => request('POST', '/notify/channels/' + encodeURIComponent(key) + '/test', { text, to }),
-    notifyPolicyGet: () => request('GET', '/notify/policy'),
-    notifyPolicyPut: (policy) => request('PUT', '/notify/policy', { policy }),
+    notifyPolicyUpsert: (id, data) => (id
+      ? request('PUT', '/notify/policies/' + encodeURIComponent(id), data)
+      : request('POST', '/notify/policies', data)),
+    notifyPolicies: () => request('GET', '/notify/policies'),
+    notifyPolicyDelete: (id) => request('DELETE', '/notify/policies/' + encodeURIComponent(id)),
 
     // 菜单
     menusManage: () => request('GET', '/sys/menus'),

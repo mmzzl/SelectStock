@@ -14,11 +14,13 @@
 | 统一日志 | loguru 控制台 + 滚动文件 |
 | 登录验证码+账户锁定 | Pillow 图片验证码绑定匿名会话防伪造；登录/验证码失败超限按用户名+IP 双维度锁定，时长可配置、到期自动解锁 |
 | 密码治理+角色权限分配 | 密码长度/复杂度可配置校验、历史防重用、定期强制改密（到期业务接口 428）；权限树展示与角色分配（模块→功能→动作） |
-| 通知组件 | 企微/钉钉/飞书 机器人 webhook + 邮箱 SMTP 四类渠道，AES-GCM 加密落盘；订阅策略按事件+渠道+节流分发，登录失败/锁定/任务失败自动触发通知 |
+| 通知组件 | 企微/钉钉/飞书 机器人 webhook + 邮箱 SMTP 四类渠道，AES-GCM 加密落盘；多条订阅策略按事件+渠道+节流分发，登录失败/锁定/任务失败自动触发通知 |
 | 无构建前端 | 原生 JS + hash 路由，登录页 / 动态侧栏 / 用户/角色/菜单/示例设备管理页全内置 |
 | 示例模块 | 设备管理完整 CRUD，作为「新增一个功能」的标准模板 |
 | 持仓诊断 | 外部契约接口 `POST /api/portfolio/analyze`（代理插件、幂等重放、零后端判定/收益）+ `GET /api/portfolio/runs`（按 user_id 隔离），双表落库 |
-| 部署就绪 | systemd unit + 安装/卸载脚本，适配 CentOS 物理机 |
+| 回测（Celery） | 「回测」页发起任务：参数白名单校验 + 单飞 → `send_task` 投递，worker 跑内核，逐日进度回显；后端零计算，结果摘要落 `backtest_jobs`、明细进 Mongo |
+| 系统监控 | `GET /api/v1/system/metrics`（psutil 只读采样 CPU/内存/Swap/磁盘/后端进程 RSS），前端 5 秒自动刷新 |
+| 部署就绪 | 本机 Ubuntu 走 supervisor 五进程 + nginx 8080 反代（配置副本在仓库 `deploy/`）；`deploy/` 内另留 CentOS systemd 单元与安装脚本 |
 
 ## 快速开始（开发）
 
@@ -31,6 +33,9 @@ cp .env.example .env        # 按需修改
 ```
 
 浏览器打开 http://localhost:8000/ ，默认账号 `admin / admin123`（超管）。
+
+> 本机正式实例不跑 8000（该端口被 `lex_math_new` 占用）：后端由 supervisor 托管在 **8010**，
+> 对外经 nginx **8080**。本地临时起 dev 前先 `ss -ltn | grep 80` 确认端口没撞，别和常驻实例并跑。
 
 ### 跑测试
 
@@ -126,18 +131,18 @@ async def delete_device(id: str): ...
 
 ### 2.9 通知组件（渠道 + 订阅策略，参考 secvisual / 订阅策略语义）
 
-安全告警发通知的**开箱组件**：先配好渠道，再按事件写订阅策略，事件触发即自动发送。
+安全告警发通知的**开箱组件**：先配好渠道，再新增订阅策略（可多条），事件触发即自动发送。
 
 - **四类渠道**：企业微信（群机器人 webhook）、钉钉（加签机器人）、飞书（机器人）、邮箱（SMTP）。渠道以 JSON 文件落盘（`NOTIFY_CHANNELS_FILE`），**敏感字段 AES-GCM 加密**（SMTP 密码、钉钉/飞书 secret，密钥派生自 JWT_SECRET），对外只暴露"是否已配置"
-- **订阅策略**（`NOTIFY_POLICY_FILE`）结构对齐 secvisual 订阅策略：总开关 `is_on` + 事件列表 + 渠道列表，每个事件可配**节流间隔**（`interval`，避免告警风暴）、自定义 `subject/template`；每渠道可配 `channel_key` 与开关
+- **订阅策略**（`NOTIFY_POLICIES_FILE`，多条）：每条 = 名称 + 自身开关 + 事件订阅 + 渠道绑定（`channel_key`、邮箱 `to`、可选 `template`）。每个事件可配**节流间隔**（`interval`，避免告警风暴）与自定义 `subject`；节流按 `(策略, 事件)` 记账，所以两条策略订阅同一事件各发各的、互不压制（典型用法：运维群收全量、业务群只收任务失败）
 - **内置事件**：`account_locked`（账号/IP 被锁定）、`login_failure`（登录失败，含错误数）、`task_failed`（定时任务抛异常）、`custom`（业务 `emit` 任意事件）
 - **接口**（`sys:notify:*` 权限）：
   - `GET/POST /api/v1/notify/channels`、`PUT/DELETE /api/v1/notify/channels/{key}`：渠道 CRUD
   - `POST /api/v1/notify/channels/{key}/test`：发一条测试消息
-  - `GET/PUT /api/v1/notify/policy`：订阅策略读写
-  - `GET /api/v1/notify/events`：内置事件元数据（配置页渲染用）
+  - `GET /api/v1/notify/policies`、`POST /api/v1/notify/policies`、`GET/PUT/DELETE /api/v1/notify/policies/{id}`：订阅策略 CRUD（未知事件码/渠道类型一律 400 拒收）
+  - `GET /api/v1/notify/events`：内置事件与渠道类型元数据（配置页渲染用）
 - **三处自动触发**：登录失败、账号锁定（`services/account_lock_service` 内 `notify_service.emit`）、定时任务异常（`scheduler/scheduler_.py` 的 `task_failed`）
-- **业务接入**：任意代码 `await notify_service.emit("custom", ...)` 即按当前策略分发，`settings.notify_enabled` 为总闸
+- **业务接入**：任意代码 `await notify_service.emit("custom", ...)` 即遍历启用中的策略分发，`settings.notify_enabled` 为进程级总闸
 - **自测**：执行 `POST /channels/{key}/test` 前建议先用 `./scripts/` 或直接 curl 验证 webhook；测试套件用 recorder 替换发送器，离线跑通不发真实请求
 
 ### 3. 数据库可配置切换
@@ -218,7 +223,52 @@ curl -s "http://localhost:8000/api/portfolio/runs?user_id=u_1001&page=1&size=20"
 
 相关文件：`backend/db/sql/portfolio.py`、`backend/schemas/portfolio.py`、`backend/repositories/portfolio.py`、`backend/services/portfolio_service.py`、`backend/services/portfolio_plugin.py`、`backend/api/v1/portfolio.py`。
 
-## 生产部署（CentOS 物理机）
+### 7. 回测（Celery 投递，后端零计算）
+
+红线与前几章一致：**后端不做任何回测算术**。`services/backtest_service.py` 只做参数校验、
+单飞判定、`send_task` 投递和 `AsyncResult` 读状态；撮合、指标、落库全在 worker 进程里调
+仓库根的 `scripts/backtest_main.py`。
+
+| 接口 | 权限 | 说明 |
+|---|---|---|
+| `GET /api/v1/backtest/options` | `backtest:list` | 表单规格（默认值 + 数值上下界）与可选策略来源 |
+| `POST /api/v1/backtest/run` | `backtest:run` | 投递一次回测，返回 `job_id`；同一用户已有未结束作业时返回 400 |
+| `GET /api/v1/backtest/runs` | `backtest:list` | 分页作业列表（摘要，不含净值曲线） |
+| `GET /api/v1/backtest/runs/{job_id}` | `backtest:list` | 作业详情，含 120 点净值与最近 30 笔成交；非本人作业 403 |
+| `GET /api/v1/backtest/workers` | `backtest:list` | worker 在线探测（页面顶部 chip 用） |
+
+参数白名单与校验在 `core/backtest_params.py`：未知键直接拒；日期必须 `YYYY-MM-DD` 且
+`start < end`；`target_amount` 不得撞上 `capital × position_cap_pct` 的单票上限（否则一建仓就
+`ValueError`，宁可发起前报错）。`strategy` 留空即规则模式（买卖条件读 Mongo `trading_rules`）。
+
+进度状态机：worker 每推进若干交易日 `update_state(PROGRESS, {progress, stage})`，后端把
+celery 状态归并进作业表 —— `PROGRESS→running`（写百分比与阶段文案）、`SUCCESS→done`（存精简
+摘要）、`FAILURE→failed`（存错误摘要）、`PENDING` 且超过 3 小时判 `failed`，避免 worker 掉线时
+把用户的单飞位永久占住。结果分两层：作业表只留 120 点净值 + 30 笔成交，全量明细由内核写
+MongoDB `backtest_results / backtest_trades / backtest_equity`。
+
+相关文件：`backend/core/backtest_params.py`、`backend/celery_app.py`、`backend/tasks/backtest_tasks.py`、
+`backend/services/backtest_service.py`、`backend/db/sql/backtest.py`、`backend/repositories/backtest.py`、
+`backend/api/v1/backtest.py`、`frontend/static/js/pages/backtest.js`。
+
+### 8. 系统监控（psutil 只读采样）
+
+`GET /api/v1/system/metrics`（权限 `sys:monitor:list`）返回 hostname/uptime、CPU（含核数与
+load average）、内存与 Swap、各挂载分区使用率、后端自身进程 RSS 与线程数。采样是阻塞调用，
+路由里用 `asyncio.to_thread` 包一层，避免卡住事件循环；伪文件系统（proc/overlay 等）会被过滤，
+同一挂载点只保留一条。页面 `#/system` 每 5 秒轮询一次，离开页面即停。
+
+只读、不触发任何操作，用途是判断回测 worker 有没有把机器吃满。实现见
+`backend/services/system_service.py`、`backend/api/v1/system.py`、`frontend/static/js/pages/system.js`。
+
+## 生产部署
+
+本机（Ubuntu + supervisor + nginx）的完整进程拓扑、端口由来、部署步骤与故障排查，
+统一写在仓库根的 [README「后台部署与运维」一节](../README.md#后台部署与运维supervisor--nginx)。
+配置源副本在仓库根 `deploy/`（`selectstock-api.conf`、`selectstock-celery-worker.conf`、
+`selectstock-plugin-*.conf`、`selectstock-scheduler.conf`、`nginx/selectstock.conf`）。
+
+### 备选：CentOS 物理机 systemd
 
 ```bash
 cd deploy

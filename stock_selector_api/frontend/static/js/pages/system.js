@@ -60,8 +60,8 @@
         gib(proc.rss) + ' · ' + (proc.threads || '-') + ' 线程 · pid ' + (proc.pid || '-'));
 
     document.getElementById('sys-disks').innerHTML =
-      '<table class="tbl"><thead><tr><th>挂载点</th><th>设备</th><th>类型</th><th>容量</th><th>使用率</th></tr></thead>' +
-      '<tbody>' + diskRows(m.disks) + '</tbody></table>';
+      '<div class="tbl-scroll"><table class="tbl"><thead><tr><th>挂载点</th><th>设备</th><th>类型</th><th>容量</th><th>使用率</th></tr></thead>' +
+      '<tbody>' + diskRows(m.disks) + '</tbody></table></div>';
 
     document.getElementById('sys-meta').textContent =
       (m.hostname || '-') + ' · ' + (m.platform || '') + ' · 已运行 ' + uptimeText(m.uptime_seconds);

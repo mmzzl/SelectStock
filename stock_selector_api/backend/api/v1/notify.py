@@ -1,9 +1,7 @@
-"""通知组件接口：事件目录 / 渠道配置 CRUD+测试发送 / 订阅策略读写。
+"""通知组件接口：事件目录 / 渠道配置 CRUD+测试发送 / 订阅策略 CRUD。
 
 权限：list 类需要 sys:notify:list，写与测试需要 sys:notify:update。
 """
-
-from typing import Any
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
@@ -12,7 +10,7 @@ from core.dependencies import require_permission
 from core.exceptions import BizError
 from core.response import ok
 from services import notify_service
-from services.notify import channels, events
+from services.notify import channels, events, policies
 
 router = APIRouter(prefix="/notify", tags=["通知"])
 
@@ -38,8 +36,31 @@ class TestSendIn(BaseModel):
     to: list[str] = []
 
 
+class IntervalIn(BaseModel):
+    value: int = 0
+    unit: str = "m"
+
+
+class EventSubIn(BaseModel):
+    is_on: bool = False
+    interval: IntervalIn = Field(default_factory=IntervalIn)
+    subject: str = ""
+
+
+class ChannelSubIn(BaseModel):
+    is_on: bool = False
+    channel_key: str = ""
+    to: list[str] = Field(default_factory=list)
+    template: str = ""
+
+
 class PolicyIn(BaseModel):
-    policy: dict[str, Any] = Field(default_factory=dict)
+    """一条订阅策略：事件订阅（各自节流）+ 渠道绑定。"""
+
+    name: str = Field(min_length=1, max_length=64)
+    is_on: bool = True
+    events: dict[str, EventSubIn] = Field(default_factory=dict)
+    channels: dict[str, ChannelSubIn] = Field(default_factory=dict)
 
 
 @router.get("/events", summary="事件目录与渠道类型", dependencies=[Depends(require_permission("sys:notify:list"))])
@@ -102,12 +123,40 @@ async def test_channel(key: str, body: TestSendIn):
     return ok(message="测试消息已发送")
 
 
-@router.get("/policy", summary="读取订阅策略", dependencies=[Depends(require_permission("sys:notify:list"))])
-async def get_policy():
-    return ok(notify_service.load_policy())
+@router.get("/policies", summary="订阅策略列表", dependencies=[Depends(require_permission("sys:notify:list"))])
+async def list_policies():
+    return ok(policies.list_all())
 
 
-@router.put("/policy", summary="保存订阅策略", dependencies=[Depends(require_permission("sys:notify:update"))])
-async def put_policy(body: PolicyIn):
-    saved = notify_service.save_policy(body.policy)
+@router.get("/policies/{policy_id}", summary="订阅策略详情", dependencies=[Depends(require_permission("sys:notify:list"))])
+async def get_policy(policy_id: str):
+    policy = policies.get(policy_id)
+    if not policy:
+        raise BizError("订阅策略不存在")
+    return ok(policy)
+
+
+@router.post("/policies", summary="新增订阅策略", dependencies=[Depends(require_permission("sys:notify:update"))])
+async def create_policy(body: PolicyIn):
+    try:
+        return ok(policies.create(body.model_dump()), message="订阅策略已新增")
+    except ValueError as e:
+        raise BizError(str(e))
+
+
+@router.put("/policies/{policy_id}", summary="更新订阅策略", dependencies=[Depends(require_permission("sys:notify:update"))])
+async def update_policy(policy_id: str, body: PolicyIn):
+    try:
+        saved = policies.update(policy_id, body.model_dump())
+    except ValueError as e:
+        raise BizError(str(e))
+    if not saved:
+        raise BizError("订阅策略不存在")
     return ok(saved, message="订阅策略已保存")
+
+
+@router.delete("/policies/{policy_id}", summary="删除订阅策略", dependencies=[Depends(require_permission("sys:notify:update"))])
+async def delete_policy(policy_id: str):
+    if not policies.delete(policy_id):
+        raise BizError("订阅策略不存在")
+    return ok(message="订阅策略已删除")

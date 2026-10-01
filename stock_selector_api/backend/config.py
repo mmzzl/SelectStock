@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     # ---------- 通知组件（渠道配置 / 订阅策略，对齐 secvisual alarm_policy.json 风格）----------
     notify_enabled: bool = True
     notify_channels_file: str = str(BACKEND_DIR / "conf" / "notify_channels.json")
-    notify_policy_file: str = str(BACKEND_DIR / "conf" / "notify_policy.json")
+    notify_policies_file: str = str(BACKEND_DIR / "conf" / "notify_policies.json")
     notify_state_file: str = str(BACKEND_DIR.parent / "data" / "notify_send_state.json")
     schedule_enabled: bool = True
 

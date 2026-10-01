@@ -1,19 +1,18 @@
-"""通知服务：订阅策略加载/保存、事件发送与节流、模板渲染、测试发送。
+"""通知服务：订阅事件分发与节流、模板渲染、测试发送。
 
-策略 JSON 结构对齐 secvisual 订阅策略（alarm_policy.json）语义：
+策略结构（多条，见 services/notify/policies.py）：
   {
-    "is_on": 总开关,
-    "events": { "<事件码>": {"is_on": 开关, "interval": {"value": n, "unit": "m|h|d"}, "subject": 可选}, ... },
+    "id": 策略 id, "name": 名称, "is_on": 该策略开关,
+    "events": { "<事件码>": {"is_on": 开关, "interval": {"value": n, "unit": "m|h|d"}, "subject": 可选} },
     "channels": {
-      "wecom|dingtalk|feishu":{"is_on":bool,"channel_key":渠道key,"template":可选},
-      "email": {"is_on":bool,"channel_key":...,"to":["回收件人"],"template":可选}
+      "wecom|dingtalk|feishu": {"is_on": bool, "channel_key": 渠道key, "template": 可选},
+      "email": {"is_on": bool, "channel_key": ..., "to": ["回收件人"], "template": 可选}
     }
   }
 """
 
 import json
 import os
-import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,81 +20,12 @@ from pathlib import Path
 from config import settings
 from core.exceptions import BizError
 from core.logger import log
-from services.notify import channels, events
+from services.notify import channels, events, policies
 from services.notify import senders
-
-DEFAULT_POLICY: dict = {
-    "is_on": False,
-    "events": {
-        code: {"is_on": False, "interval": {"value": 0, "unit": "m"}}
-        for code in sorted(events.EVENT_CODES)
-    },
-    "channels": {
-        "wecom": {"is_on": False, "channel_key": ""},
-        "dingtalk": {"is_on": False, "channel_key": ""},
-        "feishu": {"is_on": False, "channel_key": ""},
-        "email": {"is_on": False, "channel_key": "", "to": []},
-    },
-}
-
-
-def _policy_file() -> Path:
-    return Path(settings.notify_policy_file)
 
 
 def _state_file() -> Path:
     return Path(settings.notify_state_file)
-
-
-def load_policy() -> dict:
-    p = _policy_file()
-    if not p.exists():
-        return json.loads(json.dumps(DEFAULT_POLICY))
-    try:
-        data = json.loads(p.read_text(encoding="utf-8") or "{}")
-        if not isinstance(data, dict):
-            return json.loads(json.dumps(DEFAULT_POLICY))
-        return _merge_defaults(data)
-    except (json.JSONDecodeError, OSError) as e:
-        log.error("读取订阅策略失败: {} {}", p, e)
-        return json.loads(json.dumps(DEFAULT_POLICY))
-
-
-def save_policy(policy: dict) -> dict:
-    merged = _merge_defaults(policy)
-    p = _policy_file()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(p.parent), suffix=".tmp")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(merged, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, p)
-    return merged
-
-
-def _merge_defaults(data: dict) -> dict:
-    out = json.loads(json.dumps(DEFAULT_POLICY))
-    out["is_on"] = bool(data.get("is_on", False))
-    evs = out["events"]
-    for code, cfg in (data.get("events") or {}).items():
-        if code in evs:
-            evs[code]["is_on"] = bool(cfg.get("is_on", False))
-            if isinstance(cfg.get("interval"), dict):
-                evs[code]["interval"] = {
-                    "value": int(cfg["interval"].get("value", 0) or 0),
-                    "unit": str(cfg["interval"].get("unit", "m") or "m") if (cfg["interval"].get("value") or 0) > 0 else "m",
-                }
-            if cfg.get("subject"):
-                evs[code]["subject"] = str(cfg["subject"])
-    chs = out["channels"]
-    for ctype, cfg in (data.get("channels") or {}).items():
-        if ctype in chs:
-            chs[ctype]["is_on"] = bool(cfg.get("is_on", False))
-            chs[ctype]["channel_key"] = str(cfg.get("channel_key") or "")
-            if cfg.get("template"):
-                chs[ctype]["template"] = str(cfg["template"])
-            if ctype == "email" and isinstance(cfg.get("to"), list):
-                chs[ctype]["to"] = [str(x).strip() for x in cfg["to"] if str(x).strip()]
-    return out
 
 
 # ----------------------------------------------------------------------
@@ -158,18 +88,20 @@ def _save_state(state: dict) -> None:
     os.replace(tmp, p)
 
 
-def _throttle_ok(event_code: str, event_cfg: dict) -> bool:
+def _throttle_ok(policy_id: str, event_code: str, event_cfg: dict) -> bool:
     interval = _interval_seconds(event_cfg.get("interval") or {})
     if interval <= 0:
         return True
     state = _load_state()
-    last = state.get(event_code, {}).get("last", 0)
+    last = state.get(policy_id, {}).get(event_code, {}).get("last", 0)
     return (datetime.now(timezone.utc).timestamp() - float(last)) >= interval
 
 
-def _mark_sent(event_code: str) -> None:
+def _mark_sent(policy_id: str, event_code: str) -> None:
     state = _load_state()
-    state.setdefault(event_code, {})["last"] = datetime.now(timezone.utc).timestamp()
+    state.setdefault(policy_id, {})[event_code] = {
+        "last": datetime.now(timezone.utc).timestamp()
+    }
     _save_state(state)
 
 
@@ -178,23 +110,30 @@ def _mark_sent(event_code: str) -> None:
 # ----------------------------------------------------------------------
 
 async def emit(event_code: str, **payload) -> None:
-    """订阅事件入口：命中已启用的事件(且通过节流) → 分发到策略启用的渠道。任何失败仅记日志不抛。"""
+    """订阅事件入口：遍历启用中的策略，命中该策略订阅的事件即按它的渠道投递。
+
+    一条策略命中不影响其他策略（节流各记各的），所以同一事件可以分不同收件人群。
+    任何失败仅记日志不抛——通知是旁路，不能拖垮业务请求。
+    """
     if not settings.notify_enabled:
         return
-    policy = load_policy()
-    if not policy.get("is_on"):
-        return
-    event_cfg = policy.get("events", {}).get(event_code)
+    for policy in policies.enabled_policies():
+        await _emit_to_policy(policy, event_code, **payload)
+
+
+async def _emit_to_policy(policy: dict, event_code: str, **payload) -> None:
+    policy_id = str(policy.get("id") or "")
+    event_cfg = (policy.get("events") or {}).get(event_code)
     if not event_cfg or not event_cfg.get("is_on"):
         return
-    if not _throttle_ok(event_code, event_cfg):
-        log.debug("通知节流跳过: {}", event_code)
+    if not _throttle_ok(policy_id, event_code, event_cfg):
+        log.debug("通知节流跳过: 策略={} 事件={}", policy.get("name") or policy_id, event_code)
         return
 
     subject, content = render_default(event_code, payload)
     subject = event_cfg.get("subject") or subject
     sent_any = False
-    for ctype, ch_cfg in policy.get("channels", {}).items():
+    for ctype, ch_cfg in (policy.get("channels") or {}).items():
         if not ch_cfg.get("is_on"):
             continue
         channel = channels.get_by_key(ch_cfg.get("channel_key") or "", ctype)
@@ -205,13 +144,15 @@ async def emit(event_code: str, **payload) -> None:
             to = ch_cfg.get("to") if ctype == "email" else None
             await senders.send(ctype, channel, subject, text, to=to)
             sent_any = True
-            log.info("通知已发送: 事件={} 渠道={}({})", event_code, ctype, ch_cfg.get("channel_key"))
+            log.info("通知已发送: 策略={} 事件={} 渠道={}({})", policy.get("name") or policy_id,
+                     event_code, ctype, ch_cfg.get("channel_key"))
         except Exception as e:
-            log.error("通知发送失败: 事件={} 渠道={}({}): {}", event_code, ctype, ch_cfg.get("channel_key"), e)
+            log.error("通知发送失败: 策略={} 事件={} 渠道={}({}): {}", policy.get("name") or policy_id,
+                      event_code, ctype, ch_cfg.get("channel_key"), e)
     if sent_any:
-        _mark_sent(event_code)
+        _mark_sent(policy_id, event_code)
     else:
-        log.debug("通知无可用渠道: 事件={}", event_code)
+        log.debug("通知无可用渠道: 策略={} 事件={}", policy.get("name") or policy_id, event_code)
 
 
 async def test_send(channel_key: str, text: str, to: list[str] | None = None) -> None:

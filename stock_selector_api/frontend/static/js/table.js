@@ -18,9 +18,9 @@
       }
       toolbarHtml += '</div>';
     }
-    // table
+    // table（外层可横向滚动：窄屏下让表头保持一行，不把中文压成一字一行）
     html += toolbarHtml;
-    html += '<table class="tbl"><thead><tr>';
+    html += '<div class="tbl-scroll"><table class="tbl"><thead><tr>';
     columns.forEach((c) => {
       html += '<th' + (c.width ? ' style="width:' + c.width + '"' : '') + '>' + esc(c.label) + '</th>';
     });
@@ -47,7 +47,7 @@
     } else {
       html += '<tr><td colspan="' + (columns.length + (actions && actions.length ? 1 : 0)) + '" class="empty">暂无数据</td></tr>';
     }
-    html += '</tbody></table>';
+    html += '</tbody></table></div>';
 
     // pagination
     const totalPages = Math.max(1, Math.ceil(cfg.total / (cfg.size || 20)));
