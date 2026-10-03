@@ -98,6 +98,12 @@ test("领域 API 路径映射（契约消费）", async () => {
   assert.equal(a.calls[3].url, "/api/v1/messages/read_all");
   await upgradeApi(c).latest({ platform: "h5", version_code: 1 });
   assert.equal(a.calls[4].url, "/api/app/latest?platform=h5&version_code=1");
+  const { diagApi } = await import("../src/api/diag.js");
+  await diagApi(c).run();
+  assert.equal(a.calls[5].method, "POST");
+  assert.equal(a.calls[5].url, "/api/v1/diag/run");
+  await diagApi(c).detail("r1");
+  assert.equal(a.calls[6].url, "/api/v1/diag/runs/r1");
 });
 test("App 端缺 URLSearchParams：空 query 不拼 ?，值自己编码", async () => {
   const a = fakeAdapter();
@@ -113,4 +119,37 @@ test("App 端缺 URLSearchParams：空 query 不拼 ?，值自己编码", async 
   } finally {
     globalThis.URLSearchParams = saved;
   }
+});
+
+test("加密 PDF 上传：password 进 formData，H5 传 File / App 传路径", async () => {
+  const a = fakeAdapter();
+  a._next = { statusCode: 200, data: { code: 0, data: { valid: 0 }, message: "" } };
+  const c = createClient({ adapter: a, getToken: () => "T" });
+  const { tradesApi } = await import("../src/api/trades.js");
+  await tradesApi(c).previewFile("/tmp/1759424000000", "file", "138016");
+  assert.equal(a.calls[0].filePath, "/tmp/1759424000000");
+  assert.deepEqual(a.calls[0].formData, { password: "138016" });
+  const f = new Blob(["x"]);
+  await tradesApi(c).previewFile(f, "file", "");
+  assert.deepEqual(a.calls[1].files, [{ name: "file", file: f }]);   // H5 只认 files 数组
+  assert.equal(a.calls[1].filePath, undefined);
+  assert.deepEqual(a.calls[1].formData, {});   // 空密码不占字段
+});
+
+test("App 上传诊断串：probe 随 multipart 上去；base64 通道走 JSON", async () => {
+  const a = fakeAdapter();
+  a._next = { statusCode: 200, data: { code: 0, data: { valid: 1 }, message: "" } };
+  const c = createClient({ adapter: a, getToken: () => "T" });
+  const { tradesApi } = await import("../src/api/trades.js");
+  await tradesApi(c).previewFile("_doc/1_deal.pdf", "file", "138016", "通道=multipart(copied-to-_doc)");
+  assert.deepEqual(a.calls[0].formData, { password: "138016", probe: "通道=multipart(copied-to-_doc)" });
+  await tradesApi(c).previewFile("_doc/1_deal.pdf", "file", "", "diag");
+  assert.deepEqual(a.calls[1].formData, { probe: "diag" });          // 无密码时只有诊断串
+  const out = await tradesApi(c).previewBase64("JVBERg==", "电子对账单.pdf", "138016", "通道=base64");
+  assert.deepEqual(out, { valid: 1 });
+  assert.equal(a.calls[2].url, "/api/v1/trades/import/preview");
+  assert.equal(a.calls[2].method, "POST");
+  assert.equal(a.calls[2].header["Content-Type"], "application/json");
+  assert.deepEqual(a.calls[2].data, { file_b64: "JVBERg==", filename: "电子对账单.pdf",
+                                      password: "138016", probe: "通道=base64" });
 });

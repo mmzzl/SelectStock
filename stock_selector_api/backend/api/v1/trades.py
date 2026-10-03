@@ -1,10 +1,13 @@
 """api/v1/trades.py — 交割单双步导入 + 交易记录（属主隔离，密码网关在 router 挂载）。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, File, Request, UploadFile
+from fastapi import APIRouter, Request
 
+from api.v1._multipart import (base64_summary, extract_base64_upload, extract_field,
+                               extract_file, has_base64_upload, part_summary)
 from core.dependencies import CurrentUserDep
 from core.exceptions import BizError
+from core.logger import log
 from core.response import fail, ok
 from schemas.trades import TradeRow
 from services import trades_service
@@ -13,15 +16,21 @@ router = APIRouter(prefix="/trades", tags=["交易记录"])
 
 
 @router.post("/import/preview", summary="交割单预览（不落库）")
-async def preview(request: Request, file: UploadFile | None = File(default=None)):
-    if file is not None:
-        raw = await file.read()
-        filename = file.filename or "deal.csv"
+async def preview(request: Request):
+    """文件上传与纯文本粘贴共用这一个入口；自己读原始 body 解析 multipart，见 _multipart。"""
+    content_type = request.headers.get("content-type", "")
+    raw_body = await request.body()
+    if content_type.startswith("multipart/"):
+        log.info("交割单上传: {}", part_summary(raw_body, content_type))
+        raw, filename = extract_file(raw_body, content_type)
+        password = extract_field(raw_body, content_type, "password")
+    elif "json" in content_type and has_base64_upload(raw_body):
+        # App 读 SAF 句柄走这条：uni.uploadFile 会把文件段整块丢掉，base64+JSON 不依赖它
+        log.info("交割单上传(base64): {}", base64_summary(raw_body))
+        raw, filename, password = extract_base64_upload(raw_body)
     else:
-        body = await request.body()
-        raw = body.decode("utf-8") if body else ""
-        filename = "deal.csv"
-    out = await trades_service.preview("", raw, filename)   # 解析不依赖 user
+        raw, filename, password = raw_body, "", ""
+    out = await trades_service.preview("", raw, filename, password)   # 解析不依赖 user
     return ok(out)
 
 

@@ -250,3 +250,27 @@ button[disabled] {
   display: block; color: #1fa35f; background: #e8f7ee;
   border-radius: 12rpx; padding: 14rpx 20rpx; margin: 18rpx 0; font-size: 26rpx;
 }
+
+/* ---------- 列表行（持仓 / 交割记录 / 导入预览共用） ---------- */
+.trow {
+  display: flex; align-items: center; justify-content: space-between;
+  background: #fff; border-radius: 16rpx; padding: 20rpx 24rpx; margin: 14rpx 0;
+  box-shadow: 0 4rpx 18rpx rgba(31, 35, 41, 0.05);
+}
+.trow:active { opacity: 0.75; }
+.trow text { display: block; margin: 0; }
+.trow .l { flex: 1; min-width: 0; }
+.trow .r { text-align: right; flex-shrink: 0; margin-left: 20rpx; }
+.trow .d { font-size: 22rpx; color: #a2a9b5; }
+.trow .n { font-size: 28rpx; font-weight: 600; margin-top: 4rpx; }
+.trow .q { font-size: 24rpx; color: #5c6470; margin-top: 6rpx; }
+.trow .amt { font-size: 30rpx; font-weight: 700; }
+.trow .sub { font-size: 22rpx; color: #8a919f; margin-top: 6rpx; }
+
+/* 分组标题 */
+.grp {
+  display: flex; align-items: center; justify-content: space-between;
+  margin: 30rpx 4rpx 10rpx;
+}
+.grp .t { font-size: 26rpx; font-weight: 600; color: #5c6470; }
+.grp .c { font-size: 22rpx; color: #a2a9b5; }

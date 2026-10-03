@@ -42,14 +42,23 @@ def test_multiple_codes_grouped():
     assert len(rows) == 2
 
 
-def test_sell_before_buy_errors_then_buy_still_counts():
-    rows, errs = derive_holdings_from_trades([
+def test_sell_before_buy_makes_whole_code_unreliable():
+    """区间开头就是卖出 → 更早的买入无从得知，整只剔除，不给凭空的成本基准。"""
+    rows, unreliable = derive_holdings_from_trades([
         _trade("09-01", "600519", "茅台", "sell", 10, 100.0),
         _trade("09-02", "600519", "茅台", "buy", 50, 110.0),
     ])
-    assert any("600519" in e for e in errs)
-    h = rows[0]
-    assert h["quantity"] == 50 and h["cost_price"] == 110.0
+    assert unreliable == ["600519"]
+    assert rows == []
+
+
+def test_unreliable_code_does_not_affect_others():
+    rows, unreliable = derive_holdings_from_trades([
+        _trade("09-01", "600519", "茅台", "sell", 10, 100.0),
+        _trade("09-02", "000858", "五粮液", "buy", 200, 142.0),
+    ])
+    assert unreliable == ["600519"]
+    assert [(r["stock_code"], r["quantity"]) for r in rows] == [("000858", 200)]
 
 
 def test_full_sell_drops_holding():

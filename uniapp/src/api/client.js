@@ -65,12 +65,15 @@ export function createClient({ adapter, getToken, onUnauthorized, baseUrl = "" }
       });
       return handle(res, { onUnauthorized });
     },
-    async upload(path, { filePath, name = "file", formData = {}, query, header = {} } = {}) {
+    async upload(path, { filePath, file, name = "file", formData = {}, query, header = {} } = {}) {
       const qs = query ? toQuery(query) : "";
       const token = getToken ? getToken() : "";
       const res = await ad.upload({
         url: `${baseUrl}${path}${qs}`,
-        filePath, name, formData,
+        // App 端只能给 filePath 字符串；H5 端 uni.uploadFile 单给 file 会直接 reject "file error"
+        // （它只认 filePath 或 files:[{name,file}]），所以 File 必须走 files 数组。
+        ...(filePath ? { filePath } : {}), ...(file ? { files: [{ name, file }] } : {}),
+        name, formData,
         header: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...header },
       });
       let data = res.data;

@@ -1,21 +1,39 @@
-<!-- uniapp/src/pages/holdings/index.vue -->
+<!-- uniapp/src/pages/holdings/index.vue —— 持仓总览：按诊断建议分组；数值一律后端/插件下发（R1-3） -->
 <script setup>
-import { ref } from "vue";
+import { ref, computed } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
-import { toHoldingRow } from "../../logic/view.js";
+import { toHoldingRow, toPnlView } from "../../logic/view.js";
 
 const rows = ref([]); const loading = ref(false); const err = ref("");
+const summary = ref(null);           // 来自 /holdings/pnl 的 summary，前端不做加总
 const { holdings } = useClient();
+const today = () => new Date().toISOString().slice(0, 10);
+
 onShow(async () => {
   loading.value = true; err.value = "";
   try {
     const data = await holdings.list({});
     rows.value = (data.items || data || []).map(toHoldingRow);
+    // 汇总条与列表分开取：插件不可用时只降级掉汇总，不影响持仓列表
+    try { summary.value = toPnlView(await holdings.pnl({ natural_day: today() })); } catch { summary.value = null; }
   } catch (e) { err.value = e.message; } finally { loading.value = false; }
 });
-const pnlCls = (v) => (v === null ? "" : v > 0 ? "up" : v < 0 ? "down" : "");
-const goEdit = (r) => uni.navigateTo({ url: `/pages/holdings/edit?code=${r?.code || ""}` });
+
+const GROUPS = [
+  { key: "sell", label: "建议卖出" },
+  { key: "add", label: "建议加仓" },
+  { key: "hold", label: "建议持有" },
+  { key: "none", label: "暂无建议" },
+];
+const grouped = computed(() => {
+  const pick = (g) => rows.value.filter((r) => (g.key === "none" ? !r.action : r.action === g.key));
+  return GROUPS.map((g) => ({ ...g, items: pick(g) })).filter((g) => g.items.length);
+});
+
+const pnlCls = (v) => (v === null || v === 0 ? "" : v > 0 ? "up" : "down");
+const money = (v) => (v === null || v === undefined ? "—" : Number(v).toFixed(2));
+const goEdit = (r) => uni.navigateTo({ url: `/pages/holdings/edit${r ? `?code=${encodeURIComponent(r.code)}` : ""}` });
 const goImport = () => uni.navigateTo({ url: "/pages/holdings/import" });
 const goProfit = () => uni.navigateTo({ url: "/pages/profit/index" });
 const goTrades = () => uni.navigateTo({ url: "/pages/trades/index" });
@@ -26,7 +44,7 @@ const goTrades = () => uni.navigateTo({ url: "/pages/trades/index" });
       <view class="band-in">
         <view>
           <view class="bt">持仓总览</view>
-          <view class="bs">共 {{ rows.length }} 只 · 诊断建议由插件返回</view>
+          <view class="bs">共 {{ rows.length }} 只 · 建议与现价由诊断插件返回</view>
         </view>
         <button class="band-btn" @click="goImport">导入交割单</button>
       </view>
@@ -40,18 +58,44 @@ const goTrades = () => uni.navigateTo({ url: "/pages/trades/index" });
     </view>
 
     <view class="p">
-      <text v-if="err" class="err">{{ err }}</text>
-      <view v-for="r in rows" :key="r.code" class="card" @click="goEdit(r)">
-        <view class="row1">
-          <text>{{ r.name }}（{{ r.code }}）</text>
-          <text class="badge" :class="r.action || 'none'">{{ r.actionText }}</text>
+      <view v-if="summary" class="card hero">
+        <view class="kv3">
+          <view class="k">
+            <text class="n" :class="pnlCls(summary.unrealized.totalUnrealized)">{{ money(summary.unrealized.totalUnrealized) }}</text>
+            <text class="l">未实现盈亏</text>
+          </view>
+          <view class="k">
+            <text class="n">{{ money(summary.unrealized.totalValue) }}</text>
+            <text class="l">持仓市值</text>
+          </view>
+          <view class="k">
+            <text class="n" :class="pnlCls(summary.realized.totalRealized)">{{ money(summary.realized.totalRealized) }}</text>
+            <text class="l">已实现盈亏</text>
+          </view>
         </view>
-        <text v-if="r.latestPrice !== null">
-          现价 {{ r.latestPrice }} ·
-          <text :class="pnlCls(r.pnl)">收益 {{ r.pnl }}（{{ r.pnlPct }}%）</text>
-        </text>
-        <text class="reason">{{ r.actionReason }}</text>
       </view>
+
+      <text v-if="err" class="err">{{ err }}</text>
+
+      <block v-for="g in grouped" :key="g.key">
+        <view class="grp">
+          <text class="t">{{ g.label }}</text>
+          <text class="c">{{ g.items.length }} 只</text>
+        </view>
+        <view v-for="r in g.items" :key="r.code" class="trow" @click="goEdit(r)">
+          <view class="l">
+            <text class="d">现价 {{ r.latestPrice ?? "—" }} · 成本 {{ r.cost ?? "—" }} · {{ r.shares ?? "—" }} 股</text>
+            <text class="n">{{ r.name }}（{{ r.code }}）</text>
+            <text v-if="r.actionReason" class="sub">{{ r.actionReason }}</text>
+          </view>
+          <view class="r">
+            <text class="badge" :class="r.action || 'none'">{{ r.actionText }}</text>
+            <text class="amt" :class="pnlCls(r.pnl)">{{ r.pnl === null ? "—" : money(r.pnl) }}</text>
+            <text v-if="r.pnlPct !== null" class="q" :class="pnlCls(r.pnlPct)">{{ r.pnlPct > 0 ? "+" : "" }}{{ r.pnlPct }}%</text>
+          </view>
+        </view>
+      </block>
+
       <view v-if="!rows.length && !loading" class="empty">
         <view>暂无持仓</view>
         <view class="reason">可通过「交割单导入」或「新增持仓」开始</view>
@@ -59,3 +103,7 @@ const goTrades = () => uni.navigateTo({ url: "/pages/trades/index" });
     </view>
   </view>
 </template>
+<style scoped>
+.hero { padding: 10rpx 0 18rpx; }
+.hero .kv3 { margin-top: 6rpx; }
+</style>
