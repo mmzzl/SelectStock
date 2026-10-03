@@ -185,10 +185,19 @@ uniapp  ──/api/v1/selection/*──►  后端 stock_selector_api  ──HTT
 
 ```bash
 python scripts/build_kline_features.py            # 增量更新（默认）
-python scripts/build_kline_features.py --full     # 全量重建所有股票
-python scripts/build_kline_features.py --code 600519   # 只重建指定一只
+python scripts/build_kline_features.py --full     # 全量重建（股票 + 场内基金）
+python scripts/build_kline_features.py --no-etf   # 增量但只处理股票，跳过场内基金
+python scripts/build_kline_features.py --code 600519   # 只重建指定一只（ETF 代码同样可用）
 python scripts/build_kline_features.py --limit 20      # 只处理前 20 只（联调用；0=不限）
 ```
+
+清单除了 `bk_stocks` 的股票，还会从 `stock_kline` 里捞出有日线的**场内基金**（前缀
+15/16/18/50/51/52/53/55/56/58，含 ETF/LOF/REITs，实测 1445 只），名字问腾讯行情。基金没有
+「板块涨停」概念（跨境 ETF 甚至不限幅），所以它们的 `lu` 恒为 `False`，不会造出假信号。
+上游 `scripts/kline_spider.py` 的 `in_universe()` 同步放开了基金号段（`sh 5x`、`sz 15/16/18`），
+否则 Mongo 里的基金日线会停在爬取的最后一天。
+`parquet` 数据源的股票池就是目录下的文件名，因此这些基金**会一并进入选股与回测范围**；不要就用
+`--no-etf` 并清掉 `data/stock_kline/` 里的基金文件。
 
 `parquet.columns` 可剪列（越大提速越多），`parquet.rows` 只取最近 N 个交易日；相对目录按仓库根解析，
 服务从任意工作目录启动都能读到数据。数据源不可用会**显式报错**而非静默降级为 mock。

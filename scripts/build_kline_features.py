@@ -1,8 +1,12 @@
 """从 MongoDB stock_kline 读取日线，用 talib 预计算指标，按股票分文件写入 parquet，支持增量更新。
 
+代码清单默认是「bk_stocks 里的股票 + stock_kline 里有日线的场内基金(ETF/LOF)」，
+因为 ETF 不在 bk_stocks 里，只按股票清单建就永远产不出 159599.parquet 这类文件。
+
 用法:
     python scripts/build_kline_features.py --full          # 首次全量
     python scripts/build_kline_features.py                 # 增量更新
+    python scripts/build_kline_features.py --no-etf        # 只要股票，不建 ETF/LOF
     python scripts/build_kline_features.py --code 600519   # 单只调试
     python scripts/build_kline_features.py --limit 100     # 调试时限制股票数
 """
@@ -17,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import pandas as pd
+import requests
 import talib
 import yaml
 from pymongo import MongoClient
@@ -32,6 +37,14 @@ logger = logging.getLogger("build_kline_features")
 
 KLINE_COLLECTION = "stock_kline"
 KLINE_FILTER = {"frequency": 9, "adjust": "qfq"}
+
+# 场内基金：15/16/18 是深市，50/51/52/53/55/56/58 是沪市（ETF、LOF、REITs、债券 ETF）
+FUND_PREFIXES = ("15", "16", "18", "50", "51", "52", "53", "55", "56", "58")
+
+
+def is_fund_code(code: str) -> bool:
+    return str(code).startswith(FUND_PREFIXES)
+
 
 INDICATOR_FUNCS = {
     "ma5": lambda df: talib.SMA(df["close"], timeperiod=5),
@@ -97,6 +110,36 @@ def collect_stock_names() -> dict:
         client.close()
 
 
+def collect_fund_codes(client, database: str) -> list[str]:
+    """stock_kline 里真有日线且看着像场内基金的代码（爬虫已经在抓 ETF，只是没人把它们列进清单）。"""
+    codes = set()
+    for doc in client[database][KLINE_COLLECTION].aggregate(
+        [{"$match": KLINE_FILTER}, {"$group": {"_id": "$code"}}], allowDiskUse=True
+    ):
+        code = str(doc.get("_id") or "")
+        if len(code) == 6 and code.isdigit() and is_fund_code(code):
+            codes.add(code)
+    return sorted(codes)
+
+
+def collect_fund_names(codes: list[str]) -> dict[str, str]:
+    """场内基金的名字：bk_stocks/all_stock.csv 都只有股票，只能问腾讯行情；拿不到就退回代码。"""
+    names: dict[str, str] = {}
+    for i in range(0, len(codes), 50):
+        batch = codes[i:i + 50]
+        symbols = ",".join(("sh" if c.startswith("5") else "sz") + c for c in batch)
+        try:
+            resp = requests.get(f"https://qt.gtimg.cn/q={symbols}", timeout=10)
+            for line in resp.content.decode("gbk", "ignore").split(";"):
+                f = line.split("~")
+                if len(f) > 3 and len(f[2]) >= 6 and f[2].isdigit():
+                    names[f[2].zfill(6)] = f[1]
+        except Exception as exc:            # 名字只是展示用，行情源抖动不该让整轮构建失败
+            logger.warning("取场内基金名字失败(第 %d 只起): %s", i, exc)
+            break
+    return names
+
+
 def load_kline_df(client, database: str, code: str, after: str | None = None) -> pd.DataFrame:
     col = client[database][KLINE_COLLECTION]
     query = dict(KLINE_FILTER)
@@ -104,7 +147,8 @@ def load_kline_df(client, database: str, code: str, after: str | None = None) ->
     if after:
         query["date"] = {"$gt": f"{after} 23:59"}
     docs = list(
-        col.find(query, {"date": 1, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1, "amount": 1})
+        col.find(query, {"date": 1, "open": 1, "high": 1, "low": 1, "close": 1,
+                         "volume": 1, "amount": 1})
         .sort("date", 1)
     )
     if not docs:
@@ -168,6 +212,9 @@ def process_code(client, database: str, code: str, name: str, full: bool) -> boo
 
     df = df.drop_duplicates(subset=["code", "date"], keep="last")
     df = compute_indicators(df)
+    if is_fund_code(code):
+        # ETF 没有「板块涨停」概念（跨境 ETF 甚至不限幅），涨停线判据套在基金上只会造出假信号
+        df["lu"] = False
     write_df(path, df)
     return True
 
@@ -194,9 +241,10 @@ def setup_logging() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="构建 K线+指标 parquet，支持增量更新")
-    parser.add_argument("--full", action="store_true", help="全量重建所有股票")
+    parser.add_argument("--full", action="store_true", help="全量重建")
     parser.add_argument("--code", type=str, default=None, help="只处理指定股票代码")
     parser.add_argument("--limit", type=int, default=0, help="最多处理股票数（0=不限制）")
+    parser.add_argument("--no-etf", action="store_true", help="不建场内基金（ETF/LOF），只建股票")
     args = parser.parse_args()
 
     setup_logging()
@@ -206,7 +254,20 @@ def main() -> None:
     client = get_client()
     database = load_config()["mongodb"]["database"]
     try:
-        codes = [args.code] if args.code else list(names.keys())
+        if args.code:
+            codes = [args.code]
+            if is_fund_code(args.code) and not names.get(args.code):
+                names.update(collect_fund_names([args.code]))
+        else:
+            codes = list(names.keys())
+            if not args.no_etf:
+                stock_codes = set(codes)
+                fund_codes = [c for c in collect_fund_codes(client, database) if c not in stock_codes]
+                named = collect_fund_names(fund_codes)
+                names.update(named)
+                codes += fund_codes
+                logger.info("场内基金 %d 只入清单，拿到名字 %d/%d",
+                            len(fund_codes), len(named), len(fund_codes))
         if args.limit:
             codes = codes[: args.limit]
 
@@ -216,7 +277,7 @@ def main() -> None:
         processed = 0
         skipped = 0
         failed = 0
-        for code in tqdm(codes, desc="处理股票", unit="只", ncols=80):
+        for code in tqdm(codes, desc="处理代码", unit="只", ncols=80):
             name = names.get(code, code)
             try:
                 changed = process_code(client, database, code, name, args.full)

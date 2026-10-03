@@ -26,6 +26,25 @@ RATE_LIMIT_PER_SEC = 5
 SINA_BATCH_SIZE = 80
 GAP_THRESHOLD_DAYS = 3
 
+# all_stock.csv 是「全市场」清单，指数(如 sh.000001)、可转债(sz.12xxxx)混在里面，
+# 所以按号段白名单挑出真正有日线的品种：股票 + 场内基金。
+# 基金号段与 scripts/build_kline_features.py 的 FUND_PREFIXES 保持一致（ETF/LOF/REITs）。
+STOCK_FIRST = {"sh": "6", "sz": "03", "bj": "48"}
+FUND_TWO = ("15", "16", "18", "50", "51", "52", "53", "55", "56", "58")
+
+
+def in_universe(market: str, pure: str) -> bool:
+    """该代码是否该抓日线。market 是 all_stock.csv 的 sh/sz/bj 前缀，pure 是纯数字代码。"""
+    if not pure.isdigit():
+        return False
+    if pure[0] in STOCK_FIRST.get(market, ""):
+        return True
+    return market in ("sh", "sz") and pure[:2] in FUND_TWO
+
+
+SINA_VOLUME_DIVISOR = 100.0     # sina 的 volume 是「股/份」，其余来源与库内历史都是「手」
+VOLUME_UNIT = "lot"             # 入库口径标记，让单位折算的补数脚本可以被反复执行
+
 
 def _parse_api_response(code: str, bars: List, source: str = "tencent") -> List[Dict[str, Any]]:
     records = []
@@ -52,6 +71,7 @@ def _parse_api_response(code: str, bars: List, source: str = "tencent") -> List[
             "frequency": 9,
             "adjust": "qfq",
             "source": source,
+            "vol_unit": VOLUME_UNIT,
             "crawl_time": datetime.now().isoformat(),
         })
     return records
@@ -105,7 +125,8 @@ def _sina_kline(code: str, count: int = 200) -> Optional[List[Dict]]:
                 if not date_str:
                     continue
                 o, c, h, l = float(bar["open"]), float(bar["close"]), float(bar["high"]), float(bar["low"])
-                v = int(float(bar["volume"])) if bar.get("volume") and bar["volume"] != "0" else 0
+                # 折算成手再入库：备源和主源单位不一致时，同一根 K 线的量能会凭空差两个数量级
+                v = int(round(float(bar["volume"]) / SINA_VOLUME_DIVISOR)) if bar.get("volume") and bar["volume"] != "0" else 0
             except (ValueError, TypeError, KeyError):
                 continue
             records.append({
@@ -120,6 +141,7 @@ def _sina_kline(code: str, count: int = 200) -> Optional[List[Dict]]:
                 "frequency": 9,
                 "adjust": "qfq",
                 "source": "sina",
+                "vol_unit": VOLUME_UNIT,
                 "crawl_time": datetime.now().isoformat(),
             })
         return records
@@ -162,9 +184,6 @@ class StockKlineScraper:
             logging.warning(f"Failed to get latest bar time for {code}: {e}")
             return None
 
-    # 交易所前缀 <-> 股票号段；用于排除 all_stock.csv 里的指数(如 sh.000001)、ETF 与债券
-    _STOCK_PREFIXES = {"sh": "6", "sz": "03", "bj": "48"}
-
     def _get_all_stock_codes(self) -> List[str]:
         codes = set()
         path = os.path.join(home(), "config", "all_stock.csv")
@@ -173,9 +192,9 @@ class StockKlineScraper:
             for _, row in df.iterrows():
                 code = str(row.get("code", "")).strip()
                 market, _, pure = code.partition(".")
-                if pure.isdigit() and pure[0] in self._STOCK_PREFIXES.get(market, ""):
+                if in_universe(market, pure):
                     codes.add(pure)
-            logging.info(f"Loaded {len(codes)} stock codes from all_stock.csv")
+            logging.info(f"Loaded {len(codes)} codes (股票+场内基金) from all_stock.csv")
         except Exception as e:
             logging.error(f"Failed to load all_stock.csv: {e}")
             raise
