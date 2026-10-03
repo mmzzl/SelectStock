@@ -1,4 +1,8 @@
-"""services/diag_service.py — 外部诊断批次（M3）：幂等批次键 / 单飞锁 / 重试3次退避 / failed 落库。"""
+"""services/diag_service.py — 外部诊断批次（M3）：幂等批次键 / 单飞锁 / 重试3次退避 / failed 落库。
+
+「刷新诊断」是刷新入口：同一天的批次在 `_REFRESH_COOLDOWN_MINUTES` 内幂等重放旧结果，
+超过冷却才原地重跑，既能让用户主动刷新行情，又不会连点把插件打爆。
+"""
 
 from __future__ import annotations
 
@@ -7,6 +11,7 @@ import hashlib
 import logging
 import random
 import time
+from datetime import datetime, timezone
 
 from core.exceptions import BizError
 from repositories import holdings_repo, portfolio_results, portfolio_runs
@@ -17,6 +22,7 @@ logger = logging.getLogger("diag_service")
 _BACKOFF_BASE = 1.0        # 秒；重试间隔 2^n * base + 抖动
 _MAX_ATTEMPTS = 3
 _RUNNING = set()           # 运行中（user_id, natural_day）
+_REFRESH_COOLDOWN_MINUTES = 10.0   # 同一天两次「刷新诊断」的最小间隔，防止连点把插件打爆
 
 # pytest-asyncio 默认 function 级事件循环：跨用例复用同一把锁会绑定到已销毁的 loop。
 # reset_runtime() 每次重建，保证每个测试循环拿到全新的、归属于当前 loop 的锁。
@@ -35,8 +41,22 @@ def _batch_id(user_id: str, natural_day: str) -> str:
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
+def _minutes_since(run: dict) -> float | None:
+    """距上次诊断落定的分钟数；时间戳缺失/类型不对 → None（视为已过期，允许刷新）。
+
+    updated_at 以 UTC naive 入库（见 db/sql/base.py::utcnow），比较前补回 tzinfo，
+    免得跑在 UTC+8 机器上拿本地时间做减法，把 8 小时时差错算成「早就该刷新了」。
+    """
+    ts = run.get("updated_at")
+    if not isinstance(ts, datetime):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - ts).total_seconds() / 60.0
+
+
 async def _replay(existing: dict) -> dict:
-    """幂等重放：命中已完成批次直接返回既有 run + 已落库明细。"""
+    """幂等重放：命中冷却期内的已完成批次，直接返回既有 run + 已落库明细。"""
     results = await portfolio_results.list_by_run(existing["run_id"])
     return {
         "run_id": existing["run_id"],
@@ -51,10 +71,24 @@ async def _replay(existing: dict) -> dict:
     }
 
 
-async def _guard_or_replay(existing: dict, key: tuple) -> dict:
+async def _rerun(existing: dict, user_id: str, natural_day: str) -> dict:
+    """原地重跑：清掉上一批明细，复用同一个 run（(user_id, natural_day) 唯一约束）。"""
+    await portfolio_results.delete_by_run(existing["run_id"])
+    await portfolio_runs.update(existing["run_id"], {"status": "queued", "error": ""})
+    return await _dispatch(existing["run_id"], user_id, natural_day)
+
+
+async def _guard_or_replay(existing: dict, user_id: str, natural_day: str) -> dict:
+    """命中既有批次：running → 拒；failed 或已过刷新冷却 → 原地重跑；否则幂等重放。"""
+    key = (user_id, natural_day)
     if existing["status"] == "running" or key in _RUNNING:
         raise BizError("诊断运行中，勿重复触发", code=409, status_code=409)
-    return await _replay(existing)
+    if existing["status"] == "failed":
+        return await _rerun(existing, user_id, natural_day)
+    age = _minutes_since(existing)
+    if age is not None and age < _REFRESH_COOLDOWN_MINUTES:
+        return await _replay(existing)
+    return await _rerun(existing, user_id, natural_day)
 
 
 async def _retry_call(payload: dict) -> dict:
@@ -71,16 +105,24 @@ async def _retry_call(payload: dict) -> dict:
     raise last_err  # type: ignore[misc]
 
 
+async def _dispatch(run_id: str, user_id: str, natural_day: str) -> dict:
+    """挂后台执行一次诊断，立即返回 queued。"""
+    key = (user_id, natural_day)
+    _RUNNING.add(key)
+    asyncio.create_task(_run_diag(run_id, user_id, natural_day, key))
+    run = await portfolio_runs.get(run_id)
+    return {"run_id": run_id, "status": run["status"]}
+
+
 async def trigger_diag(user_id: str, natural_day: str) -> dict | None:
-    """触发单用户外部诊断（幂等重放；无持仓 → None）。"""
+    """触发单用户外部诊断（冷却期内重放旧结果，过期则原地重跑；无持仓 → None）。"""
     if not user_id:
         raise BizError("user_id 不能为空", code=400, status_code=400)
-    key = (user_id, natural_day)
     batch = _batch_id(user_id, natural_day)
 
     existing = await portfolio_runs.find_by_key(user_id, natural_day, batch)
     if existing:
-        return await _guard_or_replay(existing, key)
+        return await _guard_or_replay(existing, user_id, natural_day)
 
     holdings = await holdings_repo.list_enabled(user_id)
     if not holdings:
@@ -89,7 +131,7 @@ async def trigger_diag(user_id: str, natural_day: str) -> dict | None:
     async with _SINGLE_FLIGHT:
         existing = await portfolio_runs.find_by_key(user_id, natural_day, batch)
         if existing:
-            return await _guard_or_replay(existing, key)
+            return await _guard_or_replay(existing, user_id, natural_day)
         run = await portfolio_runs.create({
             "batch_id": batch,
             "user_id": user_id,
@@ -97,11 +139,7 @@ async def trigger_diag(user_id: str, natural_day: str) -> dict | None:
             "status": "queued",
             "held_code_count": len(holdings),
         })
-    run_id = run["run_id"]
-    _RUNNING.add(key)
-    asyncio.create_task(_run_diag(run_id, user_id, natural_day, key))
-    run = await portfolio_runs.get(run_id)
-    return {"run_id": run_id, "status": run["status"]}
+    return await _dispatch(run["run_id"], user_id, natural_day)
 
 
 async def _run_diag(run_id: str, user_id: str, natural_day: str, key: tuple) -> None:

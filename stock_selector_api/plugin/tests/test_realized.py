@@ -54,3 +54,25 @@ def test_summaries(prices):
         _t("09-01", "000001", "平安", "buy", 1000, 10.0),
     ], [], prices)
     assert out["unrealized_summary"]["total_value"] == 1800.0 * 100 + 12.0 * 1000
+
+
+def test_closed_codes_are_not_priced():
+    """已平仓的代码不参与取价：真实交割单三十几个代码，任一外部行情失败都会把整页利润分析拖进 503。"""
+    asked = []
+
+    def _fn(code):
+        asked.append(code)
+        return 12.0
+
+    out = compute_pnl([
+        _t("09-01", "000001", "平安", "buy", 100, 10.0),
+        _t("09-02", "000001", "平安", "sell", 100, 12.0),      # 已清仓
+        _t("09-03", "000002", "万科", "buy", 100, 9.0),       # 仍在持
+    ], [], _fn)
+    assert asked == ["000002"]
+    closed = next(r for r in out["per_code"] if r["code"] == "000001")
+    assert closed["position"] == 0
+    assert closed["realized_pnl"] == 200.0
+    assert closed["unrealized_pnl"] == 0.0
+    # 「持仓 N 只」只数还在场的，不能把 76 个交易过的代码全算进去
+    assert out["unrealized_summary"]["holding_count"] == 1

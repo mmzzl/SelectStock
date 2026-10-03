@@ -28,3 +28,7 @@ class PortfolioDiagResultRepo(RepoBase):
 
     async def list_by_run(self, run_id: str) -> list[dict]:
         return await self._find_all(filters={"run_id": run_id})
+
+    async def delete_by_run(self, run_id: str) -> None:
+        """重跑失败批次前清掉半截明细，避免重复行。"""
+        await self._delete_from("portfolio_diag_results", {"run_id": run_id})

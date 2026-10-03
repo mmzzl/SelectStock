@@ -1,6 +1,7 @@
 // uniapp/src/composables/useClient.js
 import { createClient } from "../api/client.js";
 import { holdingsApi } from "../api/holdings.js";
+import { diagApi } from "../api/diag.js";
 import { tradesApi } from "../api/trades.js";
 import { selectionApi } from "../api/selection.js";
 import { messagesApi } from "../api/messages.js";
@@ -23,6 +24,7 @@ export function useClient() {
   _cached = {
     client, setSession,
     holdings: holdingsApi(client),
+    diag: diagApi(client),
     trades: tradesApi(client),
     selection: selectionApi(client),
     messages: messagesApi(client),

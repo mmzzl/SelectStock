@@ -18,10 +18,12 @@ test("时间格式化：naive UTC 转本地、压到分钟；带时区/非法值
 });
 
 test("持仓行：快照字段透传，不重算", () => {
-  const s = { code: "600519", name: "贵州茅台", cost: 1680.5, shares: 100,
+  const s = { code: "600519", name: "贵州茅台", cost_price: 1680.5, quantity: 100,
               action: "sell", action_reason: "跌破MA10", latest_price: 1500,
               holding_pnl: -18050, pnl_pct: -10.7, diag_run_id: "r9" };
   const row = toHoldingRow(s);
+  assert.equal(row.cost, 1680.5);
+  assert.equal(row.shares, 100);
   assert.equal(row.latestPrice, 1500);
   assert.equal(row.pnl, -18050);
   assert.equal(row.pnlPct, -10.7);

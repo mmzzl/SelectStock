@@ -24,7 +24,8 @@ export function toHoldingRow(s) {
   return {
     code: s.code,
     name: s.name || s.code,
-    cost: num(s.cost), shares: num(s.shares),
+    // 持仓行用 cost_price/quantity，诊断明细同样是 quantity（后端无 cost/shares 字段）
+    cost: num(s.cost_price), shares: num(s.quantity),
     action: s.action || null,
     actionText: ACTION_TEXT[s.action] || "无建议",
     actionReason: s.action_reason || "",
@@ -107,7 +108,7 @@ export function toDiagRow(s) {
   return {
     runId: s.run_id, day: s.natural_day, status: s.status,
     holdingCount: num(s.held_code_count), actionCount: num(s.action_count),
-    totalPnl: num(s.total_pnl),
+    totalPnl: num(s.total_pnl), updatedAt: s.updated_at || "",
   };
 }
 

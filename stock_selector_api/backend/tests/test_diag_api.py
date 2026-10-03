@@ -1,63 +1,124 @@
-"""tests/test_diag_api.py — M3 Task6：外部调度契约 + 诊断明细端点。"""
+"""tests/test_diag_api.py — 诊断接口鉴权收敛：属主一律取自登录令牌，越权/未登录一律拒。"""
 
 import asyncio
+from datetime import date, timedelta
 
 import pytest
-from repositories import holdings_repo
+from repositories import portfolio_runs
 from services import diag_service
+
+DAY_A = (date.today() - timedelta(days=3)).isoformat()
+DAY_B = (date.today() - timedelta(days=4)).isoformat()
 
 
 @pytest.fixture(autouse=True)
-async def _seed():
+async def _reset():
+    from sqlalchemy import text
+
+    import db.base as dbb
+
+    async def _wipe():
+        async with dbb._engine.begin() as conn:
+            await conn.execute(text("DELETE FROM portfolio_diag_results"))
+            await conn.execute(text("DELETE FROM portfolio_diag_runs"))
+
     await diag_service.reset_runtime()
-    await holdings_repo._delete_from("holdings", {})
-    await holdings_repo.create({"user_id": "u_api", "code": "600519", "quantity": 100,
-                                "cost_price": 100})
+    await _wipe()
     yield
-    for r in await holdings_repo.list_by_user("u_api"):
-        await holdings_repo.delete(r["id"])
-    await holdings_repo._delete_from("holdings", {})
+    await _wipe()
 
 
-async def test_external_diag_endpoint(client, monkeypatch):
-    async def fake_plugin(payload):
-        return {"results": [
-            {"code": h["code"], "name": "", "action": "hold", "action_reason": "",
-             "latest_price": 10.0, "quantity": h["quantity"], "holding_pnl": 0.0,
-             "pnl_pct": 0.0, "suggestion": ""} for h in payload["holdings"]],
-            "summary": {"action_counts": {"hold": 1}, "total_market_value": 1000.0,
-                        "total_pnl": 0.0, "holding_count": 1}}
+async def _owner_id(client, headers) -> str:
+    me = await client.get("/api/v1/auth/me", headers=headers)
+    return me.json()["data"]["id"]
 
-    monkeypatch.setattr("services.portfolio_plugin.call_plugin_analyze", fake_plugin)
-    r = await client.post("/api/external/portfolio/diag",
-                          json={"user_id": "u_api", "natural_day": "2026-09-17"})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["success"] is True
-    data = body["data"]
-    assert data["run_id"] and data["status"] in ("queued", "running", "completed")
-    for _ in range(50):
-        detail = await diag_service.diag_detail(data["run_id"])
+
+async def _add_holding(client, headers, code="600519"):
+    r = await client.post("/api/v1/holdings", headers=headers, json={
+        "code": code, "name": "茅台", "quantity": 100, "cost_price": 1688.0})
+    assert r.status_code == 200, r.text
+
+
+async def _wait_done(run_id):
+    for _ in range(100):
+        detail = await diag_service.diag_detail(run_id)
         if detail and detail["status"] in ("completed", "failed"):
-            break
+            return detail
         await asyncio.sleep(0.02)
-    assert detail["status"] == "completed"
+    raise AssertionError(f"诊断未在预期内结束：{run_id}")
 
 
-async def test_diag_detail_endpoint(client, monkeypatch):
-    async def fake_plugin(payload):
-        return {"results": [], "summary": {"action_counts": {}, "total_market_value": 0,
-                                           "total_pnl": 0, "holding_count": 0}}
+async def test_run_without_holdings_is_rejected(client, admin_headers):
+    r = await client.post("/api/v1/diag/run", headers=admin_headers)
+    assert r.status_code == 409
+    assert "持仓" in r.json()["message"]
 
-    monkeypatch.setattr("services.portfolio_plugin.call_plugin_analyze", fake_plugin)
-    r = await client.post("/api/external/portfolio/diag",
-                          json={"user_id": "u_api", "natural_day": "2026-09-16"})
+
+async def test_manual_run_completes_and_is_listed(client, admin_headers):
+    await _add_holding(client, admin_headers)
+    r = await client.post("/api/v1/diag/run", headers=admin_headers)
+    assert r.status_code == 200, r.text
     run_id = r.json()["data"]["run_id"]
-    for _ in range(50):
-        d = await diag_service.diag_detail(run_id)
-        if d and d["status"] in ("completed", "failed"):
-            break
-        await asyncio.sleep(0.02)
-    r2 = await client.get(f"/api/portfolio/diag/{run_id}")
-    assert r2.status_code == 200
-    assert r2.json()["data"]["run_id"] == run_id
+
+    detail = await _wait_done(run_id)
+    assert detail["status"] == "completed", detail["error"]
+    assert len(detail["results"]) == 1
+
+    lr = await client.get("/api/v1/diag/runs", headers=admin_headers)
+    assert lr.status_code == 200
+    assert run_id in [i["run_id"] for i in lr.json()["data"]["items"]]
+
+
+async def test_refresh_message_distinguishes_start_and_replay(client, admin_headers):
+    """刷新入口的文案得说实话：真跑了一次才叫「已启动」，冷却期内重放要告诉用户多久能刷新。"""
+    await _add_holding(client, admin_headers)
+    r1 = await client.post("/api/v1/diag/run", headers=admin_headers)
+    assert r1.json()["message"] == "诊断已启动", r1.text
+    await _wait_done(r1.json()["data"]["run_id"])
+
+    r2 = await client.post("/api/v1/diag/run", headers=admin_headers)
+    assert r2.json()["data"]["run_id"] == r1.json()["data"]["run_id"]
+    assert "10 分钟" in r2.json()["message"], r2.text
+
+
+async def test_same_day_rerun_replays_batch(client, admin_headers):
+    await _add_holding(client, admin_headers)
+    r1 = await client.post("/api/external/portfolio/diag", headers=admin_headers,
+                           json={"natural_day": DAY_A})
+    assert r1.status_code == 200, r1.text
+    run_id = r1.json()["data"]["run_id"]
+    await _wait_done(run_id)
+
+    r2 = await client.post("/api/external/portfolio/diag", headers=admin_headers,
+                           json={"natural_day": DAY_A})
+    assert r2.json()["data"]["run_id"] == run_id, "同日重跑必须复用批次"
+
+
+async def test_run_of_other_user_not_visible(client, admin_headers):
+    owner = await _owner_id(client, admin_headers)
+    run = await portfolio_runs.create({"batch_id": "foreign", "user_id": owner + "-x",
+                                       "natural_day": DAY_B, "status": "completed"})
+    for url in (f"/api/v1/diag/runs/{run['run_id']}", f"/api/portfolio/diag/{run['run_id']}"):
+        r = await client.get(url, headers=admin_headers)
+        assert r.status_code == 404, (url, r.text)
+
+
+@pytest.mark.parametrize("url", [
+    "/api/v1/diag/runs", "/api/portfolio/runs", "/api/v1/holdings",
+])
+async def test_contract_routes_require_login(client, url):
+    assert (await client.get(url)).status_code == 401
+
+
+async def test_portfolio_runs_scoped_to_token_user(client, admin_headers):
+    # 旧契约的 user_id 查询参数不再被信任：只返回令牌属主的 run
+    await _add_holding(client, admin_headers)
+    r = await client.post("/api/v1/diag/run", headers=admin_headers)
+    run_id = r.json()["data"]["run_id"]
+    await _wait_done(run_id)
+
+    lr = await client.get("/api/portfolio/runs", headers=admin_headers,
+                          params={"user_id": "someone-else"})
+    items = lr.json()["data"]["items"]
+    assert [i["run_id"] for i in items] == [run_id]
+    assert {i["user_id"] for i in items} == {await _owner_id(client, admin_headers)}

@@ -55,8 +55,41 @@ async def _http_analyze(payload: dict) -> dict:
     return {"results": body["results"], "summary": body.get("summary", {})}
 
 
+# 插件契约只吃这几个字段；DB 行带 datetime 的 created_at/updated_at 会把 httpx json 序列化打炸
+# （持仓诊断先踩过一次，利润分析把 trades 也带上，同一颗雷在两条路径上都会炸）。
+def _canon_holdings(holdings: list[dict]) -> list[dict]:
+    return [
+        {
+            "code": str(h["code"]),
+            "name": str(h.get("name") or ""),
+            "quantity": int(h["quantity"]),
+            "cost_price": float(h["cost_price"]),
+        }
+        for h in holdings
+    ]
+
+
+def _canon_trades(trades: list[dict]) -> list[dict]:
+    return [
+        {
+            "trade_date": str(t["trade_date"]),
+            "stock_code": str(t["stock_code"]),
+            "stock_name": str(t.get("stock_name") or ""),
+            "direction": str(t.get("direction") or ""),
+            "price": float(t.get("price") or 0.0),
+            "quantity": int(t.get("quantity") or 0),
+            "commission": float(t.get("commission") or 0.0),
+            "stamp_tax": float(t.get("stamp_tax") or 0.0),
+            "transfer_fee": float(t.get("transfer_fee") or 0.0),
+            "settled_amount": float(t.get("settled_amount") or 0.0),
+        }
+        for t in trades
+    ]
+
+
 async def call_plugin_analyze(payload: dict) -> dict:
     """请求插件判定 + 收益快照；返回 {results, summary}。失败抛异常（R2-2 兜底由上层处理）。"""
+    payload = {**payload, "holdings": _canon_holdings(payload.get("holdings", []))}
     if settings.plugin_mode == "http":
         return await _http_analyze(payload)
     logger.info("plugin_mode=mock，返回 mock 判定（holdings=%d）", len(payload.get("holdings", [])))
@@ -93,6 +126,9 @@ async def _http_pnl(payload: dict) -> dict:
 
 async def call_plugin_pnl(payload: dict) -> dict:
     """请求插件利润单点口径（per_code/realized_summary/unrealized_summary）。"""
+    payload = {**payload,
+               "trades": _canon_trades(payload.get("trades", [])),
+               "holdings": _canon_holdings(payload.get("holdings", []))}
     if settings.plugin_mode == "http":
         return await _http_pnl(payload)
     return _mock_pnl(payload)

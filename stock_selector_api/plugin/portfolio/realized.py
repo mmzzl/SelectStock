@@ -51,7 +51,12 @@ def compute_pnl(trades: list[dict], holdings: list[dict], latest_price_fn) -> di
     total_realized = 0.0
     total_fees = 0.0
     for code, cur in pos.items():
-        latest = float(latest_price_fn(code))
+        # 只给在持仓位取价：已平仓的代码行情对总额没有任何贡献（数量 0），却要把每次外部请求
+        # 都赌上——交割单里三十几个代码全打 AKShare，任一失败整页利润分析就 503。
+        if cur["qty"] > 0:
+            latest = float(latest_price_fn(code))
+        else:
+            latest = float(cur["cost"])
         unreal = (latest - cur["cost"]) * cur["qty"] if cur["qty"] > 0 else 0.0
         total_value += latest * cur["qty"]
         total_unrealized += unreal
@@ -71,5 +76,6 @@ def compute_pnl(trades: list[dict], holdings: list[dict], latest_price_fn) -> di
                              "total_fees": _r(total_fees)},
         "unrealized_summary": {"total_unrealized": _r(total_unrealized),
                                "total_value": _r(total_value),
-                               "holding_count": len(per_code)},
+                               # per_code 是「所有交易过的代码」，持仓数只算还在场的，否则利润分析页会写「持仓 76 只」
+                               "holding_count": sum(1 for r in per_code if r["position"] > 0)},
     }

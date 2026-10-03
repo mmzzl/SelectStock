@@ -11,6 +11,7 @@ from api.v1 import (
     notify,
     devices,
     holdings,
+    diag,
     trades,
     messages,
     selection,
@@ -38,6 +39,9 @@ api_router.include_router(devices.router, dependencies=_password_gate)
 
 # —— 持仓模块 ——
 api_router.include_router(holdings.router, dependencies=_password_gate)
+
+# —— 持仓诊断模块 ——
+api_router.include_router(diag.router, dependencies=_password_gate)
 
 # —— 交易记录 / 交割单导入模块 ——
 api_router.include_router(trades.router, dependencies=_password_gate)
