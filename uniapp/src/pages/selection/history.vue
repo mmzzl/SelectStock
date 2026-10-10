@@ -6,7 +6,7 @@ import { useClient } from "../../composables/useClient.js";
 import { toSelectionJobRow, toSelectionResultRow, toStrategyOption, fmtTime } from "../../logic/view.js";
 
 const runs = ref([]); const expanded = ref(null); const detailResults = ref([]);
-const err = ref("");
+const err = ref(""); const loaded = ref(false);
 const labels = ref({});        // 策略名 → 中文短标签，来自插件 /strategy-detail
 const { selection } = useClient();
 onShow(async () => {
@@ -14,6 +14,7 @@ onShow(async () => {
   try {
     const data = await selection.runs({ page: 1, size: 50 });
     runs.value = (data.items || []).map(toSelectionJobRow);
+    loaded.value = true;
   } catch (e) { err.value = e.message; }
   if (!Object.keys(labels.value).length) {
     try {
@@ -56,7 +57,7 @@ async function toggle(j) {
         <view v-if="!detailResults.length" class="reason" style="padding:10rpx 0">暂无结果明细</view>
       </view>
     </view>
-    <view v-if="!runs.length" class="empty">暂无选股记录</view>
+    <view v-if="!runs.length" class="empty">{{ loaded ? "暂无选股记录" : "加载中…" }}</view>
   </view>
 </template>
 <style>

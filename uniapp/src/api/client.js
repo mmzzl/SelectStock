@@ -28,6 +28,16 @@ function defaultAdapter() {
   };
 }
 
+// uni.request 传输层失败时 reject 的是 {errMsg:"request:fail ..."}，没有 message，
+// 页面 catch 到就把 err 写成 undefined —— 用户看到的就是一片空白且没有原因。
+function netError(e) {
+  return new Error((e && (e.message || e.errMsg)) || "网络请求失败");
+}
+
+const GET_TIMEOUT_MS = 20000;
+const RETRY_DELAY_MS = 800;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 // App 端（Android JS 核心）没有 URLSearchParams 全局，且调用方普遍传默认空对象，
 // 因此自己拼 query：空对象要得到 ""，undefined/null 一律跳过。
 function toQuery(query) {
@@ -44,6 +54,12 @@ function handle({ statusCode, data }, { onUnauthorized }) {
   if (statusCode === 401) { onUnauthorized?.(); throw new UnauthorizedError(data?.message); }
   if (statusCode === 428) throw new PasswordExpiredError(data?.message);
   if (statusCode >= 400) throw new BizError(data?.message || `HTTP ${statusCode}`, data?.code);
+  // App 端拿到 gzip/br 或 HTML 错误页时，uni.request 会把响应原样给回字符串，
+  // 而 statusCode 还是 200——不拦就在这里静默变成「空白页 + 没有报错」。
+  if (typeof data === "string") {
+    try { data = JSON.parse(data); }
+    catch { throw new BizError(`响应不是 JSON（${data.slice(0, 60)}）`, -1); }
+  }
   if (data && typeof data === "object" && "code" in data) {
     if (data.code !== 0) throw new BizError(data.message || "请求失败", data.code);
     return data.data;
@@ -57,12 +73,27 @@ export function createClient({ adapter, getToken, onUnauthorized, baseUrl = "" }
     async request(method, path, { query, body, header } = {}) {
       const qs = query ? toQuery(query) : "";
       const token = getToken ? getToken() : "";
-      const res = await ad.request({
+      const cfg = {
         url: `${baseUrl}${path}${qs}`,
         method,
         data: body,
+        timeout: GET_TIMEOUT_MS,
         header: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...header },
-      });
+      };
+      // 公网隧道（Cloudflare 边缘 + 移动网络）首包能到 1.5s 以上，偶发一次失败就让页面
+      // 停在「暂无记录」再也翻不过来，所以 GET 补一次重试；POST 不重试（选股会重复建任务）。
+      if (method.toUpperCase() !== "GET") {
+        let res;
+        try { res = await ad.request(cfg); } catch (e) { throw netError(e); }
+        return handle(res, { onUnauthorized });
+      }
+      let res;
+      try {
+        res = await ad.request(cfg);
+      } catch (e) {
+        await sleep(RETRY_DELAY_MS);
+        try { res = await ad.request(cfg); } catch (e2) { throw netError(e2); }
+      }
       return handle(res, { onUnauthorized });
     },
     async upload(path, { filePath, file, name = "file", formData = {}, query, header = {} } = {}) {

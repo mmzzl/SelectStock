@@ -281,12 +281,12 @@ async function previewApp() {
     const got = await bytesFromPath(copied, steps);
     const out = send(got);
     if (out) return out;
-    diag.value = `通道=multipart(native-copy) path=${copied}${perm}`;
+    diag.value = `通道=multipart(native-copy) path=${copied} 前置=${steps.join("|")}${perm}`;
     return await trades.previewFile(copied, "file", password, diag.value);
   }
 
   if (local) {
-    diag.value = `通道=multipart(${steps[0]}) path=${local}${perm}`;
+    diag.value = `通道=multipart(resolved-fallback) path=${local} 前置=${steps.join("|")}${perm}`;
     return await trades.previewFile(local, "file", password, diag.value);
   }
 
