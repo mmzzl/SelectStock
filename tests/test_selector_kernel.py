@@ -204,6 +204,50 @@ class TestRanking:
         assert [r.code for r in _rank(items)] == ["000002", "000001"]
 
 
+class TestUniverseExclusion:
+    """按名字剔除非选股标的（货币/债券 ETF），见 settings.yaml 的实测依据。"""
+
+    def run(self, ds, keywords):
+        from stock_selector.core.selector import run_select
+
+        cfg = config()
+        cfg["selector"]["exclude_name_keywords"] = keywords
+        return run_select(datasource=ds, config=cfg)
+
+    def test_helper_matches_substring_and_ignores_blanks(self):
+        from stock_selector.core.selector import _is_excluded
+
+        assert _is_excluded("银华日利货币ETF", ["货币"]) is True
+        assert _is_excluded("平安银行", ["货币"]) is False
+        assert _is_excluded("", ["货币"]) is False
+        assert _is_excluded("国债ETF", []) is False
+        assert _is_excluded("国债ETF", ["", "债"]) is True
+
+    def test_empty_name_is_never_excluded(self):
+        """股票列表没名字、数据源也报不出名字时放行：宁可不剔也不误剔一只股票。"""
+        ds = FakeSource(stocks=[{"code": "000001", "name": ""}])
+        results = self.run(ds, ["货币"])
+        assert {r.code for r in results} == {"000001"}
+
+    def test_money_and_bond_etf_dropped_equity_kept(self):
+        ds = FakeSource(stocks=[
+            {"code": "000001", "name": "平安银行"},
+            {"code": "511880", "name": "银华货币ETF"},
+            {"code": "511010", "name": "国债ETF"},
+            {"code": "511690", "name": "招商快线ETF"},
+        ])
+        results = self.run(ds, ["货币", "债", "快线"])
+        assert {r.code for r in results} == {"000001"}
+
+    def test_settings_keywords_do_not_hit_cashflow_equity_etf(self):
+        """防回归：现金流ETF 是股票型基金，配置里出现"现金"就会把它错杀。"""
+        from stock_selector.core.selector import _is_excluded, _load_config
+
+        keywords = list(_load_config()["selector"]["exclude_name_keywords"])
+        assert _is_excluded("景顺长城国证自由现金流ETF", keywords) is False
+        assert _is_excluded("银华日利", keywords) is True
+
+
 class TestStrategyContract:
     def test_run_is_the_list_form_of_signal_at(self):
         from stock_selector.core.selector import create_strategy

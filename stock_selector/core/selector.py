@@ -116,6 +116,14 @@ def _requirements(instances) -> tuple[list[str], int]:
     return columns, rows
 
 
+def _is_excluded(name: str, keywords: list[str]) -> bool:
+    """名字命中关键词即视为非选股对象（货币/债券 ETF，见 settings.yaml 的说明）。
+
+    名字为空时不剔：宁可不剔，也不误剔一只股票。
+    """
+    return bool(name) and any(k in name for k in keywords if k)
+
+
 def _rank(results: list[SelectResult]) -> list[SelectResult]:
     """有评分则按分数降序赋 rank；全部无评分时保持产出顺序、rank 留空。"""
     if not any(r.score is not None for r in results):
@@ -169,6 +177,8 @@ def run_select(
     selector_cfg = config.get("selector") or {}
     risk_cfg = selector_cfg.get("risk_filter") or {}
     risk = _risk_gate(risk_cfg)
+    # 非选股对象（货币/债券 ETF）按名字剔，见 settings.yaml 里的实测依据
+    exclude = list(selector_cfg.get("exclude_name_keywords") or [])
 
     # 1. 加载全部策略插件，构建注册表
     loader = StrategyLoader(params).load_all()
@@ -198,6 +208,7 @@ def run_select(
         failed = 0
         risk_dropped = 0        # 被买入风险分剔掉的命中条数
         risk_unknown = 0        # 历史太短/缺列导致无法判分的股票数
+        excluded = 0            # 按名字剔出选股池的非选股标的（货币/债券 ETF）
 
         # 3. 遍历股票取数一次，执行全部目标策略
         for stock in stock_list:
@@ -216,6 +227,11 @@ def run_select(
                 continue
             loaded += 1
 
+            # 3a. 名字要到取完数才知道（parquet 源的股票列表只有代码），所以剔除放在这里
+            stock_name = str(stock.get("name") or "") or ds.name_of(code)
+            if _is_excluded(stock_name, exclude):
+                excluded += 1
+                continue
             stock_hits: list[SelectResult] = []
             for name, strategy in instances:
                 try:
@@ -230,7 +246,7 @@ def run_select(
                     if not r.code:
                         r.code = code
                     if not r.name:
-                        r.name = stock.get("name") or ds.name_of(code)
+                        r.name = stock_name
                     if not r.signal:
                         r.signal = name
                     if not r.strategy:
@@ -270,8 +286,8 @@ def run_select(
                         risk_dropped, risk_unknown,
                         risk.load(risk_cfg.get("model_dir"))[2])
         logger.info(
-            "选股完成: 策略=%s 股票池=%d 有效=%d 命中=%d 失败=%d 基准日=%s",
-            target, len(stock_list), loaded, len(results), failed, ds.max_date(),
+            "选股完成: 策略=%s 股票池=%d 有效=%d 剔除非选股标的=%d 命中=%d 失败=%d 基准日=%s",
+            target, len(stock_list), loaded, excluded, len(results), failed, ds.max_date(),
         )
     finally:
         if owns_source:
