@@ -3,7 +3,7 @@
 import { ref } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
-import { toSelectionJobRow, toSelectionResultRow, toStrategyOption, fmtTime, riskText } from "../../logic/view.js";
+import { toSelectionJobRow, toSelectionResultRow, toStrategyOption, fmtTime, riskText, sortByRiskDesc } from "../../logic/view.js";
 
 const runs = ref([]); const expanded = ref(null); const detailResults = ref([]);
 const err = ref(""); const loaded = ref(false);
@@ -33,7 +33,7 @@ async function toggle(j) {
   if (expanded.value) {
     try {
       const d = await selection.runDetail(j.jobId);
-      detailResults.value = (d.results || []).map(toSelectionResultRow);
+      detailResults.value = sortByRiskDesc((d.results || []).map(toSelectionResultRow));
     } catch (e) { err.value = e.message; }
   }
 }
@@ -51,6 +51,9 @@ async function toggle(j) {
         <text class="reason">{{ j.resultCount }} 条结果</text>
       </view>
       <view v-if="expanded === j.jobId">
+        <view v-if="detailResults.length" class="reason" style="padding:6rpx 0 10rpx">
+          按「预期 10 日超额」从高到低 · #号是策略规则名次，不代表优先级
+        </view>
         <view v-for="r in detailResults" :key="r.code" class="sub">
           <text class="badge sig">{{ labelOf(r.strategy) }}</text>
           <text>{{ r.rank ? `#${r.rank} ` : "" }}{{ r.name }}（{{ r.code }}）</text>

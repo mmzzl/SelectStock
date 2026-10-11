@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { toHoldingRow, toTradeRow, toPnlView, toSelectionJobRow, toSelectionResultRow,
          toMessageRow, toDiagRow, toPreviewRow, toUpgradeInfo, fmtTime,
-         riskText, riskClass } from "../src/logic/view.js";
+         riskText, riskClass, sortByRiskDesc } from "../src/logic/view.js";
 
 test("时间格式化：naive UTC 转本地、压到分钟；带时区/非法值不崩", async () => {
   const { execFileSync } = await import("node:child_process");
@@ -130,4 +130,17 @@ test("风险分展示：缺值给占位符而不是 0，正负分别红绿", () 
   assert.equal(riskClass(0.2), "up");
   assert.equal(riskClass(0), "up");
   assert.equal(riskClass(null), "");
+});
+
+test("展示顺序：按预期超额降序，没判分的排最后且互保名次序", () => {
+  const rows = [
+    { code: "A", rank: 1, risk: null },
+    { code: "B", rank: 2, risk: -0.24 },
+    { code: "C", rank: 3, risk: 5.46 },
+    { code: "D", rank: 4, risk: undefined },
+    { code: "E", rank: 5, risk: 0.05 },
+  ];
+  assert.deepEqual(sortByRiskDesc(rows).map((r) => r.code), ["C", "E", "B", "A", "D"]);
+  assert.deepEqual(rows.map((r) => r.code), ["A", "B", "C", "D", "E"]);   // 不改原数组
+  assert.equal(sortByRiskDesc([]).length, 0);
 });

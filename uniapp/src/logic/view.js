@@ -104,6 +104,22 @@ export function riskClass(v) {
   return Number(v) >= 0 ? "up" : "down";
 }
 
+/** 结果页展示顺序：按「预期 10 日超额」从高到低，没有风险分的排最后。
+ *
+ *  不用后端的 rank：box_oscillate 的强度分会饱和到 1.000，同分再按代码字符串兜底，
+ *  头部名次并不携带任何信息（2026-10-11 实测榜首是货币 ETF）。缺值排最后而不是排 0，
+ *  因为"闸门没判出来"和"预测跑平大盘"是两回事。
+ */
+export function sortByRiskDesc(rows) {
+  const value = (r) => {
+    const v = r?.risk;
+    if (v === null || v === undefined || Number.isNaN(Number(v))) return -Infinity;
+    return Number(v);
+  };
+  // 两个都没判分时 y-x 会是 NaN（规范按 0 处理，但不依赖实现），显式返回 0 让它们保序
+  return [...rows].sort((a, b) => (value(a) === value(b) ? 0 : value(b) - value(a)));
+}
+
 /** 插件 /strategy-detail 的一行 → 前端选项。中文标签只来自 description，不硬编码策略名。 */
 export function toStrategyOption(d) {
   return {

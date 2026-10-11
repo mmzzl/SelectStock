@@ -1,9 +1,9 @@
 <!-- uniapp/src/pages/selection/index.vue -->
 <script setup>
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { onShow, onUnload } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
-import { toSelectionResultRow, toStrategyOption, riskText, riskClass } from "../../logic/view.js";
+import { toSelectionResultRow, toStrategyOption, riskText, riskClass, sortByRiskDesc } from "../../logic/view.js";
 
 const { selection } = useClient();
 const strategies = ref([]);        // [{ name, label, desc }]
@@ -47,6 +47,9 @@ function startPoll(jobId) {
 }
 const goHistory = () => uni.navigateTo({ url: "/pages/selection/history" });
 
+// 展示顺序按预期 10 日超额降序（后端 rank 是策略规则名次，头部无信息，见 view.js 的说明）
+const ordered = computed(() => sortByRiskDesc(results.value));
+
 // 结果里的 strategy 是插件策略名，中文标签统一取自 /strategy-detail 的 description
 const labelOf = (s) => strategies.value.find((x) => x.name === s)?.label || s || "信号";
 const fixed2 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) ? "—" : Number(v).toFixed(2));
@@ -85,9 +88,14 @@ const fixed3 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) 
       <text v-if="err" class="err">{{ err }}</text>
 
       <view v-if="results.length" class="sec">选股结果（{{ results.length }} 只）</view>
-      <view v-for="(r, i) in results" :key="r.code" class="card">
+      <view v-if="results.length" class="sortnote">
+        按「预期 10 日超额」从高到低排列；框内数字是策略规则名次，不代表优先级。
+        该超额为买入风险模型的预测值：经验证的是「低于阈值的剔除」，高分不等于必涨；
+        显示「—」的表示模型没能判分（多为场内基金），排在最后。
+      </view>
+      <view v-for="r in ordered" :key="r.code" class="card">
         <view class="row1">
-          <text><text class="rank">{{ r.rank || i + 1 }}</text> {{ r.name }}（{{ r.code }}）</text>
+          <text><text v-if="r.rank" class="rank">{{ r.rank }}</text> {{ r.name }}（{{ r.code }}）</text>
           <text class="badge sig">{{ labelOf(r.strategy) }}</text>
         </view>
         <view class="kv3">
@@ -109,4 +117,8 @@ const fixed3 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) 
   background: #eef3ff; color: #2b5cff; font-size: 24rpx; font-weight: 700;
 }
 .kv3 .n.date { font-size: 24rpx; font-weight: 600; color: #5c6470; }
+.sortnote {
+  font-size: 22rpx; color: #8a919f; line-height: 1.6;
+  margin: -6rpx 4rpx 16rpx;
+}
 </style>
