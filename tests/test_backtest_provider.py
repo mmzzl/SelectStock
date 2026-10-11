@@ -51,3 +51,30 @@ class TestParquetProvider:
 
         p = ParquetProvider(provider_dir)
         assert p.rows("2026-09-02", ["000002"]) == {}
+
+
+class TestUniverseSampling:
+    """--universe 必须是等距抽样：codes() 升序时"取前 N 个"会只剩最老编号的深市主板。"""
+
+    def test_sample_spreads_across_boards(self):
+        from scripts.backtest_main import _sampled_codes
+
+        codes = ([f"000{i:03d}" for i in range(1, 400)]      # 深市主板（老编号，排序后全在最前）
+                 + [f"002{i:03d}" for i in range(1, 400)]
+                 + [f"300{i:03d}" for i in range(1, 400)]
+                 + [f"600{i:03d}" for i in range(1, 400)]
+                 + [f"688{i:03d}" for i in range(1, 200)])
+        picked = _sampled_codes(codes, 300)
+        assert len(picked) == 300 and len(set(picked)) == 300
+        assert {c[:3] for c in picked} == {"000", "002", "300", "600", "688"}
+        assert picked[0] == codes[0]
+        # 旧写法 codes[:300] 只会剩最老编号的深市主板
+        assert len({c[:3] for c in codes[:300]}) == 1
+
+    def test_sample_is_deterministic_and_never_exceeds_n(self):
+        from scripts.backtest_main import _sampled_codes
+
+        codes = [f"{i:06d}" for i in range(1, 6632)]
+        assert _sampled_codes(codes, 300) == _sampled_codes(codes, 300)
+        assert len(_sampled_codes(codes, 7000)) == len(codes)
+        assert len(_sampled_codes(codes, 5)) == 5

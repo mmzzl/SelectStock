@@ -8,7 +8,7 @@
         --start 2025-09-01 --end 2026-09-01 \
         --capital 100000 --max-positions 5 --position-cap-pct 0.2
 
-    # 用选股策略回测（出场走机械规则），只取前 300 只股票
+    # 用选股策略回测（出场走机械规则），等距抽 300 只股票
     python scripts/backtest_main.py --strategy trend_rebound --universe 300 \
         --start 2026-01-01 --end 2026-09-01 --max-hold-days 10 --stop-loss-pct 0.05
 """
@@ -63,6 +63,13 @@ def load_rules(client, database: str) -> dict:
     return rules
 
 
+def _sampled_codes(codes: list[str], n: int) -> list[str]:
+    """等距抽样，不是取前 n 个：codes() 升序时前 n 个全是最老编号的深市主板，板块直接偏掉。"""
+    if n >= len(codes):
+        return codes
+    return [codes[i * len(codes) // n] for i in range(n)]
+
+
 def run_backtest(args, progress_cb=None):
     client = get_client()
     database = load_mongo_config()["mongodb"]["database"]
@@ -75,7 +82,7 @@ def run_backtest(args, progress_cb=None):
                 strategy=selection_strategy,
                 provider=provider,
                 target_amount=args.target_amount,
-                universe=provider.codes()[: args.universe] if args.universe else None,
+                universe=_sampled_codes(provider.codes(), args.universe) if args.universe else None,
                 max_hold_days=args.max_hold_days,
                 stop_loss_pct=args.stop_loss_pct,
                 take_profit_pct=args.take_profit_pct,

@@ -8,11 +8,20 @@
     python -m uvicorn stock_selector.api:app --host 0.0.0.0 --port 8002
 """
 
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .core.selector import list_strategies, run_select, strategy_details
+
+# 内核用 logger("stock_selector") 打进度与风险剔除明细；本进程是入口，负责挂 handler，
+# 否则 uvicorn 只配自己的 logger，"命中被谁剔掉了"在生产日志里是看不见的。
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 app = FastAPI(title="插件化量化选股系统", version="0.1.0")
 

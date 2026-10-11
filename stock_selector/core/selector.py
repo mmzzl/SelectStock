@@ -126,6 +126,19 @@ def _rank(results: list[SelectResult]) -> list[SelectResult]:
     return results
 
 
+def _risk_gate(risk_cfg: dict | None):
+    """按配置决定是否启用买入风险剔除；未启用返回 None。
+
+    启用却缺模型时会报错而不是静默不过滤——"配置说要用风控但实际没用上"必须是故障。
+    """
+    if not risk_cfg or not risk_cfg.get("enabled"):
+        return None
+    from ..features import risk_score
+
+    risk_score.load(risk_cfg.get("model_dir"))   # 提前校验，避免逐只股票反复报错
+    return risk_score
+
+
 def run_select(
     strategies: list[str] | str | None = None,
     datasource: BaseDataSource | None = None,
@@ -140,6 +153,10 @@ def run_select(
         config: 注入的配置字典；None 则加载 settings.yaml。
         as_json: 为 True 时返回 JSON 字符串，否则返回 list[SelectResult]。
 
+    可选风控：`selector.risk_filter.enabled: true`（当前默认开启）时，命中的票会先过一遍
+    买入风险分（见 features/risk_score.py），预测 10 日超额低于阈值的直接剔除，保留的把分数
+    写进 `extra.risk_ex10_pp`。只剔不排；模型缺失时 `_risk_gate` 直接报错，不会静默不过滤。
+
     Returns:
         list[SelectResult] 或 JSON 字符串。
 
@@ -150,6 +167,8 @@ def run_select(
     config = config or _load_config()
     params = config.get("strategy_params") or {}
     selector_cfg = config.get("selector") or {}
+    risk_cfg = selector_cfg.get("risk_filter") or {}
+    risk = _risk_gate(risk_cfg)
 
     # 1. 加载全部策略插件，构建注册表
     loader = StrategyLoader(params).load_all()
@@ -163,6 +182,9 @@ def run_select(
     try:
         # 策略声明的数据需求下发给数据源，避免剪列后策略取不到指标列而静默 0 命中
         columns, rows = _requirements(instances)
+        if risk is not None:
+            columns = list(dict.fromkeys(columns + risk.required_columns()))
+            rows = max(rows, risk.required_rows())
         ds.prepare(columns=columns, rows=rows)
 
         stock_list = ds.get_stock_list()
@@ -174,6 +196,8 @@ def run_select(
         results: list[SelectResult] = []
         loaded = 0
         failed = 0
+        risk_dropped = 0        # 被买入风险分剔掉的命中条数
+        risk_unknown = 0        # 历史太短/缺列导致无法判分的股票数
 
         # 3. 遍历股票取数一次，执行全部目标策略
         for stock in stock_list:
@@ -192,6 +216,7 @@ def run_select(
                 continue
             loaded += 1
 
+            stock_hits: list[SelectResult] = []
             for name, strategy in instances:
                 try:
                     hits = strategy.run(df) or []
@@ -212,7 +237,21 @@ def run_select(
                         r.strategy = name
                     if r.price is None and "close" in df.columns:
                         r.price = round(float(df["close"].iloc[-1]), 4)
-                    results.append(r)
+                    stock_hits.append(r)
+
+            # 3b. 买入风险分：只剔不排。分数不可得（历史太短）时放行，不猜
+            if risk is not None and stock_hits:
+                rejected, value = risk.decide(df, risk_cfg.get("model_dir"))
+                if rejected:
+                    risk_dropped += 1
+                    logger.info("风险剔除 %s: 预测10日超额 %+.2fpp", code, 100 * value)
+                    continue
+                if value is None:
+                    risk_unknown += 1
+                else:
+                    for r in stock_hits:
+                        r.extra["risk_ex10_pp"] = round(100 * value, 2)
+            results.extend(stock_hits)
 
         asof = ds.max_date() or ""
         for r in results:
@@ -226,6 +265,10 @@ def run_select(
                 f"数据源 {type(ds).__name__} 未返回任何行情（股票池 {len(stock_list)} 只，"
                 f"失败 {failed} 次），请检查 datasource.type 配置与数据是否已生成"
             )
+        if risk is not None:
+            logger.info("风险分: 剔除=%d 无法判分=%d 阈值=%.6f",
+                        risk_dropped, risk_unknown,
+                        risk.load(risk_cfg.get("model_dir"))[2])
         logger.info(
             "选股完成: 策略=%s 股票池=%d 有效=%d 命中=%d 失败=%d 基准日=%s",
             target, len(stock_list), loaded, len(results), failed, ds.max_date(),
