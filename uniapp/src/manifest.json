@@ -2,8 +2,8 @@
     "name" : "select-stock",
     "appid" : "__UNI__9BE0E99",
     "description" : "智能选股客户端",
-    "versionName" : "0.1.14",
-    "versionCode" : "114",
+    "versionName" : "0.1.15",
+    "versionCode" : "115",
     "h5" : {
         "title" : "智能选股"
     },
