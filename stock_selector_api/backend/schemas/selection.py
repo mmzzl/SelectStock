@@ -24,3 +24,5 @@ class SelectResultCreate(BaseModel):
     score: float | None = None
     rank_no: int | None = None
     risk_ex10_pp: float | None = None    # 买入风险分（百分点），闸门判不了时为 None
+    buy_ref_price: float | None = None       # 买点参考位（策略判据里的均线/箱沿）
+    buy_invalid_price: float | None = None   # 跌破它则本次信号失效

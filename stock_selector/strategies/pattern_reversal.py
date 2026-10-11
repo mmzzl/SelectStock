@@ -121,6 +121,12 @@ class PatternReversal(BaseSelectStrategy):
             name="",
             signal="pattern_reversal",
             score=0.6,
+            extra={
+                # 买点就是信号当日收盘价（没有更低的参考位可给，硬编一个反而是编造），
+                # 但跌破 6 日低点就说明这不是 V 型反转，失效位是实打实的 low6
+                "buy_ref_price": None,
+                "buy_invalid_price": round(low6, 2),
+            },
             reason=(f"低位V型反转，pos60={pos:.2f}，自6日低点反弹{rebound * 100:.1f}%，"
                     f"量比{vol_ratio:.2f}"),
         )

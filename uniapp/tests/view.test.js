@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { toHoldingRow, toTradeRow, toPnlView, toSelectionJobRow, toSelectionResultRow,
          toMessageRow, toDiagRow, toPreviewRow, toUpgradeInfo, fmtTime,
-         riskText, riskClass, sortByRiskDesc } from "../src/logic/view.js";
+         riskText, riskClass, sortByRiskDesc, buyLevelText, sellTriggerText } from "../src/logic/view.js";
 
 test("时间格式化：naive UTC 转本地、压到分钟；带时区/非法值不崩", async () => {
   const { execFileSync } = await import("node:child_process");
@@ -21,7 +21,8 @@ test("时间格式化：naive UTC 转本地、压到分钟；带时区/非法值
 test("持仓行：快照字段透传，不重算", () => {
   const s = { code: "600519", name: "贵州茅台", cost_price: 1680.5, quantity: 100,
               action: "sell", action_reason: "跌破MA10", latest_price: 1500,
-              holding_pnl: -18050, pnl_pct: -10.7, diag_run_id: "r9" };
+              holding_pnl: -18050, pnl_pct: -10.7, diag_run_id: "r9",
+              sell_trigger_price: 1512.3 };
   const row = toHoldingRow(s);
   assert.equal(row.cost, 1680.5);
   assert.equal(row.shares, 100);
@@ -30,6 +31,22 @@ test("持仓行：快照字段透传，不重算", () => {
   assert.equal(row.pnlPct, -10.7);
   assert.equal(row.action, "sell");
   assert.equal(row.diagRunId, "r9");
+  assert.equal(row.sellTrigger, 1512.3);
+});
+
+test("卖出触发价文案：未触发说\"动到哪开始卖\"，已触发说\"动回去就不必卖\"", () => {
+  assert.equal(sellTriggerText({ action: "hold", latestPrice: 10, sellTrigger: 9.5 }),
+               "跌破 9.50 触发卖出");
+  assert.equal(sellTriggerText({ action: "add", latestPrice: 10, sellTrigger: 10.6 }),
+               "涨破 10.60 触发卖出");
+  assert.equal(sellTriggerText({ action: "sell", latestPrice: 9, sellTrigger: 9.5 }),
+               "涨回 9.50 解除卖出信号");
+  assert.equal(sellTriggerText({ action: "hold", latestPrice: 10, sellTrigger: 10 }),
+               "触发线 10.00（价格已到位）");
+  // 反算不出线（规则不含价格项、或行情缺失）时整行不给文案，不能显示 0.00
+  assert.equal(sellTriggerText({ action: "hold", latestPrice: 10, sellTrigger: null }), "");
+  assert.equal(sellTriggerText({ action: "hold", latestPrice: null, sellTrigger: 9.5 }), "");
+  assert.equal(sellTriggerText({}), "");
 });
 
 test("利润视图：per_code 与汇总原样透传（禁止求和/取百分比）", () => {
@@ -102,6 +119,7 @@ test("选股结果行：字段映射透传", () => {
   assert.deepEqual(row, {
     code: "600519", name: "茅台", signal: "trend_rebound", reason: "MACD金叉",
     strategy: "trend_rebound", asof: "", price: null, score: null, rank: null, risk: null,
+    buyRef: null, buyInvalid: null,
   });
 });
 
@@ -109,7 +127,7 @@ test("选股结果行：插件富化字段落到 camelCase", () => {
   const row = toSelectionResultRow({
     code: "000001", name: "平安银行", signal: "trend_rebound", reason: "回踩 MA20",
     strategy: "trend_rebound", asof: "2026-09-24", price: "11.20", score: 0.62, rank_no: 3,
-    risk_ex10_pp: "-0.21",
+    risk_ex10_pp: "-0.21", buy_ref_price: "10.85", buy_invalid_price: 10.31,
   });
   assert.equal(row.strategy, "trend_rebound");
   assert.equal(row.asof, "2026-09-24");
@@ -117,6 +135,17 @@ test("选股结果行：插件富化字段落到 camelCase", () => {
   assert.equal(row.score, 0.62);
   assert.equal(row.rank, 3);            // 后端列名 rank_no → 前端 rank
   assert.equal(row.risk, -0.21);        // 后端列名 risk_ex10_pp → 前端 risk
+  assert.equal(row.buyRef, 10.85);
+  assert.equal(row.buyInvalid, 10.31);
+});
+
+test("买点文案：判据里有几个位就说几个，都没有就整行不显示", () => {
+  assert.equal(buyLevelText({ buyRef: 10.85, buyInvalid: 10.31 }), "买入参考 10.85 · 跌破 10.31 失效");
+  // 低位反转只有失效位（买点就是信号收盘价），不能凭空补一个参考价
+  assert.equal(buyLevelText({ buyRef: null, buyInvalid: 10.3 }), "跌破 10.30 失效");
+  assert.equal(buyLevelText({ buyRef: 10.3, buyInvalid: null }), "买入参考 10.30");
+  assert.equal(buyLevelText({ buyRef: null, buyInvalid: null }), "");
+  assert.equal(buyLevelText({}), "");
 });
 
 test("风险分展示：缺值给占位符而不是 0，正负分别红绿", () => {

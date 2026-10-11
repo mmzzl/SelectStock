@@ -31,8 +31,22 @@ export function toHoldingRow(s) {
     actionReason: s.action_reason || "",
     latestPrice: num(s.latest_price),
     pnl: num(s.holding_pnl), pnlPct: num(s.pnl_pct),
+    sellTrigger: num(s.sell_trigger_price),
     diagRunId: s.diag_run_id || null,
   };
+}
+
+/** 卖出价格线的文案。线是插件按同一条 sell 规则反算的翻转价，所以它和 action 不会打架：
+ *  没触发时是「动到哪就开始卖」，已触发时是「动回去就不必卖」。 */
+export function sellTriggerText(r) {
+  const trig = num(r?.sellTrigger);
+  const latest = num(r?.latestPrice);
+  if (trig === null || latest === null || latest <= 0) return "";
+  const p = trig.toFixed(2);
+  if (Math.abs(trig - latest) < 0.005) return `触发线 ${p}（价格已到位）`;
+  const down = trig < latest;
+  if (r.action === "sell") return `${down ? "跌破" : "涨回"} ${p} 解除卖出信号`;
+  return `${down ? "跌破" : "涨破"} ${p} 触发卖出`;
 }
 
 export function toPnlRow(s) {
@@ -87,7 +101,19 @@ export function toSelectionResultRow(s) {
     price: num(s.price), score: num(s.score), rank: num(s.rank ?? s.rank_no),
     // 买入风险分（百分点）：预测 10 日同日基线超额，只有过了风险闸门的票才有值
     risk: num(s.risk_ex10_pp),
+    // 买点参考位/失效位：策略判据里算出的均线、箱体上沿、6 日低点（不是预测价）
+    buyRef: num(s.buy_ref_price), buyInvalid: num(s.buy_invalid_price),
   };
+}
+
+/** 买点文案：两个位都来自策略自己的判据，缺哪个就不说哪个；都没有就整行不显示。 */
+export function buyLevelText(r) {
+  const ref = num(r?.buyRef);
+  const stop = num(r?.buyInvalid);
+  const parts = [];
+  if (ref !== null) parts.push(`买入参考 ${ref.toFixed(2)}`);
+  if (stop !== null) parts.push(`跌破 ${stop.toFixed(2)} 失效`);
+  return parts.join(" · ");
 }
 
 /** 买入风险分的展示文本（百分点，带符号）。没值给占位符——0 是"预测跑平当日全市场"，

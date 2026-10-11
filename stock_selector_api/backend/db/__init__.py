@@ -18,6 +18,7 @@ async def create_all() -> None:
             await conn.run_sync(_ensure_user_password_changed_at)
             await conn.run_sync(_ensure_holdings_derived_columns)
             await conn.run_sync(_ensure_select_result_columns)
+            await conn.run_sync(_ensure_diag_result_columns)
         log.info("SQLite 建表完成")
     else:
         from db.mongo.indexes import ensure_indexes
@@ -60,9 +61,20 @@ def _ensure_select_result_columns(sync_conn) -> None:
     cols = {c["name"] for c in inspect(sync_conn).get_columns("select_results")}
     for col, ddl in (("strategy", "VARCHAR(64) DEFAULT ''"), ("asof", "VARCHAR(16) DEFAULT ''"),
                      ("price", "FLOAT"), ("score", "FLOAT"), ("rank_no", "INTEGER"),
-                     ("risk_ex10_pp", "FLOAT")):
+                     ("risk_ex10_pp", "FLOAT"),
+                     ("buy_ref_price", "FLOAT"), ("buy_invalid_price", "FLOAT")):
         if col not in cols:
             sync_conn.execute(text(f"ALTER TABLE select_results ADD COLUMN {col} {ddl}"))
+
+
+def _ensure_diag_result_columns(sync_conn) -> None:
+    """老库补列：portfolio_diag_results 承接插件反算的卖出价格线（幂等）。"""
+    from sqlalchemy import inspect, text
+
+    cols = {c["name"] for c in inspect(sync_conn).get_columns("portfolio_diag_results")}
+    if "sell_trigger_price" not in cols:
+        sync_conn.execute(text("ALTER TABLE portfolio_diag_results "
+                               "ADD COLUMN sell_trigger_price FLOAT"))
 
 
 async def init_database() -> None:

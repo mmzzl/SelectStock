@@ -3,7 +3,7 @@
 契约：POST /api/portfolio/analyze
   body:   {user_id, natural_day, holdings: [{code,name,quantity,cost_price}]}
   resp:   {results: [{code,name,action,action_reason,latest_price,quantity,
-                      holding_pnl,pnl_pct,suggestion}], summary: {...}}
+                      holding_pnl,pnl_pct,suggestion,sell_trigger_price}], summary: {...}}
 一切判定与收益计算在插件完成（R1-1/1-4）；后端仅代理透传（R1-2）。
 """
 from __future__ import annotations

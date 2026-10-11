@@ -1,7 +1,7 @@
 """portfolio/analyzer.py — 插件 analyze 编排（R1-1/R1-4：判定+收益全部在此计算）。"""
 from __future__ import annotations
 
-from portfolio.judge import judge_holding
+from portfolio.judge import judge_holding, sell_trigger_price
 from portfolio.revenue import snapshot, summarize
 from portfolio.rules import load_rules
 
@@ -19,6 +19,9 @@ def analyze_holdings(holdings: list[dict], provider) -> dict:
             results.append(base)
             continue
         base["action"], base["action_reason"] = judge_holding(row, rules["sell"], rules["add"])
+        # 价格线由同一条 sell 表达式反算（见 stock_selector/backtest/rule_trigger.py），
+        # 和上面的判定同内核，不会出现「理由是跌破均线、给出的价却对不上」
+        base["sell_trigger_price"] = sell_trigger_price(row, rules["sell"])
         base["latest_price"] = round(float(row["close"]), 2)
         qty = int(h["quantity"])
         cost = float(h.get("cost_price", 0.0))

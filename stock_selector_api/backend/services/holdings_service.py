@@ -42,7 +42,8 @@ async def _attach_diag_snapshot(user_id: str, rows: list[dict]) -> list[dict]:
     by_code = {r["code"]: r for r in results}
     for h in rows:
         snap = by_code.get(h["code"])
-        for key in ("latest_price", "holding_pnl", "pnl_pct", "action", "action_reason", "suggestion"):
+        for key in ("latest_price", "holding_pnl", "pnl_pct", "action", "action_reason",
+                    "suggestion", "sell_trigger_price"):
             h[key] = snap.get(key) if snap else None
         h["diag_run_id"] = latest["run_id"]
     return rows

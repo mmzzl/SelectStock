@@ -93,6 +93,10 @@ async def _http_run(strategies: list[str]) -> list[dict]:
         # 买入风险分在插件的扩展字段里；闸门关闭或历史太短判分时没有这个 key → None，
         # 不能落成 0（0 是"预测超额为零"，是有含义的评价）
         "risk_ex10_pp": _num((it.get("extra") or {}).get("risk_ex10_pp")),
+        # 买点参考位/失效位：策略判据里本来就算出来的均线、箱沿、6 日低点，
+        # 没有对应判据的策略给 None（不能落成 0，也不能从 reason 文本里抠）
+        "buy_ref_price": _num((it.get("extra") or {}).get("buy_ref_price")),
+        "buy_invalid_price": _num((it.get("extra") or {}).get("buy_invalid_price")),
     } for it in items if it.get("code")]
 
 

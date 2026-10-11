@@ -101,7 +101,9 @@ class _StubClient:
         return _StubResponse({"code": 0, "data": [
             {"code": "000001", "name": "平安银行", "signal": "trend_rebound", "reason": "回踩 MA20",
              "strategy": "trend_rebound", "asof": "2026-09-24",
-             "price": "11.20", "score": 0.62, "rank": "1", "extra": {"risk_ex10_pp": "-0.21"}},
+             "price": "11.20", "score": 0.62, "rank": "1",
+             "extra": {"risk_ex10_pp": "-0.21", "buy_ref_price": "10.85",
+                       "buy_invalid_price": "10.31"}},
             {"code": "", "signal": "box_oscillate"},      # 无代码脏行必须丢掉
         ]})
 
@@ -115,6 +117,8 @@ async def test_http_run_maps_enriched_fields(monkeypatch):
     assert row["price"] == 11.2 and row["score"] == 0.62 and row["rank_no"] == 1
     # 风险分藏在 extra 里，且可能是字符串；它是"过闸门的票才有"的证据分
     assert row["risk_ex10_pp"] == -0.21
+    # 买点参考位/失效位同样来自 extra
+    assert row["buy_ref_price"] == 10.85 and row["buy_invalid_price"] == 10.31
 
 
 async def test_http_run_tolerates_missing_enriched_fields(monkeypatch):
@@ -128,6 +132,7 @@ async def test_http_run_tolerates_missing_enriched_fields(monkeypatch):
     assert row["price"] is None and row["score"] is None and row["rank_no"] is None
     # 没有 extra 时风险分必须是 None，不能落成 0（0 表示"预测跑平全市场"，是评价不是缺省）
     assert row["risk_ex10_pp"] is None
+    assert row["buy_ref_price"] is None and row["buy_invalid_price"] is None
     assert row["strategy"] == "" and row["asof"] == ""
 
 

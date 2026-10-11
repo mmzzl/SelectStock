@@ -19,7 +19,7 @@ logger = logging.getLogger("portfolio_service")
 
 _RESULT_FIELDS = (
     "code", "name", "action", "action_reason", "latest_price",
-    "quantity", "holding_pnl", "pnl_pct", "suggestion",
+    "quantity", "holding_pnl", "pnl_pct", "suggestion", "sell_trigger_price",
 )
 
 

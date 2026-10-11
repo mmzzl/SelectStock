@@ -3,7 +3,7 @@
 import { computed, ref } from "vue";
 import { onShow, onUnload } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
-import { toSelectionResultRow, toStrategyOption, riskText, riskClass, sortByRiskDesc } from "../../logic/view.js";
+import { toSelectionResultRow, toStrategyOption, riskText, riskClass, sortByRiskDesc, buyLevelText } from "../../logic/view.js";
 
 const { selection } = useClient();
 const strategies = ref([]);        // [{ name, label, desc }]
@@ -92,6 +92,7 @@ const fixed3 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) 
         按「预期 10 日超额」从高到低排列；框内数字是策略规则名次，不代表优先级。
         该超额为买入风险模型的预测值：经验证的是「低于阈值的剔除」，高分不等于必涨；
         显示「—」的表示模型没能判分（多为场内基金），排在最后。
+        「买入参考/跌破失效」是策略判据里的日均线位（收盘口径），只用来对照盘面，不是实时挂单价。
       </view>
       <view v-for="r in ordered" :key="r.code" class="card">
         <view class="row1">
@@ -104,6 +105,7 @@ const fixed3 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) 
           <view class="k"><text class="n date" :class="riskClass(r.risk)">{{ riskText(r.risk) }}</text><text class="l">预期10日超额</text></view>
           <view class="k"><text class="n date">{{ r.asof || "—" }}</text><text class="l">基准交易日</text></view>
         </view>
+        <text v-if="buyLevelText(r)" class="levels">{{ buyLevelText(r) }}</text>
         <text class="reason">{{ r.reason }}</text>
       </view>
       <view v-if="job && !results.length && polling" class="empty">全市场扫描中，请稍候…</view>
@@ -117,6 +119,7 @@ const fixed3 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) 
   background: #eef3ff; color: #2b5cff; font-size: 24rpx; font-weight: 700;
 }
 .kv3 .n.date { font-size: 24rpx; font-weight: 600; color: #5c6470; }
+.levels { display: block; margin-top: 8rpx; font-size: 24rpx; color: #2b5cff; }
 .sortnote {
   font-size: 22rpx; color: #8a919f; line-height: 1.6;
   margin: -6rpx 4rpx 16rpx;

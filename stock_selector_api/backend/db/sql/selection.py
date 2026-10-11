@@ -35,3 +35,6 @@ class SelectResult(Base, IdMixin, TimestampMixin):
     # 买入风险分（百分点）：插件的风险剔除层给的历史证据见 README《涨停与风险分》。
     # 只有"过了闸门"的票才有值，闸门关闭或历史太短无法判分时为 NULL。
     risk_ex10_pp: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # 买点参考位/失效位：来自策略 signal_at 里已经算出的均线、箱体上沿、6 日低点
+    buy_ref_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    buy_invalid_price: Mapped[float | None] = mapped_column(Float, nullable=True)

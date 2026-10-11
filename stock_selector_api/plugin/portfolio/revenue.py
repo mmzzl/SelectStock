@@ -23,6 +23,8 @@ def snapshot(holding: dict, latest_price: float) -> dict:
         "holding_pnl": _r2(pnl),
         "pnl_pct": _r2(pnl_pct),
         "suggestion": "",
+        # 卖出价格线：行情缺失时保持 None（有行情由 analyzer 覆盖）
+        "sell_trigger_price": None,
     }
 
 

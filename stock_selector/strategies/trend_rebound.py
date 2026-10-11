@@ -55,6 +55,12 @@ class TrendRebound(BaseSelectStrategy):
             name="",
             signal="trend_rebound",
             score=round(score, 4),
+            extra={
+                # 两个都是判据里已经算出来的数，不新造指标：回踩位就是均线，
+                # 失效位是「未有效跌破均线」那条门槛的下边界
+                "buy_ref_price": round(latest_ma, 2),
+                "buy_invalid_price": round(latest_ma * (1 - pullback), 2),
+            },
             reason=(
                 f"MA{period}={latest_ma:.2f} 多头向上，"
                 f"收盘 {latest_close:.2f} 回踩均线偏离 {deviation:.2%} 后企稳"

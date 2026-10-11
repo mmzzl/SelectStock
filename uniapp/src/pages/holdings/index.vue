@@ -3,7 +3,7 @@
 import { ref, computed } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
-import { toHoldingRow, toPnlView } from "../../logic/view.js";
+import { sellTriggerText, toHoldingRow, toPnlView } from "../../logic/view.js";
 
 const rows = ref([]); const loading = ref(false); const err = ref("");
 const summary = ref(null);           // 来自 /holdings/pnl 的 summary，前端不做加总
@@ -87,6 +87,7 @@ const goTrades = () => uni.navigateTo({ url: "/pages/trades/index" });
             <text class="d">现价 {{ r.latestPrice ?? "—" }} · 成本 {{ r.cost ?? "—" }} · {{ r.shares ?? "—" }} 股</text>
             <text class="n">{{ r.name }}（{{ r.code }}）</text>
             <text v-if="r.actionReason" class="sub">{{ r.actionReason }}</text>
+            <text v-if="sellTriggerText(r)" class="sub trig">{{ sellTriggerText(r) }}</text>
           </view>
           <view class="r">
             <text class="badge" :class="r.action || 'none'">{{ r.actionText }}</text>
@@ -106,4 +107,5 @@ const goTrades = () => uni.navigateTo({ url: "/pages/trades/index" });
 <style scoped>
 .hero { padding: 10rpx 0 18rpx; }
 .hero .kv3 { margin-top: 6rpx; }
+.trow .trig { color: #e64545; }
 </style>

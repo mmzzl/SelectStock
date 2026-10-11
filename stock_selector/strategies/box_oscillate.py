@@ -52,6 +52,11 @@ class BoxOscillate(BaseSelectStrategy):
             name="",
             signal="box_oscillate",
             score=round(min(score, 1.0), 4),
+            extra={
+                # 突破确认线（判据里 latest_close 越过的门槛）与失效线（跌回箱体即突破失败）
+                "buy_ref_price": round(upper * (1 + breakout), 2),
+                "buy_invalid_price": round(upper, 2),
+            },
             reason=(
                 f"区间 [{lower:.2f}, {upper:.2f}] 内震荡后"
                 f"收盘 {latest_close:.2f} 突破上沿"

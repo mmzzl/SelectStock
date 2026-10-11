@@ -41,3 +41,5 @@ class PortfolioDiagResult(Base, IdMixin):
     holding_pnl: Mapped[float] = mapped_column(Float, default=0.0)
     pnl_pct: Mapped[float] = mapped_column(Float, default=0.0)
     suggestion: Mapped[str] = mapped_column(String(512), default="")
+    # 卖出价格线：插件按同一条 sell 表达式反算出的翻转价；规则不含价格项时为 NULL
+    sell_trigger_price: Mapped[float | None] = mapped_column(Float, nullable=True)

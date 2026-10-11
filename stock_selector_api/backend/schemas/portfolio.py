@@ -45,6 +45,7 @@ class PortfolioDiagResultCreate(BaseModel):
     holding_pnl: float = 0.0
     pnl_pct: float = 0.0
     suggestion: str = ""
+    sell_trigger_price: float | None = None
 
 
 class PortfolioRunOut(ORMModel):
@@ -72,3 +73,4 @@ class PortfolioResultOut(ORMModel):
     holding_pnl: float = 0.0
     pnl_pct: float = 0.0
     suggestion: str = ""
+    sell_trigger_price: float | None = None
