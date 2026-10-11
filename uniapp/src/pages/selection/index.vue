@@ -3,7 +3,7 @@
 import { ref } from "vue";
 import { onShow, onUnload } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
-import { toSelectionResultRow, toStrategyOption } from "../../logic/view.js";
+import { toSelectionResultRow, toStrategyOption, riskText, riskClass } from "../../logic/view.js";
 
 const { selection } = useClient();
 const strategies = ref([]);        // [{ name, label, desc }]
@@ -93,6 +93,7 @@ const fixed3 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) 
         <view class="kv3">
           <view class="k"><text class="n">{{ fixed2(r.price) }}</text><text class="l">基准价</text></view>
           <view class="k"><text class="n">{{ fixed3(r.score) }}</text><text class="l">信号强度</text></view>
+          <view class="k"><text class="n date" :class="riskClass(r.risk)">{{ riskText(r.risk) }}</text><text class="l">预期10日超额</text></view>
           <view class="k"><text class="n date">{{ r.asof || "—" }}</text><text class="l">基准交易日</text></view>
         </view>
         <text class="reason">{{ r.reason }}</text>

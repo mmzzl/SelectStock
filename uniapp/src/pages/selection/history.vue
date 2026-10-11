@@ -3,7 +3,7 @@
 import { ref } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
-import { toSelectionJobRow, toSelectionResultRow, toStrategyOption, fmtTime } from "../../logic/view.js";
+import { toSelectionJobRow, toSelectionResultRow, toStrategyOption, fmtTime, riskText } from "../../logic/view.js";
 
 const runs = ref([]); const expanded = ref(null); const detailResults = ref([]);
 const err = ref(""); const loaded = ref(false);
@@ -25,6 +25,8 @@ onShow(async () => {
 });
 const labelOf = (s) => labels.value[s] || s || "信号";
 const fixed2 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) ? "" : Number(v).toFixed(2));
+// 老记录没有风险分（NULL），整段不显示：历史行很窄，放个"—"会把基准日挤掉
+const riskSuffix = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) ? "" : ` · 预期${riskText(v)}`);
 const ST_TEXT = { done: "完成", running: "进行中", queued: "排队中", failed: "失败" };
 async function toggle(j) {
   expanded.value = expanded.value === j.jobId ? null : j.jobId;
@@ -52,7 +54,7 @@ async function toggle(j) {
         <view v-for="r in detailResults" :key="r.code" class="sub">
           <text class="badge sig">{{ labelOf(r.strategy) }}</text>
           <text>{{ r.rank ? `#${r.rank} ` : "" }}{{ r.name }}（{{ r.code }}）</text>
-          <text class="time">{{ r.price ? `基准价 ${fixed2(r.price)}` : "" }}{{ r.asof ? ` · ${r.asof}` : "" }}</text>
+          <text class="time">{{ r.price ? `基准价 ${fixed2(r.price)}` : "" }}{{ r.asof ? ` · ${r.asof}` : "" }}{{ riskSuffix(r.risk) }}</text>
         </view>
         <view v-if="!detailResults.length" class="reason" style="padding:10rpx 0">暂无结果明细</view>
       </view>
@@ -62,7 +64,7 @@ async function toggle(j) {
 </template>
 <style>
 .sub {
-  display: flex; align-items: center; gap: 16rpx;
+  display: flex; align-items: center; gap: 16rpx; flex-wrap: wrap; row-gap: 6rpx;
   border-top: 2rpx solid #f0f2f7; padding: 16rpx 0 4rpx;
 }
 .sub text { margin: 0; }

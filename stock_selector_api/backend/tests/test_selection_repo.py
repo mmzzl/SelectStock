@@ -23,10 +23,12 @@ async def test_enriched_fields_roundtrip():
         "job_id": job["job_id"], "code": "000001", "name": "平安银行",
         "signal": "trend_rebound", "reason": "回踩 MA20",
         "strategy": "trend_rebound", "asof": "2026-09-24",
-        "price": 11.2, "score": 0.62, "rank_no": 1})
+        "price": 11.2, "score": 0.62, "rank_no": 1, "risk_ex10_pp": -0.21})
     row = (await select_results_repo.list_by_job(job["job_id"]))[0]
     assert (row["strategy"], row["asof"], row["rank_no"]) == ("trend_rebound", "2026-09-24", 1)
     assert row["price"] == 11.2 and row["score"] == 0.62
+    # 风险分要过得了 schema 白名单：漏了字段名会静默丢值，接口返回里永远看不到
+    assert row["risk_ex10_pp"] == -0.21
 
 
 async def test_find_running_and_list():
@@ -54,6 +56,8 @@ def test_ensure_select_result_columns_upgrades_old_table():
         _ensure_select_result_columns(conn)          # 幂等：跑两次不报错
         cols = {c["name"] for c in inspect(conn).get_columns("select_results")}
         conn.execute(text("INSERT INTO select_results (job_id, code, strategy, asof, price, score,"
-                          " rank_no) VALUES ('j', '000001', 'trend_rebound', '2026-09-24', 11.2, 0.62, 1)"))
+                          " rank_no, risk_ex10_pp) VALUES ('j', '000001', 'trend_rebound',"
+                          " '2026-09-24', 11.2, 0.62, 1, -0.21)"))
         assert conn.execute(text("SELECT rank_no FROM select_results")).scalar() == 1
-    assert {"strategy", "asof", "price", "score", "rank_no"} <= cols
+        assert conn.execute(text("SELECT risk_ex10_pp FROM select_results")).scalar() == -0.21
+    assert {"strategy", "asof", "price", "score", "rank_no", "risk_ex10_pp"} <= cols

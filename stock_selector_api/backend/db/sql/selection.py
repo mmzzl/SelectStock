@@ -32,3 +32,6 @@ class SelectResult(Base, IdMixin, TimestampMixin):
     price: Mapped[float | None] = mapped_column(Float, nullable=True)
     score: Mapped[float | None] = mapped_column(Float, nullable=True)
     rank_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 买入风险分（百分点）：插件的风险剔除层给的历史证据见 README《涨停与风险分》。
+    # 只有"过了闸门"的票才有值，闸门关闭或历史太短无法判分时为 NULL。
+    risk_ex10_pp: Mapped[float | None] = mapped_column(Float, nullable=True)

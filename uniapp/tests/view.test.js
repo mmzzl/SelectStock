@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { toHoldingRow, toTradeRow, toPnlView, toSelectionJobRow, toSelectionResultRow,
-         toMessageRow, toDiagRow, toPreviewRow, toUpgradeInfo, fmtTime } from "../src/logic/view.js";
+         toMessageRow, toDiagRow, toPreviewRow, toUpgradeInfo, fmtTime,
+         riskText, riskClass } from "../src/logic/view.js";
 
 test("时间格式化：naive UTC 转本地、压到分钟；带时区/非法值不崩", async () => {
   const { execFileSync } = await import("node:child_process");
@@ -100,7 +101,7 @@ test("选股结果行：字段映射透传", () => {
   const row = toSelectionResultRow({ code: "600519", name: "茅台", signal: "trend_rebound", reason: "MACD金叉" });
   assert.deepEqual(row, {
     code: "600519", name: "茅台", signal: "trend_rebound", reason: "MACD金叉",
-    strategy: "trend_rebound", asof: "", price: null, score: null, rank: null,
+    strategy: "trend_rebound", asof: "", price: null, score: null, rank: null, risk: null,
   });
 });
 
@@ -108,10 +109,25 @@ test("选股结果行：插件富化字段落到 camelCase", () => {
   const row = toSelectionResultRow({
     code: "000001", name: "平安银行", signal: "trend_rebound", reason: "回踩 MA20",
     strategy: "trend_rebound", asof: "2026-09-24", price: "11.20", score: 0.62, rank_no: 3,
+    risk_ex10_pp: "-0.21",
   });
   assert.equal(row.strategy, "trend_rebound");
   assert.equal(row.asof, "2026-09-24");
   assert.equal(row.price, 11.2);        // 字符串价格必须转成数值
   assert.equal(row.score, 0.62);
   assert.equal(row.rank, 3);            // 后端列名 rank_no → 前端 rank
+  assert.equal(row.risk, -0.21);        // 后端列名 risk_ex10_pp → 前端 risk
+});
+
+test("风险分展示：缺值给占位符而不是 0，正负分别红绿", () => {
+  assert.equal(riskText(null), "—");      // 闸门没判出来 ≠ 预测跑平全市场
+  assert.equal(riskText(undefined), "—");
+  assert.equal(riskText(NaN), "—");
+  assert.equal(riskText(-0.213), "-0.21pp");
+  assert.equal(riskText(0), "0.00pp");
+  assert.equal(riskText(0.5), "+0.50pp");
+  assert.equal(riskClass(-0.2), "down");
+  assert.equal(riskClass(0.2), "up");
+  assert.equal(riskClass(0), "up");
+  assert.equal(riskClass(null), "");
 });

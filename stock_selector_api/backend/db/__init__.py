@@ -59,7 +59,8 @@ def _ensure_select_result_columns(sync_conn) -> None:
 
     cols = {c["name"] for c in inspect(sync_conn).get_columns("select_results")}
     for col, ddl in (("strategy", "VARCHAR(64) DEFAULT ''"), ("asof", "VARCHAR(16) DEFAULT ''"),
-                     ("price", "FLOAT"), ("score", "FLOAT"), ("rank_no", "INTEGER")):
+                     ("price", "FLOAT"), ("score", "FLOAT"), ("rank_no", "INTEGER"),
+                     ("risk_ex10_pp", "FLOAT")):
         if col not in cols:
             sync_conn.execute(text(f"ALTER TABLE select_results ADD COLUMN {col} {ddl}"))
 

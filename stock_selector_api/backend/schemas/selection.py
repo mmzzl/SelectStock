@@ -23,3 +23,4 @@ class SelectResultCreate(BaseModel):
     price: float | None = None
     score: float | None = None
     rank_no: int | None = None
+    risk_ex10_pp: float | None = None    # 买入风险分（百分点），闸门判不了时为 None

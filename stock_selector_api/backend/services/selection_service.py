@@ -90,6 +90,9 @@ async def _http_run(strategies: list[str]) -> list[dict]:
         "price": _num(it.get("price")),
         "score": _num(it.get("score")),
         "rank_no": _num(it.get("rank"), integer=True),
+        # 买入风险分在插件的扩展字段里；闸门关闭或历史太短判分时没有这个 key → None，
+        # 不能落成 0（0 是"预测超额为零"，是有含义的评价）
+        "risk_ex10_pp": _num((it.get("extra") or {}).get("risk_ex10_pp")),
     } for it in items if it.get("code")]
 
 

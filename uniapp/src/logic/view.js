@@ -85,7 +85,23 @@ export function toSelectionResultRow(s) {
     // 选股插件 P1 富化字段；后端列名 rank_no（rank 是 SQL 保留字），这里统一回 rank
     strategy: s.strategy || s.signal || "", asof: s.asof || "",
     price: num(s.price), score: num(s.score), rank: num(s.rank ?? s.rank_no),
+    // 买入风险分（百分点）：预测 10 日同日基线超额，只有过了风险闸门的票才有值
+    risk: num(s.risk_ex10_pp),
   };
+}
+
+/** 买入风险分的展示文本（百分点，带符号）。没值给占位符——0 是"预测跑平当日全市场"，
+ *  和"闸门没判出来"是两回事，不能拿 0 当缺省。 */
+export function riskText(v) {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return "—";
+  const n = Number(v);
+  return `${n > 0 ? "+" : ""}${n.toFixed(2)}pp`;
+}
+
+/** 红涨绿跌（A 股习惯）：预测超额为正给 .up，为负给 .down，缺值不给颜色。 */
+export function riskClass(v) {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return "";
+  return Number(v) >= 0 ? "up" : "down";
 }
 
 /** 插件 /strategy-detail 的一行 → 前端选项。中文标签只来自 description，不硬编码策略名。 */
