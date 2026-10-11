@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from ..features.patterns import PATTERN_COLUMNS
+
 # 允许的指标变量（与 parquet 列一一对应）
 _ALLOWED_COLUMNS = {
     "open", "high", "low", "close", "volume", "amount",
@@ -15,6 +17,9 @@ _ALLOWED_COLUMNS = {
     "kdj_k", "kdj_d", "kdj_j", "wr14", "atr14",
     "boll_upper", "boll_mid", "boll_lower", "obv", "roc10",
     "vol_ma5", "last_close", "adx14", "adx",
+    "pct", "vol_ratio", "pos60",
+    # 形态/量能列由 patterns.py 定义，直接从它导入避免两边清单漂移
+    *PATTERN_COLUMNS,
 }
 
 _ALIASES = {

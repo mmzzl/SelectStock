@@ -65,9 +65,9 @@ scripts/                         # 薄 CLI：只解析参数，再调用上面�
 
 ```
 MongoDB eastmoney_news.stock_kline        # 1200 万+ 原始日线（frequency:9, adjust:qfq）
-   │  scripts/build_kline_features.py     # talib 指标 + pct/lu/vol_ratio/pos60
+   │  scripts/build_kline_features.py     # talib 指标 + pct/lu/vol_ratio/pos60 + 形态/量能 46 列
    ▼
-data/stock_kline/{code}.parquet           # 5186 只 × 36 列 指标宽表（唯一共享数据面）
+data/stock_kline/{code}.parquet           # 6631 只(5186 股+1445 基金) × 82 列 指标宽表（唯一共享数据面）
    ├─ 选股  ParquetSource（剪列 + 行窗口）─► run_select() ─► list[SelectResult]
    ├─ 回测  ParquetProvider（逐日 rows/price）─► BacktestEngine
    ├─ 诊断  KlineProvider（app 侧插件）
@@ -174,9 +174,9 @@ uniapp  ──/api/v1/selection/*──►  后端 stock_selector_api  ──HTT
 
 ### 数据源（`stock_selector/config/settings.yaml` 的 `datasource.type`）
 
-| type | 来源 | 适用 | 全市场实测(5186 只) |
+| type | 来源 | 适用 | 全市场实测(6631 个文件) |
 |---|---|---|---|
-| `parquet`（默认） | `data/stock_kline/{code}.parquet` | 常规选股；与回测/诊断同一数据面，含 30+ talib 指标 | 6 列+120 行 **163s**；全 36 列 423s |
+| `parquet`（默认） | `data/stock_kline/{code}.parquet` | 常规选股；与回测/诊断同一数据面，含 30+ talib 指标与 46 个形态/量能列 | 6 列+120 行 **163s**；全 82 列会更慢，用 `columns` 剪列或让策略声明 `required_columns()` |
 | `mongo` | MongoDB `stock_kline`（`frequency:9, adjust:qfq`） | 行情要求最新、或只查少量代码 | ~0.5s/只 ≈ 40 分钟，不适合全市场 |
 | `ak` | akshare 东财接口 | 需外网可达（本机实测已不可达） | 不可用 |
 | `mock` | 内置模拟数据 | 演示/测试 | 秒级 |
@@ -186,6 +186,7 @@ uniapp  ──/api/v1/selection/*──►  后端 stock_selector_api  ──HTT
 ```bash
 python scripts/build_kline_features.py            # 增量更新（默认）
 python scripts/build_kline_features.py --full     # 全量重建（股票 + 场内基金）
+python scripts/build_kline_features.py --recompute  # 不读 Mongo，就地给已有 parquet 补新列
 python scripts/build_kline_features.py --no-etf   # 增量但只处理股票，跳过场内基金
 python scripts/build_kline_features.py --code 600519   # 只重建指定一只（ETF 代码同样可用）
 python scripts/build_kline_features.py --limit 20      # 只处理前 20 只（联调用；0=不限）
@@ -198,6 +199,38 @@ python scripts/build_kline_features.py --limit 20      # 只处理前 20 只（�
 否则 Mongo 里的基金日线会停在爬取的最后一天。
 `parquet` 数据源的股票池就是目录下的文件名，因此这些基金**会一并进入选股与回测范围**；不要就用
 `--no-etf` 并清掉 `data/stock_kline/` 里的基金文件。
+
+#### 形态与量能列（`stock_selector/features/patterns.py`）
+
+K线形态只用「当根及之前」的日线描述，46 列全部由 `add_pattern_columns()` 向量产出，和 talib 指标
+写进同一批 parquet，因此规则表达式（`trading_rules`）可以直接写 `hammer_low and vol_expanding`、
+`close < neckline_sup`，不必在策略里重算。
+
+| 组 | 列 |
+|---|---|
+| 量能语境 | `vol_ma20` `vol_trend`(ma5/ma20) `vol_z` `vol_expanding` `vol_contracting` `vol_ground` `vol_blast` |
+| 单根解剖 | `body_ratio` `upper_ratio` `lower_ratio` `gap_pct` |
+| 单根形态（按位置分档） | `hammer_low` `hanging_man_high` `shooting_star_high` `doji_low` `doji_high` `doji_high_blast` |
+| 2~3 根组合 | `bullish_engulf` `bearish_engulf` `morning_star` `evening_star` `piercing_line` `dark_cloud` `harami` `three_soldiers` `three_crows` |
+| 中长期形态（只在突破当根置位） | `w_bottom_break` `m_top_break` `hs_bottom_break` `hs_top_break` `v_reversal` `arc_bottom` `box_break_up/dn` `tri_break_up/dn` `flag_up_break/flag_dn_break` |
+| 关键价位与买点参考 | `neckline_sup` `neckline_res` `box_upper` `box_lower` `sup20` `res20` `pullback_stabilize` `vol_diverge` |
+
+四条实现约束，改这个模块前先读：
+
+- **dtype 只能是 float64 或 bool**：`RuleEvaluator` 会对每个值做 `float()`，字符串列会让规则直接炸。
+- **as-of 不前看未来**：形态确认天然滞后（枢轴要等右侧 `PIVOT_SPAN=5` 根、颈线要等突破），
+  滞后一律以「晚几根才置位」的形式出现，绝不把未来写进过去。用例把历史截断重算，
+  要求逐列等于全量结果的前缀（`tests/test_features_patterns.py::test_pattern_columns_are_asof_safe`）。
+- **高低位靠 `pos60` 区分**：同一个长下影在低位是 `hammer_low`（止跌）、在高位是
+  `hanging_man_high`（见顶），列名后缀 `_low/_high` 就是这个意思，所以形态列必须在
+  `add_base_columns()` 之后算。
+- **触发率是量级校验，不是精度承诺**：400 只 / 96 万根实测，单根形态 1%~5%、组合 0.2%~2.6%、
+  突破类 0.02%~1.3%、`vol_expanding` 16%。异常地高（如圆弧底曾到 10%）说明判据退化成了
+  「持续状态」，要收敛成事件；异常地零（如旗形曾恒 `False`）说明判据互斥。形态可骗线、
+  量可对倒，这些列只是概率参考，仍需叠均线与大盘环境。
+
+成本：形态列让每只多算 ~0.05s，全市场增量构建约 **+320s**；停牌/退市的老文件不会被增量路径碰到，
+新增列后跑一次 `--recompute` 就地补齐（约 9 分钟，不读 Mongo）。
 
 `parquet.columns` 可剪列（越大提速越多），`parquet.rows` 只取最近 N 个交易日；相对目录按仓库根解析，
 服务从任意工作目录启动都能读到数据。数据源不可用会**显式报错**而非静默降级为 mock。

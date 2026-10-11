@@ -32,6 +32,8 @@ def _df(n=70):
 def test_output_columns():
     mod = _load_script()
     assert {"pct", "lu", "vol_ratio", "pos60"} <= set(mod.OUTPUT_COLUMNS)
+    # 形态/量能列必须显式进清单：compute_indicators 末尾按 OUTPUT_COLUMNS 截断，漏了就静默丢列
+    assert set(mod.PATTERN_COLUMNS) <= set(mod.OUTPUT_COLUMNS)
 
 
 def test_compute_indicators_has_derived():
@@ -44,6 +46,34 @@ def test_compute_indicators_has_derived():
     assert out["vol_ratio"].iloc[30] == pytest.approx(100.0 / 100.0)
     assert out["lu"].dtype == bool
     assert out["pos60"].dropna().between(0, 1).all()
+
+
+def test_compute_indicators_has_pattern_columns():
+    """形态列的 dtype 契约：bool 列不能被 NaN 退化成 object，否则 to_parquet 直接报错。"""
+    mod = _load_script()
+    out = mod.compute_indicators(_df(n=120))
+    assert set(mod.PATTERN_COLUMNS) <= set(out.columns)
+    assert out["vol_trend"].dtype == float
+    assert out["neckline_sup"].dtype == float
+    for col in ("hammer_low", "w_bottom_break", "vol_expanding", "pullback_stabilize"):
+        assert out[col].dtype == bool, col
+
+
+def test_recompute_backfills_pattern_columns(tmp_path, monkeypatch):
+    """老 parquet 缺新列时，--recompute 走的路径要能就地补齐，不必重回 MongoDB 全量重建。"""
+    mod = _load_script()
+    old = mod.compute_indicators(_df(n=120)).drop(columns=mod.PATTERN_COLUMNS)
+    assert "hammer_low" not in old.columns
+    path = tmp_path / "603000.parquet"
+    old.to_parquet(path, index=False)
+    monkeypatch.setattr(mod, "OUTPUT_DIR", tmp_path)
+
+    rewritten, missing = mod.recompute_existing()
+    assert (rewritten, missing) == (1, 0)
+    back = pd.read_parquet(path)
+    assert set(mod.PATTERN_COLUMNS) <= set(back.columns)
+    assert len(back) == len(old)
+    assert np.allclose(back["close"].to_numpy(), old["close"].to_numpy())
 
 
 def test_is_fund_code():

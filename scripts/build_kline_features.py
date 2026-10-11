@@ -6,6 +6,7 @@
 用法:
     python scripts/build_kline_features.py --full          # 首次全量
     python scripts/build_kline_features.py                 # 增量更新
+    python scripts/build_kline_features.py --recompute      # 新增派生列后就地回填历史（不读 Mongo）
     python scripts/build_kline_features.py --no-etf        # 只要股票，不建 ETF/LOF
     python scripts/build_kline_features.py --code 600519   # 单只调试
     python scripts/build_kline_features.py --limit 100     # 调试时限制股票数
@@ -28,6 +29,7 @@ from pymongo import MongoClient
 from tqdm import tqdm
 
 from stock_selector.features.base_columns import add_base_columns
+from stock_selector.features.patterns import PATTERN_COLUMNS, add_pattern_columns
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = ROOT / "data" / "stock_kline"
@@ -76,7 +78,9 @@ INDICATOR_FUNCS = {
 BASE_COLUMNS = ["code", "name", "date", "open", "high", "low", "close", "volume", "amount"]
 INDICATOR_COLUMNS = list(INDICATOR_FUNCS.keys()) + ["kdj_j", "vol_ma5", "last_close"]
 DERIVED_COLUMNS = ["pct", "lu", "vol_ratio", "pos60"]
-OUTPUT_COLUMNS = BASE_COLUMNS + INDICATOR_COLUMNS + DERIVED_COLUMNS
+# 形态与量能列（stock_selector/features/patterns.py）：单根/组合/中长期形态 + 颈线箱体等关键价位
+PATTERN_COLUMNS = list(PATTERN_COLUMNS)
+OUTPUT_COLUMNS = BASE_COLUMNS + INDICATOR_COLUMNS + DERIVED_COLUMNS + PATTERN_COLUMNS
 
 
 def load_config() -> dict:
@@ -174,6 +178,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out["vol_ma5"] = df["volume"].astype(float).rolling(5).mean()
     out["last_close"] = df["close"].astype(float).shift(1)
     out = add_base_columns(out)
+    out = add_pattern_columns(out)      # 形态列要用 pos60 判高低位，必须在基础列之后
     return out[OUTPUT_COLUMNS]
 
 
@@ -219,6 +224,29 @@ def process_code(client, database: str, code: str, name: str, full: bool) -> boo
     return True
 
 
+def recompute_existing(limit: int = 0) -> tuple[int, int]:
+    """不读 MongoDB，就地把已有 parquet 重算并回写。
+
+    新增派生列（形态/量能）需要回填全历史：增量路径只重写「今天有新数据」的股票，
+    停牌或已退市的旧文件会永远缺列，所以加这一条一次性回填口。
+    """
+    paths = sorted(OUTPUT_DIR.glob("*.parquet"))
+    if limit:
+        paths = paths[:limit]
+    rewritten = missing = 0
+    for path in tqdm(paths, desc="就地重算", unit="只", ncols=80):
+        df = load_existing(path)
+        if df.empty:
+            missing += 1
+            continue
+        df = compute_indicators(df)
+        if is_fund_code(path.stem):
+            df["lu"] = False
+        write_df(path, df)
+        rewritten += 1
+    return rewritten, missing
+
+
 def setup_logging() -> None:
     """配置 logging：控制台 + 按日滚动写入文件。"""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -245,10 +273,21 @@ def main() -> None:
     parser.add_argument("--code", type=str, default=None, help="只处理指定股票代码")
     parser.add_argument("--limit", type=int, default=0, help="最多处理股票数（0=不限制）")
     parser.add_argument("--no-etf", action="store_true", help="不建场内基金（ETF/LOF），只建股票")
+    parser.add_argument("--recompute", action="store_true",
+                        help="只就地重算已有 parquet（新增派生列后回填历史，不读 MongoDB）")
     args = parser.parse_args()
 
     setup_logging()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    if args.recompute:
+        logger.info("开始就地重算，mode=recompute limit=%d", args.limit)
+        t0 = time.time()
+        rewritten, missing = recompute_existing(args.limit)
+        logger.info("完成。rewritten=%d missing=%d 耗时=%.1fs",
+                    rewritten, missing, time.time() - t0)
+        return
+
     names = collect_stock_names()
 
     client = get_client()
