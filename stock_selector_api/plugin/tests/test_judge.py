@@ -35,3 +35,44 @@ def test_sell_trigger_price_follows_a_custom_rule():
 
 def test_sell_trigger_price_none_when_price_alone_cannot_flip():
     assert sell_trigger_price(ROW, "rsi14 >= 90") is None
+
+
+def test_disaster_line_overrides_a_clean_trend():
+    # 形态完好（不破均线）但成本价已亏 10%：判据里唯一看成本的一条
+    row = dict(ROW, close=10.5, price=10.5, ma10=11.0, ma5=10.5)
+    action, reason = judge_holding(row, "price <= ma10 * 0.95", "close >= ma5 * 1.03",
+                                   cost_price=11.7, price=10.5, disaster_stop_pct=8.0)
+    assert action == "sell"
+    assert "灾难线" in reason
+
+
+def test_disaster_line_ignored_inside_the_band():
+    row = dict(ROW, close=10.5, price=10.5, ma10=11.0, ma5=10.5)
+    action, reason = judge_holding(row, "price <= ma10 * 0.95", "close >= ma5 * 1.03",
+                                   cost_price=11.0, price=10.5, disaster_stop_pct=8.0)
+    assert action == "hold"
+
+
+def test_disaster_line_disabled_by_default():
+    row = dict(ROW, close=10.5, price=10.5, ma10=11.0, ma5=10.5)
+    action, _ = judge_holding(row, "price <= ma10 * 0.95", "close >= ma5 * 1.03",
+                              cost_price=100.0, price=10.5)
+    assert action == "hold"
+
+
+def test_disaster_line_needs_a_cost_basis():
+    row = dict(ROW, close=10.5, price=10.5, ma10=11.0, ma5=10.5)
+    action, _ = judge_holding(row, "price <= ma10 * 0.95", "", cost_price=0.0,
+                              price=10.5, disaster_stop_pct=8.0)
+    assert action == "hold"
+
+
+def test_disaster_uses_live_price_not_the_parquet_close():
+    # parquet 最后一根还在昨天 10.5（未破线），实时价已经砸到 9.0
+    row = dict(ROW, close=10.5, price=10.5, ma10=11.0, ma5=10.5)
+    action, _ = judge_holding(row, "price <= ma10 * 0.95", "", cost_price=10.0,
+                              price=9.0, disaster_stop_pct=8.0)
+    assert action == "sell"
+    action2, _ = judge_holding(row, "price <= ma10 * 0.95", "", cost_price=10.0,
+                               disaster_stop_pct=8.0)
+    assert action2 == "hold"

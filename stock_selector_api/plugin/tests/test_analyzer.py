@@ -110,3 +110,59 @@ def test_quote_holdings_survives_one_code_without_data(monkeypatch):
     by = {r["code"]: r for r in out["results"]}
     assert by["600001"]["latest_price"] == 10.0
     assert by["600003"]["latest_price"] is None
+
+
+def _hold_row(close=10.5, ma10=11.0, ma5=10.5):
+    return {"close": close, "price": close, "ma10": ma10, "ma5": ma5, "ma20": 10.0,
+            "rsi14": 40.0, "vol_ma5": 100.0, "volume": 100.0}
+
+
+def test_disaster_line_flips_a_hold_into_sell(monkeypatch):
+    monkeypatch.setenv("PLUGIN_RULES_FILE", "")
+    holdings = [{"code": "600009", "name": "丁", "quantity": 100, "cost_price": 12.0}]
+    out = analyze_holdings(holdings, FakeProvider({"600009": _hold_row()}))
+    r = out["results"][0]
+    assert r["action"] == "sell" and "灾难线" in r["action_reason"]
+
+
+def test_hold_row_carries_quantified_conviction(monkeypatch):
+    monkeypatch.setenv("PLUGIN_RULES_FILE", "")
+    holdings = [{"code": "600009", "name": "丁", "quantity": 100, "cost_price": 10.8}]
+    out = analyze_holdings(holdings, FakeProvider({"600009": _hold_row()}))
+    r = out["results"][0]
+    assert r["action"] == "hold"
+    # 线在 ma10*0.95=10.45，现价 10.5 → 卖点在下方 0.5%
+    assert "均线卖点在下方 0.5%" in r["suggestion"]
+    assert "再亏" in r["suggestion"] and "元" in r["suggestion"]
+    assert "转为卖出" in r["suggestion"]
+    assert "回本需 +2.9%" in r["suggestion"]         # 现价 10.5 低于成本 10.8
+
+
+def test_realtime_price_below_trigger_says_so(monkeypatch):
+    """判定拿日线指标行（所以仍是 hold），价格线拿实时价（已破线）。这时不能写「在下方」反话。"""
+    monkeypatch.setenv("PLUGIN_RULES_FILE", "")
+    holdings = [{"code": "600009", "name": "丁", "quantity": 100, "cost_price": 10.8}]
+    out = analyze_holdings(holdings, FakeProvider({"600009": _hold_row()}),
+                           quotes={"600009": {"price": 10.2}})
+    r = out["results"][0]
+    assert r["action"] == "hold"
+    assert "已跌破均线卖点 2.5%" in r["suggestion"]
+
+
+def test_sell_row_does_not_quote_hold_baseline(monkeypatch):
+    """「同类 hold 有 45% 转卖」只描述 hold 那一格，判成 sell 还印它是自己跟自己抬杠。"""
+    monkeypatch.setenv("PLUGIN_RULES_FILE", "")
+    holdings = [{"code": "600009", "name": "丁", "quantity": 100, "cost_price": 12.0}]
+    out = analyze_holdings(holdings, FakeProvider({"600009": _hold_row()}))
+    r = out["results"][0]
+    assert r["action"] == "sell"
+    assert "转为卖出" not in r["suggestion"] and "p5" not in r["suggestion"]
+    assert "回本需 +14.3%" in r["suggestion"]
+
+
+def test_missing_row_still_holds_without_inventing_numbers(monkeypatch):
+    monkeypatch.setenv("PLUGIN_RULES_FILE", "")
+    holdings = [{"code": "600008", "name": "戊", "quantity": 100, "cost_price": 12.0}]
+    out = analyze_holdings(holdings, FakeProvider({}))
+    r = out["results"][0]
+    assert r["action"] == "hold" and r["suggestion"] == ""

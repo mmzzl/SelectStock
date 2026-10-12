@@ -28,3 +28,18 @@ def test_file_absent_falls_back_to_defaults(monkeypatch):
     monkeypatch.setenv("PLUGIN_RULES_FILE", "/nonexistent/x.json")
     rules = load_rules()
     assert rules["sell"] and rules["add"] and rules["hold"]
+
+def test_disaster_stop_pct_default(monkeypatch):
+    monkeypatch.setenv("PLUGIN_RULES_FILE", "")
+    assert load_rules()["disaster_stop_pct"] == 8.0
+
+
+def test_disaster_stop_pct_override_and_clamp(tmp_path, monkeypatch):
+    cfg = tmp_path / "portfolio_rules.json"
+    monkeypatch.setenv("PLUGIN_RULES_FILE", str(cfg))
+    cfg.write_text(json.dumps({"disaster_stop_pct": 12}), encoding="utf-8")
+    assert load_rules()["disaster_stop_pct"] == 12.0
+    cfg.write_text(json.dumps({"disaster_stop_pct": 0.1}), encoding="utf-8")
+    assert load_rules()["disaster_stop_pct"] == 1.0
+    cfg.write_text(json.dumps({"disaster_stop_pct": "abc"}), encoding="utf-8")
+    assert load_rules()["disaster_stop_pct"] == 8.0

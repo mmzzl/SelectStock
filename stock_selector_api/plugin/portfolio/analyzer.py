@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import logging
 
-from portfolio.judge import judge_holding, sell_trigger_price
+from portfolio.judge import (HOLD_FLIP_PCT, HOLD_TAIL_P5_PCT, judge_holding,
+                            sell_trigger_price)
 from portfolio.revenue import snapshot, summarize
 from portfolio.rules import load_rules
 
@@ -20,25 +21,55 @@ def analyze_holdings(holdings: list[dict], provider, quotes: dict | None = None)
     rules = load_rules()
     results: list[dict] = []
     for h in holdings:
-        base = snapshot(h, 0.0 if h.get("cost_price") is None else float(h["cost_price"]))
+        cost = float(h.get("cost_price", 0.0) or 0.0)
+        base = snapshot(h, cost)
         row = provider.latest_row(h["code"])
         if row is None:
             base["action"] = "hold"
             base["action_reason"] = "行情缺失，维持原判不做交易建议"
             results.append(base)
             continue
-        base["action"], base["action_reason"] = judge_holding(row, rules["sell"], rules["add"])
+        qty = int(h["quantity"])
+        price = _price_for(h["code"], row, quotes)
+        base["action"], base["action_reason"] = judge_holding(
+            row, rules["sell"], rules["add"], cost_price=cost, price=price,
+            disaster_stop_pct=rules["disaster_stop_pct"])
         # 价格线由同一条 sell 表达式反算（见 stock_selector/backtest/rule_trigger.py），
         # 和上面的判定同内核，不会出现「理由是跌破均线、给出的价却对不上」
         base["sell_trigger_price"] = sell_trigger_price(row, rules["sell"])
-        price = _price_for(h["code"], row, quotes)
         base["latest_price"] = round(price, 2)
-        qty = int(h["quantity"])
-        cost = float(h.get("cost_price", 0.0))
         base["holding_pnl"] = round((base["latest_price"] - cost) * qty, 2)
         base["pnl_pct"] = round(((base["latest_price"] - cost) / cost * 100), 2) if cost > 0 else 0.0
+        base["suggestion"] = _conviction_line(base, cost, qty)
         results.append(base)
     return {"results": results, "summary": summarize(results)}
+
+
+def _conviction_line(base: dict, cost: float, qty: int) -> str:
+    """把「这条判定值多少钱」写成几个可核对的频率，不是一个分数。
+
+    两个同类基线来自 2026-10-12 的全市场回验（见 judge 里 HOLD_* 的注释）：说的是「处在同样
+    状态的持仓点整体后来怎么样了」，不是「这只票明天涨不涨」。它们只描述 hold 这一格，所以
+    只有判成 hold 才印——判成 sell 还印「同类 hold 有 45% 转卖」是自己给自己抬杠。之所以只报
+    尾部不报均值：实测过所有状态分箱的 10/20 日均值差都小于换手成本，只有 p5 单调有区分度。
+    """
+    price = float(base["latest_price"])
+    if price <= 0:
+        return ""
+    bits: list[str] = []
+    trigger = base.get("sell_trigger_price")
+    if trigger:
+        gap = (price - trigger) / price * 100
+        bits.append(f"均线卖点在下方 {gap:.1f}%" if gap > 0 else f"已跌破均线卖点 {abs(gap):.1f}%")
+    else:
+        bits.append("本判据不含价格线")
+    if base["action"] == "hold":
+        bits.append(f"同类 hold 20 日内 {HOLD_FLIP_PCT:.0f}% 转为卖出")
+        tail = price * qty * HOLD_TAIL_P5_PCT / 100
+        bits.append(f"尾部 p5 −{HOLD_TAIL_P5_PCT:.1f}%≈再亏 {tail:,.0f} 元")
+    if cost > 0 and price < cost:
+        bits.append(f"回本需 {(cost - price) / price * 100:+.1f}%")
+    return "｜".join(bits)
 
 
 def _price_for(code: str, row: dict, quotes: dict | None) -> float:

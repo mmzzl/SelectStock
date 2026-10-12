@@ -21,12 +21,20 @@ DEFAULT_SELL_RULE = "price <= ma10 * 0.95"
 DEFAULT_ADD_RULE = "close >= ma5 * 1.03 and rsi14 <= 65"
 DEFAULT_HOLD_RULE = "close >= ma1 and close <= ma99"  # 兜底恒真（无触发时 hold）
 
+# 灾难线：浮亏超过这个百分比就作废「持有」。全市场回验（72.4 万个判为 hold 的时点、20 日窗口）
+# 显示它 90% 与趋势线重叠、期望上收 −0.08pp 的保费——它是砍尾部的保险，不是预测，
+# 所以阈值给到 −8%（用户定的风险口径）， −5% 会把新增告警放到 12.7% 且每周期拖 −0.38pp。
+DEFAULT_DISASTER_STOP_PCT = 8.0
+MIN_DISASTER_STOP_PCT = 1.0
+MAX_DISASTER_STOP_PCT = 30.0
+
 
 def _default_rules() -> dict:
     return {
         ACTION_SELL: DEFAULT_SELL_RULE,
         ACTION_ADD: DEFAULT_ADD_RULE,
         ACTION_HOLD: DEFAULT_HOLD_RULE,
+        "disaster_stop_pct": DEFAULT_DISASTER_STOP_PCT,
     }
 
 
@@ -42,6 +50,10 @@ def load_rules() -> dict:
             value = data.get(key)
             if isinstance(value, str) and value.strip():
                 rules[key] = value.strip()
+        stop = data.get("disaster_stop_pct")
+        if isinstance(stop, (int, float)) and not isinstance(stop, bool):
+            rules["disaster_stop_pct"] = min(max(float(stop), MIN_DISASTER_STOP_PCT),
+                                             MAX_DISASTER_STOP_PCT)
     except Exception as exc:  # 规则文件坏了不致命：退回默认
         logger.warning("解析 %s 失败(%s)，使用默认规则", path, exc)
     return rules
