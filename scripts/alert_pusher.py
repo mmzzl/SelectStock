@@ -11,14 +11,18 @@
 - **只发启动之后的决策**：进程启动时把游标放在流尾，重启不会把上一交易日的存量当新信号重推
   （要重发显式 `--replay`）。
 
-密钥走环境变量，绝不写进文件也不打日志（钉钉 webhook 的 access_token 和 sign 都在 URL 里）：
+Webhook 默认取自后端管理页面的「通知渠道」配置（`notify_channels.json`，密钥在那边是
+AES-GCM 密文，本进程发送前解出明文，绝不写进文件也不打日志）。环境变量只用来覆盖它，
+比如临时发到测试群（钉钉 webhook 的 access_token 和 sign 都在 URL 里）：
     ALERT_CHANNEL        dingtalk | wecom（默认 dingtalk）
-    ALERT_WEBHOOK_URL    机器人 webhook 地址
+    ALERT_CHANNEL_KEY    页面里那条渠道的 key；不填取该类型第一条启用的
+    ALERT_WEBHOOK_URL    直接给地址，跳过页面配置
     ALERT_WEBHOOK_SECRET 钉钉机器人的加签密钥（企业微信不需要）
 
 用法:
+    python scripts/alert_pusher.py                            # 用页面配的钉钉渠道
     export ALERT_WEBHOOK_URL='https://oapi.dingtalk.com/robot/send?access_token=xxx'
-    export ALERT_WEBHOOK_SECRET='SECxxxx'
+    export ALERT_WEBHOOK_SECRET='SECxxxx'                     # 或显式覆盖
     python scripts/alert_pusher.py --dry-run              # 只打印，不真发
     python scripts/alert_pusher.py                        # 常驻
     python scripts/alert_pusher.py --once --rounds 1      # 冒烟
@@ -44,6 +48,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from stock_selector.realtime import bus
 
 logger = logging.getLogger("alert_pusher")
+
+BACKEND_DIR = Path(__file__).resolve().parent.parent / "stock_selector_api" / "backend"
 
 KIND_LABEL = {
     "ma_golden_cross": "均线金叉", "ma_dead_cross": "均线死叉",
@@ -82,6 +88,42 @@ def build_payload(channel: str, title: str, text: str) -> dict:
 def redacted(url: str) -> str:
     """日志里只留主机名：access_token/sign 都在 query 里，打出来就等于泄露机器人。"""
     return urllib.parse.urlsplit(url).netloc
+
+
+def resolve_webhook(channel: str, key: str = "", *, file=None, decrypt=None) -> tuple[str, str, str]:
+    """从后端「通知渠道」配置里取机器人地址：返回 `(名称, url, 加签密钥)`。
+
+    这份 JSON 是管理页面写的唯一真源，密钥以 AES-GCM 密文落盘，所以解密要用后端的
+    `core.security`（密钥派生自 `backend/.env` 的 jwt_secret）——在这里解，是为了不再
+    把同一个机器人抄第二份到 supervisor 环境变量里：页面改了 webhook，进程重启即生效。
+    解出来的明文只活在这一个元组里，既不写文件也不打日志。
+    """
+    if file is None or decrypt is None:
+        sys.path.insert(0, str(BACKEND_DIR))
+        from config import get_settings
+        from core.security import decrypt_secret
+        file = file or get_settings().notify_channels_file
+        decrypt = decrypt or decrypt_secret
+
+    entries = json.loads(Path(file).read_text(encoding="utf-8") or "{}").get(channel) or []
+    chosen = None
+    for item in entries:
+        if key:
+            if item.get("key") == key:
+                chosen = item
+                break
+        elif item.get("enabled", True):
+            chosen = item
+            break
+    if chosen is None:
+        raise ValueError(f"渠道配置里找不到{' ' + channel + ' 的 ' + key if key else '可用的 ' + channel}"
+                         f"（{file}）")
+    if not chosen.get("enabled", True):
+        raise ValueError(f"渠道 {chosen.get('key')} 在页面上是停用状态")
+    url = (chosen.get("webhook_url") or "").strip()
+    if not url:
+        raise ValueError(f"渠道 {chosen.get('key')} 没有 webhook 地址")
+    return str(chosen.get("name") or chosen.get("key")), url, decrypt(chosen.get("secret") or "")
 
 
 def send(channel: str, url: str, secret: str, title: str, text: str,
@@ -259,6 +301,8 @@ def main(argv: list[str] | None = None) -> int:
                    default=os.environ.get("ALERT_CHANNEL", DINGTALK))
     p.add_argument("--url", default=os.environ.get("ALERT_WEBHOOK_URL", ""))
     p.add_argument("--secret", default=os.environ.get("ALERT_WEBHOOK_SECRET", ""))
+    p.add_argument("--channel-key", default=os.environ.get("ALERT_CHANNEL_KEY", ""),
+                   help="管理页面里配的渠道 key；不填就用该类型第一条启用的渠道")
     p.add_argument("--flush", type=float, default=30.0, help="攒批秒数，0=每条立即发")
     p.add_argument("--no-blocked", action="store_true", help="摘要里不带被风控拦下的信号")
     p.add_argument("--replay", action="store_true",
@@ -279,7 +323,14 @@ def main(argv: list[str] | None = None) -> int:
         sender = print_sender
     else:
         if not args.url:
-            raise SystemExit("没有 webhook 地址：设 ALERT_WEBHOOK_URL，或先用 --dry-run 看消息")
+            try:
+                name, args.url, args.secret = resolve_webhook(args.channel, args.channel_key)
+                logger.info("告警渠道取自管理页面：%s（%s，%s，加签密钥%s）", name, args.channel,
+                            redacted(args.url), "已解出" if args.secret else "为空")
+            except Exception as exc:  # noqa: BLE001 配置读不到就是没配好，全部指向同一条出路
+                raise SystemExit(f"读不到页面配的{args.channel}渠道：{exc}\n"
+                                 "可在页面「通知渠道」里配好，或设 ALERT_WEBHOOK_URL，"
+                                 "或先用 --dry-run 看消息") from exc
         sender = send
 
     client = bus.connect(args.host, args.port, args.db)

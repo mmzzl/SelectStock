@@ -241,13 +241,17 @@ redis 的 `rt:emitted:{日期}`，所以引擎重启不会把上午报过的信�
 python scripts/quote_service.py --all --interval 15              # 1) 行情上行
 python scripts/intraday_engine.py --all --max-eval 300 --mongo   # 2) 指标 → 信号 → 风控 → 决策
 python scripts/intraday_engine.py --status                       #    看引擎心跳
-export ALERT_CHANNEL=dingtalk ALERT_WEBHOOK_URL='…' ALERT_WEBHOOK_SECRET='…'
 python scripts/alert_pusher.py --dry-run                         # 3) 先看消息，确认无误再常驻
+python scripts/alert_pusher.py --channel-key ding_ops            #    发到页面「通知渠道」配的钉钉
 ```
 
 上面三个脚本已由 supervisor 托管常驻（`selectstock-quote-service` / `-intraday-engine` /
-`-alert-pusher`，配置在 `deploy/`），手工命令用于调试与冒烟；告警那份因为仓库里不带密钥，
-默认 `autostart=false`，填好 webhook 才需要 `supervisorctl start`。
+`-alert-pusher`，配置在 `deploy/`），手工命令用于调试与冒烟。告警进程的 webhook **默认取自管理
+页面配的「通知渠道」**（`stock_selector_api/backend/conf/notify_channels.json`，按 `--channel-key`
+或该类型第一条启用的渠道）：加签密钥在那边是 AES-GCM 密文，pusher 复用后端的 `core.security`
+在发送前才解出明文，日志里只留主机名。`ALERT_WEBHOOK_URL` / `ALERT_WEBHOOK_SECRET` 仍然有效，
+但退为「临时换群」的覆盖手段。仓库副本默认 `autostart=false`（它要能导入 backend 目录），
+确认群里收到过消息再打开。
 
 告警进程**只排版不算术**：建议股数、预估成交价、滑点全部来自引擎与风控，它做单位换算和攒批
 （默认 30 秒合成一条 markdown，避免刷屏、也避开机器人 20 条/分钟限流），一批超过 40 条
@@ -874,9 +878,9 @@ python scripts/analyze_news_llm.py --stats trend --code BK0464 --start 2026-09-0
 | `selectstock-scheduler` | — | 采集调度：APScheduler 跑 `config/inputs.conf` 的 `script://` 任务 | `deploy/selectstock-scheduler.conf` |
 | `selectstock-quote-service` | — | 盘中快照轮询 → Redis db5 的 `rt:quote` / `rt:ticks` | `deploy/selectstock-quote-service.conf` |
 | `selectstock-intraday-engine` | — | 盘中策略计算：分钟条 → 信号 → 风控 → `rt:decisions` + 当日 parquet | `deploy/selectstock-intraday-engine.conf` |
-| `selectstock-alert-pusher` | — | 决策 → 钉钉/企业微信摘要；**仓库副本 `autostart=false`**，填好 webhook 才开 | `deploy/selectstock-alert-pusher.conf` |
+| `selectstock-alert-pusher` | — | 决策 → 钉钉/企业微信摘要；webhook 取自页面「通知渠道」，**仓库副本 `autostart=false`** | `deploy/selectstock-alert-pusher.conf` |
 
-**盘中三进程只在交易时段有用**：收盘后它们空转（没有新 tick 就没有决策），不产出内容也不影响盘后链路。告警进程的 `ALERT_WEBHOOK_URL` / `ALERT_WEBHOOK_SECRET` 是机器人凭据，**只写 `/etc/supervisor/conf.d/` 里那份**，仓库这份留空并关着自启；它和后端 `conf/notify_channels.json` 的推送渠道是两套东西，别改错地方。
+**盘中三进程只在交易时段有用**：收盘后它们空转（没有新 tick 就没有决策），不产出内容也不影响盘后链路。告警进程的机器人凭据**不在这里配**：它在管理页面「通知渠道」里维护（密钥密文落盘，pusher 发送时用后端 `core.security` 解密），`ALERT_WEBHOOK_URL` / `ALERT_WEBHOOK_SECRET` 只用来临时覆盖，真要长期覆盖时才写进 `/etc/supervisor/conf.d/` 那份，仓库这份永远留空。
 
 **端口为什么不是 8000**：文档约定后端占 8000，但本机 8000 已被 `/data/work/lex_math_new/backend` 占用，所以 API 改用 **8010**，对外统一走 nginx **8080**。换端口只需同时改 `deploy/selectstock-api.conf` 的 `--port` 与 `deploy/nginx/selectstock.conf` 的 upstream。
 

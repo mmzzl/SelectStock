@@ -752,6 +752,48 @@ def test_pusher_title_when_everything_is_blocked(client, pusher):
     assert "本批没有可执行信号" in sent[0][4]
 
 
+# —— 告警 webhook 取自管理页面的「通知渠道」 ——
+
+def _channels_file(tmp_path, payload):
+    p = tmp_path / "notify_channels.json"
+    p.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return p
+
+
+def _ding(name="安全值班群", key="ding_ops", enabled=True,
+          url="https://oapi.dingtalk.com/robot/send?access_token=t", secret="enc-secret"):
+    return {"key": key, "name": name, "enabled": enabled, "webhook_url": url, "secret": secret}
+
+
+def test_resolve_webhook_takes_page_config_by_key(tmp_path, pusher):
+    """页面是 webhook 的唯一真源：按 key 取，密钥交给后端的解密函数，这里不写死、不落明文。"""
+    file = _channels_file(tmp_path, {"dingtalk": [_ding(name="测试群", key="ding_test"), _ding()]})
+    got = pusher.resolve_webhook("dingtalk", "ding_ops", file=file,
+                                 decrypt=lambda enc: "SEC-" + enc)
+    assert got == ("安全值班群", "https://oapi.dingtalk.com/robot/send?access_token=t",
+                   "SEC-enc-secret")
+
+
+def test_resolve_webhook_without_key_skips_disabled(tmp_path, pusher):
+    file = _channels_file(tmp_path, {"dingtalk": [
+        _ding(name="停用的", key="ding_off", enabled=False),
+        _ding(name="启用的", key="ding_on")]})
+    name, url, secret = pusher.resolve_webhook("dingtalk", "", file=file, decrypt=lambda e: e)
+    assert name == "启用的" and url.startswith("https://oapi.") and secret == "enc-secret"
+
+
+def test_resolve_webhook_refuses_disabled_and_empty(tmp_path, pusher):
+    """点名要一条停用的渠道必须报错：静默不发比报错难查得多。"""
+    file = _channels_file(tmp_path, {"dingtalk": [_ding(enabled=False)]})
+    with pytest.raises(ValueError, match="停用"):
+        pusher.resolve_webhook("dingtalk", "ding_ops", file=file, decrypt=lambda e: e)
+    with pytest.raises(ValueError, match="找不到"):
+        pusher.resolve_webhook("dingtalk", "nope", file=file, decrypt=lambda e: e)
+    empty = _channels_file(tmp_path, {"dingtalk": [_ding(url="")]})
+    with pytest.raises(ValueError, match="没有 webhook"):
+        pusher.resolve_webhook("dingtalk", "ding_ops", file=empty, decrypt=lambda e: e)
+
+
 def test_pusher_can_drop_blocked_detail(client, pusher):
     sent = []
     bus.emit_stream(client, bus.KEY_DECISIONS, [decision_item()])
