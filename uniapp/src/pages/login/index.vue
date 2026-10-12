@@ -25,6 +25,7 @@ async function submit() {
     const data = await client.post("/api/v1/auth/login", {
       body: { username: username.value, password: password.value,
               captcha_id: captchaId.value || undefined, captcha_code: code.value || undefined },
+      silentUnauthorized: true,
     });
     setSession(data);
     try { data.user = await client.get("/api/v1/auth/me"); setSession(data); } catch { /* me 失败不阻断登录 */ }

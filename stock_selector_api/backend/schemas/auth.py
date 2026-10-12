@@ -1,6 +1,6 @@
 """Auth 相关 schema：登录、令牌对、用户信息、菜单。"""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class LoginIn(BaseModel):
@@ -9,6 +9,12 @@ class LoginIn(BaseModel):
     # 验证码（开启 captcha_enabled 时必传）
     captcha_id: str | None = Field(default=None, max_length=64)
     captcha_code: str | None = Field(default=None, max_length=16)
+
+    # 手机输入法会在用户名/验证码后面自动补空格，不 trim 就成了「密码明明对却登不上」。
+    # password 不在此列：空格可能是密码的一部分。
+    @field_validator("username", "captcha_code", mode="before")
+    def _strip(cls, v):
+        return v.strip() if isinstance(v, str) else v
 
 
 class TokenPair(BaseModel):

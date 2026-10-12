@@ -34,6 +34,22 @@ async def test_login_wrong_password(client):
 
 
 @pytest.mark.asyncio
+async def test_login_trims_username_but_never_password(client):
+    """手机输入法会在用户名后面补空格，不 trim 就变成「密码明明对却登不上」（真机踩过：
+    login_locks 里落下 user:admin␣ 这种键）。密码反过来必须原样，空格可能是密码的一部分。"""
+    from schemas.auth import LoginIn
+
+    body = LoginIn(username=" admin ", password=" a ", captcha_code=" ab ")
+    assert body.username == "admin"
+    assert body.captcha_code == "ab"
+    assert body.password == " a "
+
+    r = await login_with_captcha(client, "admin ", "admin123")
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["access_token"]
+
+
+@pytest.mark.asyncio
 async def test_unauthenticated_forbidden(client):
     r = await client.get("/api/v1/devices")
     assert r.status_code == 401  # 未带 token → AuthError 401

@@ -70,9 +70,13 @@ function handle({ statusCode, data }, { onUnauthorized }) {
 export function createClient({ adapter, getToken, onUnauthorized, baseUrl = "" } = {}) {
   const ad = adapter || defaultAdapter();
   return {
-    async request(method, path, { query, body, header } = {}) {
+    async request(method, path, { query, body, header, silentUnauthorized } = {}) {
       const qs = query ? toQuery(query) : "";
       const token = getToken ? getToken() : "";
+      // 登录接口自己的 401 是「用户名或密码错误」，不是「会话失效」。走全局处理会
+      // clearSession + reLaunch 回登录页，把刚写上去的错误提示连同表单一起冲掉，
+      // 用户看到的就是「点了登录，页面闪一下又空了」。
+      const auth = silentUnauthorized ? null : onUnauthorized;
       const cfg = {
         url: `${baseUrl}${path}${qs}`,
         method,
@@ -85,7 +89,7 @@ export function createClient({ adapter, getToken, onUnauthorized, baseUrl = "" }
       if (method.toUpperCase() !== "GET") {
         let res;
         try { res = await ad.request(cfg); } catch (e) { throw netError(e); }
-        return handle(res, { onUnauthorized });
+        return handle(res, { onUnauthorized: auth });
       }
       let res;
       try {
@@ -94,7 +98,7 @@ export function createClient({ adapter, getToken, onUnauthorized, baseUrl = "" }
         await sleep(RETRY_DELAY_MS);
         try { res = await ad.request(cfg); } catch (e2) { throw netError(e2); }
       }
-      return handle(res, { onUnauthorized });
+      return handle(res, { onUnauthorized: auth });
     },
     async upload(path, { filePath, file, name = "file", formData = {}, query, header = {} } = {}) {
       const qs = query ? toQuery(query) : "";

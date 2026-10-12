@@ -32,6 +32,20 @@ test("401：清会话并抛 UnauthorizedError", async () => {
   assert.ok(UnauthorizedError);
 });
 
+test("401：登录接口走 silentUnauthorized，不触发清会话跳转", async () => {
+  // 登录返回 401 是「用户名或密码错误」。走全局处理会 reLaunch 回登录页，
+  // 把错误提示连同表单一起冲掉，用户看到的就是「点了登录，页面闪一下又空了」。
+  const a = fakeAdapter();
+  a._next = { statusCode: 401, data: { code: 401, message: "用户名或密码错误" } };
+  let cleared = false;
+  const c = createClient({ adapter: a, getToken: () => "", onUnauthorized: () => { cleared = true; } });
+  await assert.rejects(
+    () => c.post("/api/v1/auth/login", { body: { username: "admin", password: "x" }, silentUnauthorized: true }),
+    (e) => e.name === "UnauthorizedError" && e.message === "用户名或密码错误",
+  );
+  assert.equal(cleared, false);
+});
+
 test("428：抛 PasswordExpiredError（跳改密）", async () => {
   const a = fakeAdapter();
   a._next = { statusCode: 428, data: { code: 428, message: "密码已过期" } };
