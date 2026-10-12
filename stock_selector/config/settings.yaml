@@ -100,7 +100,8 @@ intraday:
   interval: 5                  # 读 rt:ticks 的间隔（秒），与轮询服务同拍
   read_batch: 2000             # 一轮最多读多少条 tick
   max_eval: 300                # 一轮最多给多少只算 talib 指标（全市场盘中的自我限流阀）
-  cooldown: 300                # 同票同信号的重复抑制窗口（秒）：不抑制就是一分钟报五次
+  once_per_day: true           # 同票同信号当天只报一次（买入/卖出同口径），跨天才重新放开
+  cooldown: 300                # 重复抑制窗口（秒）：once_per_day 关掉、或 redis 去重表写不进时的退路
   replay_horizon: 60           # 比现在旧过这个秒数的 tick 只补分钟条、不产信号
   flow_window: 5               # 打单流入的滚动窗口（分钟）
   kline_cache: 32              # 日线宽表 LRU 只数（流动性/风险分/压力位共用）

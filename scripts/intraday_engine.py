@@ -74,7 +74,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int, default=0, help="股票池上限，0=不限")
     p.add_argument("--interval", type=float, help="读流间隔秒数（默认取配置的 intraday.interval）")
     p.add_argument("--rounds", type=int, default=0, help="跑多少轮后退出，0=常驻")
-    p.add_argument("--cooldown", type=int, help="同票同信号的抑制窗口（秒）")
+    p.add_argument("--cooldown", type=int, help="重复抑制窗口（秒），只在 --no-daily-dedupe 或去重表写不进时生效")
+    p.add_argument("--no-daily-dedupe", action="store_true",
+                   help="关掉「同票同信号当天只报一次」，退回 --cooldown 窗口")
     p.add_argument("--max-eval", type=int, help="一轮最多给多少只算分钟指标")
     p.add_argument("--kinds", nargs="*", help="只开这些信号种类，缺省全开")
     p.add_argument("--held", nargs="*", default=[], metavar="代码=市值",
@@ -110,6 +112,8 @@ def main(argv: list[str] | None = None) -> int:
         engine_cfg.interval = args.interval
     if args.cooldown is not None:
         engine_cfg.cooldown = args.cooldown
+    if args.no_daily_dedupe:
+        engine_cfg.once_per_day = False
     if args.max_eval:
         engine_cfg.max_eval = args.max_eval
     engine_cfg.held = parse_held(args.held)
@@ -126,8 +130,10 @@ def main(argv: list[str] | None = None) -> int:
 
     engine = IntradayEngine(client, pool, risk, cfg=engine_cfg, signal_cfg=signal_cfg,
                             out_dir=args.out_dir, to_mongo=args.mongo)
-    logger.info("盘中引擎启动：%d 只，间隔 %.1f 秒，冷却 %d 秒，风控 %s",
-                len(pool), engine_cfg.interval, engine_cfg.cooldown,
+    logger.info("盘中引擎启动：%d 只，间隔 %.1f 秒，去重=%s，风控 %s",
+                len(pool), engine_cfg.interval,
+                "当天每票每信号只报一次" if engine_cfg.once_per_day
+                else f"冷却 {engine_cfg.cooldown} 秒",
                 "开" if risk.cfg.enabled else "关")
     engine.run(rounds=args.rounds or None)
     return 0

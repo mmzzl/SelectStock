@@ -230,9 +230,12 @@ rt:ticks ─► intraday_engine：累计量还原分钟条 ─► talib 分钟�
 （量比/换手/触板/事件）直接读 `rt:quote` 的最新快照，不跑 talib。
 
 全市场 6600 只的盘中计算很容易变成自我 DoS，预算全部写在 `intraday:` 里：`max_eval` 限制一轮跑
-talib 的只数，`cooldown` 抑制同票同信号重复刷屏，`replay_horizon` 让启动时回放的旧 tick **只补
-分钟条、不产信号**（那些价格是几分钟前的，此刻报出来只会诱导一个下不到的单）。日线宽表（流动性/
-冲击/风险分/压力位都要它）只在真有信号要过风控时才读，按 `kline_cache` 只数 LRU 缓存。
+talib 的只数，`once_per_day` 让同票同信号**当天只报一次**（买入和卖出同一个口径；去重表写在
+redis 的 `rt:emitted:{日期}`，所以引擎重启不会把上午报过的信号再报一遍，跨天自动放开），
+`cooldown` 是它的退路——关掉日级去重、或去重表写不进 redis 时按这个秒数抑制，`replay_horizon`
+让启动时回放的旧 tick **只补分钟条、不产信号**（那些价格是几分钟前的，此刻报出来只会诱导一个
+下不到的单）。日线宽表（流动性/冲击/风险分/压力位都要它）只在真有信号要过风控时才读，按
+`kline_cache` 只数 LRU 缓存。
 
 ```bash
 python scripts/quote_service.py --all --interval 15              # 1) 行情上行
@@ -411,7 +414,8 @@ risk:                      # 信号→决策的独立闸门，见《风控层》
 intraday:                # 盘中计算引擎，见《盘中策略引擎与告警》
   interval: 5            # 读 rt:ticks 的间隔（秒）
   max_eval: 300          # 一轮最多几只跑 talib（全市场盘中的自我限流阀）
-  cooldown: 300          # 同票同信号的抑制窗口（秒）
+  once_per_day: true     # 同票同信号当天只报一次（买入/卖出同口径），跨天自动放开
+  cooldown: 300          # 重复抑制窗口（秒）：once_per_day 关掉或去重表写不进时的退路
   replay_horizon: 60     # 旧过这个秒数的 tick 只补分钟条、不产信号
   flow_window: 5         # 打单流入的滚动窗口（分钟）
   signals:               # 信号阈值：换手/量比/放量倍数/突破确认幅度…全部外置

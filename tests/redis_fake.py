@@ -39,12 +39,13 @@ class FakePipe:
 
 
 class FakeRedis:
-    """够用的 redis 记账：hash / stream / string 三种结构 + TTL 表。"""
+    """够用的 redis 记账：hash / stream / string / set 四种结构 + TTL 表。"""
 
     def __init__(self):
         self.hashes: dict[str, dict[str, str]] = {}
         self.streams: dict[str, list[tuple[str, dict]]] = {}
         self.strings: dict[str, str] = {}
+        self.sets: dict[str, set[str]] = {}
         self.ttls: dict[str, int] = {}
         self._seq = 0
 
@@ -102,3 +103,20 @@ class FakeRedis:
 
     def xlen(self, key):
         return len(self.streams.get(key, []))
+
+    def sadd(self, key, *values):
+        bucket = self.sets.setdefault(key, set())
+        before = len(bucket)
+        bucket.update(str(v) for v in values)
+        return len(bucket) - before
+
+    def smembers(self, key):
+        return set(self.sets.get(key, set()))
+
+    def expire(self, key, ttl):
+        self.ttls[key] = ttl
+        return True
+
+    def ttl(self, key):
+        # 真 redis：-1 是键在但没设过期，-2 是键不存在。假客户端只需保证「小于 0」这一判定成立。
+        return self.ttls.get(key, -1)

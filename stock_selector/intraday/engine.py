@@ -46,7 +46,8 @@ class EngineConfig:
     interval: float = 5.0             # 读流间隔（与轮询服务同拍或略慢即可）
     read_batch: int = 2000            # 一轮最多读多少条 tick
     max_eval: int = 300               # 一轮最多给多少只票算 talib 分钟指标
-    cooldown: int = 300               # 同票同信号的重复抑制窗口（秒）
+    cooldown: int = 300               # 同票同信号的重复抑制窗口（秒）：日级去重的退路
+    once_per_day: bool = True         # 同票同信号当天只报一次（买入/卖出同口径），跨天才放开
     replay_horizon: int = 60          # 比现在旧过这个秒数的 tick 只补条、不判信号
     flow_window: int = 5              # 打单流入的滚动窗口（分钟）
     kline_cache: int = 32             # 日线宽表 LRU 只数
@@ -273,19 +274,37 @@ class IntradayEngine:
     # —— 信号 → 风控 → 决策 ——
 
     def _new_signals(self, view: signals.View) -> list[signals.Signal]:
-        """评估 + 冷却去重：同票同信号在 `cooldown` 秒内只形成一次决策。
+        """评估 + 去重：同一只票同一类信号当天只形成一次决策，买入和卖出同一个口径。
 
-        被冷却吃掉的算不上「风控拒绝」，所以不落盘、不进决策流——它压根没变成一条新决策。
+        被去重吃掉的算不上「风控拒绝」，所以不落盘、不进决策流——它压根没变成一条新决策。
         """
         stamp = self.now().timestamp()
         out = []
         for signal in signals.evaluate(view, self.signal_cfg):
-            last = self._emitted.get(signal.key)
-            if last is not None and stamp - last < self.cfg.cooldown:
-                continue
-            self._emitted[signal.key] = stamp
-            out.append(signal)
+            if self._should_emit(signal, stamp):
+                out.append(signal)
         return out
+
+    def _should_emit(self, signal: signals.Signal, stamp: float) -> bool:
+        """日级去重优先，退回进程内 `cooldown` 窗口。
+
+        去重表写在 redis：引擎重启把上午报过的信号再报一遍，整条告警就没有可信度了。中间件
+        抖动时宁可退化成「5 秒内不重复」，也不能让链路卡在这里——告警宁多报，不能不报。
+        """
+        if self.cfg.once_per_day:
+            try:
+                marked = bus.mark_once(self.client, self.day, signal.key)
+            except Exception as exc:
+                logger.warning("当日去重表写不进去，退回冷却窗口判定: %s", exc)
+            else:
+                if marked:
+                    self._emitted[signal.key] = stamp
+                return marked
+        last = self._emitted.get(signal.key)
+        if last is not None and stamp - last < self.cfg.cooldown:
+            return False
+        self._emitted[signal.key] = stamp
+        return True
 
     def _review(self, signal: signals.Signal, quote: dict, moment: dt.datetime) -> dict:
         """单条信号过风控：能不能成交、买多少、什么价成交，都由风控定，不由信号定。"""

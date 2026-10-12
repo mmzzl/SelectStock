@@ -14,6 +14,7 @@
 | `rt:decisions` | Stream | 过完风控的最终决策，告警链路消费；被拦的也在里面（`verdict=block`） |
 | `rt:heartbeat` | String(JSON) | 上一轮行情统计：轮数/命中/耗时/错误，运维据此判断轮询是否还活着 |
 | `rt:engine-heartbeat` | String(JSON) | 上一轮引擎统计：读到多少 tick、评估多少只、出多少信号 |
+| `rt:emitted:{日期}` | Set | 当天已经报过的 `代码|信号种类`：盘中告警「一票一信号一天只报一次」的去重表 |
 | `rt:metric:{code}` | Hash | 盘中实时指标（均线/MACD/量比…），由策略引擎写、告警链路读 |
 
 `rt:quote` 与 `rt:heartbeat` 都带 TTL：停服后不能让人读到「昨天的实时价」——行情数据
@@ -34,10 +35,12 @@ KEY_TICKS = "rt:ticks"
 KEY_DECISIONS = "rt:decisions"
 KEY_HEARTBEAT = "rt:heartbeat"
 KEY_ENGINE_HEARTBEAT = "rt:engine-heartbeat"
+KEY_EMITTED_PREFIX = "rt:emitted:"
 METRIC_PREFIX = "rt:metric:"
 
 QUOTE_TTL = 4 * 3600          # 一个交易日 + 余量：隔天必读不到，也不会当天误过期
 METRIC_TTL = 6 * 3600
+EMIT_TTL = 18 * 3600          # 去重表键名已带日期，TTL 只是别让历史键堆在库里
 DEFAULT_MAXLEN = 20000        # tick 流保留长度：约 2 万条变化，够复盘半个交易日
 DECISION_MAXLEN = 5000        # 决策流短得多：一条决策背后是几十上百个 tick
 
@@ -58,6 +61,23 @@ def _dump(payload: dict) -> str:
 
 def metric_key(code: str) -> str:
     return f"{METRIC_PREFIX}{code}"
+
+
+def emitted_key(day: str) -> str:
+    return f"{KEY_EMITTED_PREFIX}{day}"
+
+
+def mark_once(client, day: str, key: str) -> bool:
+    """当天第一次记这个键返回 True，重复返回 False —— 盘中告警的「一票一信号一天只报一次」。
+
+    去重表必须落在 redis 而不是引擎进程里：重启不能把上午已经报过的信号重新报一遍。键名带
+    日期，跨天天然错开（不必清理昨天的），所以这里只需要在建键时挂一个 TTL 防止堆积。
+    """
+    name = emitted_key(day)
+    added = client.sadd(name, key)
+    if added and client.ttl(name) < 0:        # -1=还没设过期，-2=刚被别的连接清掉
+        client.expire(name, EMIT_TTL)
+    return bool(added)
 
 
 def put_quotes(client, quotes: dict[str, dict]) -> int:

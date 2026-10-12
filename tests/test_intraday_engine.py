@@ -393,10 +393,12 @@ def test_replayed_ticks_build_bars_but_produce_no_signals(client, out_dir):
 def test_cooldown_suppresses_the_same_signal(client, out_dir):
     """同一信号在冷却窗口内不再重复出决策：行情一直在动，告警不能每五秒刷一条。
 
+    这是 `once_per_day` 关掉后的口径（`--no-daily-dedupe`、或去重表写不进 redis 时的退路）。
     每轮都要新发一条 tick——决策流是按 tick 驱动的，游标划过就没有输入了。
     """
     bus.put_quotes(client, {"600000": quote(price=11.0, limit_up=11.0)})
-    engine = make_engine(client, out_dir=out_dir, cfg=EngineConfig(cooldown=300))
+    engine = make_engine(client, out_dir=out_dir,
+                         cfg=EngineConfig(cooldown=300, once_per_day=False))
     decisions = []
     for step in range(1, 4):
         bus.emit_ticks(client, [tick(price=11.0, limit_up=11.0, ts=TS + step)])
@@ -405,6 +407,69 @@ def test_cooldown_suppresses_the_same_signal(client, out_dir):
     engine._emitted.clear()                               # 冷却过期后同一信号还能再报
     bus.emit_ticks(client, [tick(price=11.0, limit_up=11.0, ts=TS + 4)])
     assert engine.drain()["decisions"] == 1
+
+
+def test_same_signal_emits_only_once_per_day(client, out_dir):
+    """默认口径：同票同信号**当天只报一次**，冷却时间早过了也不再报。"""
+    bus.put_quotes(client, {"600000": quote(price=11.0, limit_up=11.0)})
+    engine = make_engine(client, out_dir=out_dir, cfg=EngineConfig(cooldown=0))
+    decisions = []
+    for step in range(1, 4):
+        bus.emit_ticks(client, [tick(price=11.0, limit_up=11.0, ts=TS + step)])
+        decisions.append(engine.drain()["decisions"])
+    assert decisions == [1, 0, 0]
+    assert client.sets[bus.emitted_key(DAY)] == {"600000|limit_up_touch"}
+
+
+def test_daily_dedupe_survives_an_engine_restart(client, out_dir):
+    """重启不能把上午报过的信号再报一遍——去重表在 redis 里，不在引擎进程里。"""
+    bus.put_quotes(client, {"600000": quote(price=11.0, limit_up=11.0)})
+    bus.emit_ticks(client, [tick(price=11.0, limit_up=11.0, ts=TS)])
+    assert make_engine(client, out_dir=out_dir).drain()["decisions"] == 1
+    bus.emit_ticks(client, [tick(price=11.0, limit_up=11.0, ts=TS + 60)])
+    restarted = make_engine(client, out_dir=out_dir)      # 全新实例：_emitted 是空的
+    assert not restarted._emitted
+    assert restarted.drain()["decisions"] == 0
+
+
+def test_next_day_frees_the_same_signal(client, out_dir):
+    """去重表按日期分键：跨天不需要清理，第二天同一信号照样能报。"""
+    bus.put_quotes(client, {"600000": quote(price=11.0, limit_up=11.0)})
+    clock = {"value": NOW}
+    engine = make_engine(client, out_dir=out_dir, now=lambda: clock["value"])
+    bus.emit_ticks(client, [tick(price=11.0, limit_up=11.0, ts=TS)])
+    assert engine.drain()["decisions"] == 1
+    clock["value"] = datetime(2026, 10, 13, 10, 0, 0)
+    # 换日后游标归零，昨天那条 tick 会被重读，但它已旧过回放窗口 → 只补条、不产信号
+    bus.emit_ticks(client, [tick(price=11.0, limit_up=11.0, ts=clock["value"].timestamp())])
+    assert engine.drain()["decisions"] == 1
+    assert client.sets[bus.emitted_key("2026-10-13")] == {"600000|limit_up_touch"}
+
+
+def test_dedupe_falls_back_to_cooldown_when_bus_write_fails(client, out_dir):
+    """中间件抖动时不能把整条链路卡住：退化成 `cooldown` 窗口，宁多报也不漏报。"""
+    bus.put_quotes(client, {"600000": quote(price=11.0, limit_up=11.0)})
+
+    def boom(key, *values):
+        raise ConnectionError("redis 连不上")
+
+    client.sadd = boom
+    engine = make_engine(client, out_dir=out_dir, cfg=EngineConfig(cooldown=0))
+    counts = []
+    for step in range(1, 3):
+        bus.emit_ticks(client, [tick(price=11.0, limit_up=11.0, ts=TS + step)])
+        counts.append(engine.drain()["decisions"])
+    assert counts == [1, 1]                              # 冷却 0 秒 = 退路下同一信号仍可再报
+    assert client.sets == {}                             # 一次都没写进去，也没留半截状态
+
+
+def test_shipped_config_enables_daily_dedupe():
+    """出厂配置必须是「当天只报一次」，否则线上跑的还是 5 分钟重复报的旧口径。"""
+    import yaml
+
+    raw = yaml.safe_load((ROOT / "stock_selector" / "config" / "settings.yaml").read_text("utf-8"))
+    cfg = EngineConfig.from_dict(raw["intraday"])
+    assert cfg.once_per_day is True and cfg.cooldown == 300
 
 
 def test_max_eval_bounds_the_indicator_work_per_round(client, out_dir):
