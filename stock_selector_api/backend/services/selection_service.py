@@ -97,6 +97,14 @@ async def _http_run(strategies: list[str]) -> list[dict]:
         # 没有对应判据的策略给 None（不能落成 0，也不能从 reason 文本里抠）
         "buy_ref_price": _num((it.get("extra") or {}).get("buy_ref_price")),
         "buy_invalid_price": _num((it.get("extra") or {}).get("buy_invalid_price")),
+        # 风控决策：信号已过五条规则才到这里（被拦的票内核就不返回了）。
+        # allow=原样放行、adjust=放行但下单量被单票上限压过；空值=这批结果跑在风控关闭时。
+        "risk_verdict": str((it.get("extra") or {}).get("risk_verdict") or "")[:8],
+        "risk_reason": str((it.get("extra") or {}).get("risk_reason") or "")[:512],
+        "risk_shares": _num((it.get("extra") or {}).get("risk_shares"), integer=True),
+        "risk_amount": _num((it.get("extra") or {}).get("risk_amount")),
+        "risk_fill_price": _num((it.get("extra") or {}).get("risk_fill_price")),
+        "risk_slippage_bp": _num((it.get("extra") or {}).get("risk_slippage_bp")),
     } for it in items if it.get("code")]
 
 

@@ -85,30 +85,33 @@ def test_etf_interface_error_falls_back_to_stock_source(monkeypatch):
             return None
 
     monkeypatch.setattr("portfolio.pricing.AKShareSource", FakeAKSource)
-    monkeypatch.setattr("requests.get", _raise)
+    monkeypatch.setattr("stock_selector.quote.tencent._request", _raise)
     with pytest.raises(PricingError):
         latest_price("512880", "2026-10-03")
     assert calls == ["512880"]
 
 
-def _raise(*a, **k):
+def _raise(syms, timeout):
     raise OSError("断网")
 
 
-class _FakeResp:
-    def __init__(self, payload: str):
-        self.content = payload.encode("gbk")
+def _record(sym: str, code: str, price: float) -> str:
+    """拼一条 88 段的腾讯快照报文（字段下标见 stock_selector/quote/tencent.py）。"""
+    f = ["1", "某ETF", code, str(price), "2.6", "2.6"] + ["0"] * 82
+    f[35] = f"{price}/1000/2600000"
+    f[37] = "260"
+    return f'v_{sym}="' + "~".join(f) + '";'
 
 
-def _tencent_price(price):
+def _tencent_price(price, code="512880"):
     seen = {}
 
-    def fake_get(url, timeout=None, **kw):
-        seen["url"] = url
-        return _FakeResp(f'v_x="51~某ETF~512880~{price}~2.6~')
+    def fake_request(syms, timeout):
+        seen["syms"] = list(syms)
+        return _record(syms[0], code, price)
 
-    fake_get.seen = seen
-    return fake_get
+    fake_request.seen = seen
+    return fake_request
 
 
 def test_realtime_quote_rescues_throttled_akshare(monkeypatch):
@@ -118,10 +121,10 @@ def test_realtime_quote_rescues_throttled_akshare(monkeypatch):
     monkeypatch.setitem(sys.modules, "akshare", _FakeAkModule(error=OSError("限流")))
     monkeypatch.setattr("portfolio.pricing.AKShareSource",
                         lambda *a, **k: type("S", (), {"get_kline": lambda self, c: None})())
-    fake = _tencent_price(2.556)
-    monkeypatch.setattr("requests.get", fake)
+    fake = _tencent_price(2.556, "159599")
+    monkeypatch.setattr("stock_selector.quote.tencent._request", fake)
     assert latest_price("159599", "2026-10-03") == 2.556
-    assert fake.seen["url"].endswith("q=sz159599")     # 15 字头在深交所
+    assert fake.seen["syms"] == ["sz159599"]     # 15 字头在深交所
 
 
 def test_sh_fund_code_maps_to_sh_market(monkeypatch):
@@ -131,6 +134,6 @@ def test_sh_fund_code_maps_to_sh_market(monkeypatch):
     monkeypatch.setattr("portfolio.pricing.AKShareSource",
                         lambda *a, **k: type("S", (), {"get_kline": lambda self, c: None})())
     fake = _tencent_price(1.02)
-    monkeypatch.setattr("requests.get", fake)
+    monkeypatch.setattr("stock_selector.quote.tencent._request", fake)
     assert latest_price("512880", "2026-10-03") == 1.02
-    assert fake.seen["url"].endswith("q=sh512880")     # 5 字头是沪市，不能按 _market_prefix 的 bj 兜底走
+    assert fake.seen["syms"] == ["sh512880"]     # 5 字头是沪市，不能按 _market_prefix 的 bj 兜底走

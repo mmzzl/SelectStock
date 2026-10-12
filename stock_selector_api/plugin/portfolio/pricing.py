@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 from stock_selector.datasource.ak_source import AKShareSource
+from stock_selector.quote import tencent as tencent_quote
 
 logger = logging.getLogger(__name__)
 
@@ -70,25 +71,17 @@ def _ak_latest(code: str) -> float:
     raise PricingError(f"AKShare 无行情: {code}")
 
 
-def _tencent_symbol(code: str) -> str:
-    if code.startswith(("5", "6", "9")):
-        return f"sh{code}"
-    if code.startswith(("0", "1", "2", "3")):
-        return f"sz{code}"
-    return f"bj{code}"
-
-
 def _tencent_latest(code: str) -> float | None:
-    """实时价兜底：东财掐连接时（ETF 接口尤其频繁）腾讯行情仍给得到同一天收盘价。"""
-    try:
-        import requests
+    """实时价兜底：东财掐连接时（ETF 接口尤其频繁）腾讯行情仍给得到同一天收盘价。
 
-        resp = requests.get(f"https://qt.gtimg.cn/q={_tencent_symbol(code)}", timeout=5)
-        price = float(resp.content.decode("gbk", "ignore").split("~")[3])
-        return price if price > 0 else None
-    except Exception as exc:
+    字段解析统一走 stock_selector.quote.tencent，这里不再重复一遍下标和单位。
+    """
+    try:
+        price = (tencent_quote.fetch([code]).get(str(code)) or {}).get("price")
+    except Exception as exc:   # 网络层异常要变成「缺价」而不是把整次诊断打挂
         logger.warning("腾讯实时价(%s) 失败: %s", code, exc)
         return None
+    return price if price and price > 0 else None
 
 
 # 场内基金（ETF/LOF）不在 stock_zh_a_hist 里，那条接口对 15/5 字头代码返回空表

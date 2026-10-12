@@ -62,7 +62,11 @@ def _ensure_select_result_columns(sync_conn) -> None:
     for col, ddl in (("strategy", "VARCHAR(64) DEFAULT ''"), ("asof", "VARCHAR(16) DEFAULT ''"),
                      ("price", "FLOAT"), ("score", "FLOAT"), ("rank_no", "INTEGER"),
                      ("risk_ex10_pp", "FLOAT"),
-                     ("buy_ref_price", "FLOAT"), ("buy_invalid_price", "FLOAT")):
+                     ("buy_ref_price", "FLOAT"), ("buy_invalid_price", "FLOAT"),
+                     ("risk_verdict", "VARCHAR(8) DEFAULT ''"),
+                     ("risk_reason", "VARCHAR(512) DEFAULT ''"),
+                     ("risk_shares", "INTEGER"), ("risk_amount", "FLOAT"),
+                     ("risk_fill_price", "FLOAT"), ("risk_slippage_bp", "FLOAT")):
         if col not in cols:
             sync_conn.execute(text(f"ALTER TABLE select_results ADD COLUMN {col} {ddl}"))
 

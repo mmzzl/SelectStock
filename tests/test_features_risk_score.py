@@ -155,7 +155,7 @@ def test_cache_invalidates_on_retrain(tmp_path):
 def test_relative_model_dir_resolves_to_repo_root():
     """settings.yaml 里写 "data/models"：相对路径必须按仓库根解析。
 
-    服务与 pytest 的工作目录都可能不同，按包目录解析会找不到模型而让 risk_filter 报错。
+    服务与 pytest 的工作目录都可能不同，按包目录解析会找不到模型而让风控的 ML 腿报错。
     """
     assert risk_score._resolve_dir("data/models") == ROOT / "data" / "models"
     assert risk_score.DEFAULT_MODEL_DIR == ROOT / "data" / "models"
@@ -170,13 +170,17 @@ def test_shipped_model_loads_and_scores(tmp_path):
     _, meta, thr = risk_score.load()                    # 缺省 model_dir
     assert list(meta["features"]) == FEATURE_NAMES
     assert thr < 0                                     # 阈值是"预测超额为负"的水位
-    assert selector._risk_gate({"enabled": True}) is risk_score
+    engine = selector._risk_engine({"enabled": True})
+    assert engine is not None and engine.cfg.ml_enabled
+    # ML 腿的数据需求要真的下发给数据源，否则规则拿不到列会静默不判分
+    assert engine.data_requirements()[1] == risk_score.required_rows()
 
 
-def test_selector_fails_loudly_when_enabled_without_model(monkeypatch):
+def test_selector_fails_loudly_when_enabled_without_model():
+    """启用风控却缺模型 = 故障：启动即报错，不能运行时静默放行把闸门变成摆设。"""
     from stock_selector.core import selector
 
     with pytest.raises(RuntimeError, match="train_risk_model"):
-        selector._risk_gate({"enabled": True, "model_dir": "/tmp/no-such-model-dir"})
-    assert selector._risk_gate(None) is None
-    assert selector._risk_gate({"enabled": False}) is None
+        selector._risk_engine({"enabled": True, "ml": {"model_dir": "/tmp/no-such-model-dir"}})
+    assert selector._risk_engine(None) is None
+    assert selector._risk_engine({"enabled": False}) is None

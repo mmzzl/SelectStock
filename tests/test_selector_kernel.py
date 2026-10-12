@@ -2,6 +2,7 @@
 
 import pandas as pd
 import pytest
+from pathlib import Path
 
 from stock_selector.datasource.base_source import BaseDataSource
 
@@ -17,7 +18,7 @@ def rising_df(rows=32, breakout=True):
         "high": [c * 1.005 for c in closes],
         "low": [c * 0.995 for c in closes],
         "close": closes,
-        "volume": [1000.0] * len(closes),
+        "volume": [20000.0] * len(closes),
     })
 
 
@@ -247,6 +248,34 @@ class TestUniverseExclusion:
         assert _is_excluded("景顺长城国证自由现金流ETF", keywords) is False
         assert _is_excluded("银华日利", keywords) is True
 
+    def test_st_keyword_hits_only_warning_st_names(self):
+        """"ST" 这个关键词的全部依据：全市场名字里含大写 ST 的必须恰好是风险警示股。
+
+        真数据校验，快照缺失就跳过（无假数据可编，编出来的名字证明不了零误伤）。
+        """
+        import glob
+        import re
+
+        files = sorted(glob.glob("data/market_snapshot/*.parquet"))
+        if not files:
+            pytest.skip("no market snapshot in this checkout")
+        import pandas as pd
+
+        names = pd.read_parquet(files[-1])["name"].astype(str)
+        hits = set(names[names.str.contains("ST", regex=False)])
+        prefixed = set(names[names.str.match(r"^\*?ST")])
+        assert hits == prefixed, f"误伤或漏剔：{sorted(hits ^ prefixed)[:5]}"
+        assert len(hits) > 100
+
+    def test_production_keywords_drop_st_names(self):
+        """配置里的 "ST" 要真在链路上生效：风险警示股既不进结果，也不进风控判分。"""
+        from stock_selector.core.selector import _load_config
+
+        ds = FakeSource(stocks=[{"code": "000001", "name": "平安银行"},
+                                {"code": "000016", "name": "*ST康佳A"}])
+        keywords = list(_load_config()["selector"]["exclude_name_keywords"])
+        assert {r.code for r in self.run(ds, keywords)} == {"000001"}
+
 
 class TestStrategyContract:
     def test_run_is_the_list_form_of_signal_at(self):
@@ -301,3 +330,75 @@ class TestStrategyLoader:
 
         names = StrategyLoader({}).load_all().names()
         assert "trend_rebound" in names and "box_oscillate" in names
+
+
+class TestRiskGateInKernel:
+    """策略只产生信号，信号必须先过风控才成为决策（内核侧接线，规则本身见 test_risk_module）。"""
+
+    def risk_cfg(self, **over):
+        cfg = config()
+        cfg["risk"] = {"enabled": True, "capital": 200000, "max_position_pct": 0.2,
+                       "min_avg_amount": 0, "max_slippage_bp": 1e9, "max_drift_bp": 1e9,
+                       "ml": {"enabled": False}}
+        cfg["risk"].update(over)
+        return cfg
+
+    def run(self, ds, **over):
+        from stock_selector.core.selector import run_select
+
+        return run_select(datasource=ds, config=self.risk_cfg(**over))
+
+    def test_allowed_signals_carry_final_decision(self):
+        results = self.run(FakeSource())
+        assert results
+        for r in results:
+            assert r.decision in ("allow", "adjust")
+            assert r.extra["risk_verdict"] == r.decision
+            assert r.extra["risk_action"] == "buy"
+
+    def test_position_cap_becomes_suggested_shares(self):
+        """额度 = 20 万 × 20% = 4 万，基准价 10.30 → 整手 3800 股。"""
+        results = self.run(FakeSource())
+        price = results[0].price
+        assert price == pytest.approx(10.3)
+        assert results[0].extra["risk_shares"] == int(40000 // (price * 100)) * 100 == 3800
+        assert results[0].extra["risk_fill_price"] > price      # 买单按预估滑点后的价
+
+    def test_limit_up_hit_is_dropped_not_output(self):
+        """涨停买不进：命中的票整只剔除，不会带着一个下不了单的信号出现在结果里。"""
+        frame = rising_df()
+        frame["lu"] = [False] * (len(frame) - 1) + [True]
+        assert self.run(FakeSource(frame=frame)) == []
+
+    def test_thin_liquidity_is_dropped(self):
+        # 假数据 volume=2 万手 ≈ 日均成交额 2000 万元：一只正常小盘票的量级
+        assert self.run(FakeSource(), min_avg_amount=5e7) == []
+        assert self.run(FakeSource(), min_avg_amount=5e6)       # 同数据在低下限下放行
+
+    def test_order_too_big_for_turnover_is_dropped(self):
+        """流动性下限只管「这票够不够大」，单子占比过高是另一道闸：1000 手 ≈ 103 万元日额，
+        建议单 4 万元占用 4% > 2%，票本身合格也吃不到。"""
+        frame = rising_df()
+        frame["volume"] = 1000.0
+        assert self.run(FakeSource(frame=frame)) == []
+
+    def test_ml_leg_asks_datasource_for_feature_columns(self):
+        """开启 ML 腿时必须把特征列需求下发给数据源，否则规则拿不到列会静默不判分。"""
+        ds = FakeSource()
+        cfg = self.risk_cfg()
+        cfg["risk"]["ml"] = {"enabled": True}
+        if not (Path(__file__).resolve().parent.parent / "data" / "models"
+                / "risk_ex10.joblib").is_file():
+            pytest.skip("模型未生成（data/ 不入库）")
+        from stock_selector.core.selector import run_select
+
+        run_select(datasource=ds, config=cfg)
+        assert ds.prepared["rows"] >= 700
+        assert "lu" in ds.prepared["columns"]
+
+    def test_without_risk_section_behaviour_is_unchanged(self):
+        """没配 risk: 时内核保持旧行为：不判风控、decision 字段留空。"""
+        from stock_selector.core.selector import run_select
+
+        results = run_select(datasource=FakeSource(), config=config())
+        assert results and all(r.decision == "" for r in results)

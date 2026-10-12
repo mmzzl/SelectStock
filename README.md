@@ -42,6 +42,10 @@ stock_selector/                  # 实现层：全部业务与算法
 ├── core/            # 框架层：策略契约 base_strategy / 插件加载 strategy_loader / 唯一内核 selector
 ├── strategies/      # 策略插件层：新增策略只在此目录加文件
 ├── datasource/      # 数据源层：parquet / mongo / ak / mock，统一 BaseDataSource 契约
+├── quote/           # 实时行情解析：tencent 快照（涨跌停价/换手/量比/五档，交易所口径）
+├── realtime/        # 盘中上行：session 交易时段 / bus redis 键契约 / poller 快照轮询成 tick 流
+├── risk/            # 风控层：snapshot 行情口径 / context 单票上下文 / sizing 仓位与滑点 / rules 五条规则 / engine 短路编排
+├── intraday/        # 盘中计算：bars 分钟条 / indicators talib 分钟指标 / signals 三类信号 / engine 信号→风控→决策 / store 落盘 / events 基本面事件
 ├── models/          # 标准化结果结构体 SelectResult
 ├── features/        # 指标与因子：base_columns 派生列 / window 12 因子 / modeling 拟合评估
 ├── backtest/        # 回测：engine 逐日撮合 / broker 资金与 T+1 / rules + rule_eval 规则 DSL / kernel_strategy 同源适配 / metrics / store
@@ -98,11 +102,14 @@ data/stock_kline/{code}.parquet           # 6631 只(5186 股+1445 基金) × 82
 5. 结果归位：策略可留空 `code/name/signal/strategy/price`，内核用取数上下文回填
    （code ← 循环变量，name ← 股票列表或 `ds.name_of(code)`，signal/strategy ← 策略名，
    price ← 基准日收盘价），`asof` 统一取 `ds.max_date()`。
-6. 任一结果带 `score` 时按分数降序重排并赋 `rank`；全无分数则保持产出顺序。
-7. 单只股票取数或策略求值异常：`tolerate_errors: true` 记警告继续，`false` 立即抛出；
+6. **信号先过风控，才成为决策**（`risk.enabled: true` 时）：命中的票逐只交给
+   `risk.RiskEngine`，被拦下的整只剔除、不进结果；放行的把结论（`allow`/`adjust`）、建议下单
+   股数、预估成交价与滑点写进 `extra` 和 `decision` 字段。细则见下一节《风控层》。
+7. 任一结果带 `score` 时按分数降序重排并赋 `rank`；全无分数则保持产出顺序。
+8. 单只股票取数或策略求值异常：`tolerate_errors: true` 记警告继续，`false` 立即抛出；
    股票池非空却 `loaded == 0` 视为数据源故障，抛 `RuntimeError`。
 
-结束时输出 `选股完成: 策略=… 股票池=… 有效=… 命中=… 失败=… 基准日=…`，
+结束时输出 `选股完成: 策略=… 股票池=… 有效=… 命中=… 风控拦截=… 失败=… 基准日=…`，
 基准日即 `ds.max_date()`，也就是这批信号对应的交易日。
 
 `SelectResult` 字段（前 4 个是对后端/前端的稳定契约，后面为可选增强）：
@@ -118,6 +125,140 @@ data/stock_kline/{code}.parquet           # 6631 只(5186 股+1445 基金) × 82
 | `price` | 基准日收盘价 |
 | `score` | 信号强度 0~1，策略未给则为 `None` |
 | `rank` | 名次，有评分时由内核按分数降序赋值 |
+| `decision` | 风控后的最终决策：`allow`（原样放行）/ `adjust`（放行但改了下单量）；被拦的信号不会出现在结果里，风控关闭时是空串 |
+
+### 风控层（`stock_selector/risk/`）
+
+**策略只产生信号，信号不等于要下单**——决策必须独立于策略。这一层回答的是「这个信号能不能吃、
+吃多少、按什么价吃」，五条规则按固定顺序执行、命中即短路：
+
+| 顺序 | 规则 | 拦掉什么 | 为什么排在这里 |
+|---|---|---|---|
+| 1 | `tradability` 涨跌停可成交性 | 涨停买不进、跌停卖不出 | 标的根本吃不到，后面的计算都是白费 |
+| 2 | `liquidity` 流动性下限 | 近 20 日日均成交额 < `min_avg_amount` 的小盘票 | 盘口薄，信号再好看也滑没了 |
+| 3 | `position` 单票仓位上限 | 超过 `总资金 × max_position_pct` 的部分（改成 `adjust`，不是剔除） | 先把下单量定下来，滑点才有单额可估 |
+| 4 | `slippage` 滑点预估 | 半价差 + 冲击成本 + 信号价漂移超阈值，或单额占日成交额超 `max_participation` | 免费快照有延迟，看到的价格不一定成交得到 |
+| 5 | `model` 买入风险分 | 预测 10 日超额低于剔除阈值的票（研究依据见《涨停与风险分》） | 要跑 700 根日线的特征，最贵，放最后 |
+
+模块分工：`snapshot` 统一行情口径，`context` 把一只票的日线+快照收敛成一个上下文，
+`sizing` 只算数（整手、上限、半价差、√冲击成本、漂移），`rules` 只判定，`engine` 只编排。
+单位口径全层一致：金额=元、成交量=手、市值=亿元（读取时即换算）、滑点=万分比。
+
+```python
+from stock_selector.risk import RiskEngine, build
+
+engine = RiskEngine.from_settings(config)      # 读 settings.yaml 的 risk: 子树
+engine.preflight()                             # 开了 ML 腿但模型不在 → 立刻报错，不静默放行
+decision = engine.review(build("000532", "buy", day="2026-10-09", kline=df))
+decision.verdict, decision.shares, decision.est_fill_price      # allow | adjust
+decision.reason                                # 中文理由，告警链路要原样说给用户
+```
+
+**行情口径为什么不能只读日线**：本地日线只有涨停标记 `lu`、**没有跌停列**，成交额自
+2026-05-21 起断供（全是 0，流动性退到 `volume × close × 100` 估算），涨跌停阈值还得分
+主板/创业/科创/北交所/ST/基金。所以涨跌停价、换手率、精确成交额取
+`data/market_snapshot/{日}.parquet` —— 交易所下发的原值，由 `scripts/fetch_market_snapshot.py`
+每个交易日 15:30 落盘（整轮 12 秒；命中率不足 60% 直接拒绝写出残缺文件）。缺文件时的降级
+顺序写死在 `risk/snapshot.py`，规则层不再各判各的：①当日落盘快照 → ②实时快照（腾讯，只给
+当天；回测/盘后用 `allow_live=False` 关掉）→ ③都没有则字段为 `None`，规则**跳过判定**而不是
+猜一个价。盘后内核按每只票自己的基准日取数，所以历史日期的信号不会混进今天的行情。
+
+本系统只做建议，不接券商下单：风控的输出是「建议股数 + 预估成交价 + 中文理由」，落库列
+`risk_verdict/risk_reason/risk_shares/risk_amount/risk_fill_price/risk_slippage_bp` 由后端
+薄代理原样搬运，App 只展示（架构红线 4：算术不下沉到界面）。被拦下的票不进结果列表，所以 App
+上每一只都是"这单真能成交"的口径；内核按规则名汇总拦截数（`风控拦截明细: liquidity=1 model=5`），
+复盘时能看清是谁拦的。
+
+### 盘中实时链路（`stock_selector/realtime/`）
+
+需求文档里的「行情服务 → 消息队列 → 策略引擎」在本机落地为
+「腾讯快照轮询 → redis stream → 盘中引擎」：没有正式行情授权，免费快照是可用口径里最快的一种
+（3 只一拍 0.07 秒，全市场一拍约 11 秒）。**换真实 Level-1 源只替换 `quote/tencent.py` 的
+`fetch`**，redis 键约定与下游引擎一行都不用改。
+
+redis 用本机已有的 7.2.5（免密，**db 5**，与 celery 的 db 3、爬虫的 db 0 隔开）：
+
+| 键 | 类型 | 内容 |
+|---|---|---|
+| `rt:quote` | Hash(code → 快照 JSON) | 最新行情，策略引擎随手查当前价，不必等下一拍；TTL 4 小时 |
+| `rt:ticks` | Stream | **只有变化才发**的 tick 流，`MAXLEN ~` 限长（默认 2 万条） |
+| `rt:decisions` | Stream | 过完风控的最终决策（放行与被拦的都进），告警进程消费；限长 5000 |
+| `rt:heartbeat` | String(JSON) | 轮询服务上一轮统计（轮数/命中/耗时/状态） |
+| `rt:engine-heartbeat` | String(JSON) | 策略引擎上一轮统计（读到/回放/评估/决策/拦截/耗时） |
+| `rt:metric:{code}` | Hash | 盘中实时指标，由策略引擎写、告警与前端读 |
+
+```bash
+python scripts/quote_service.py --code 600000 000001        # 调试自选
+python scripts/quote_service.py --watchlist data/watchlist.txt --interval 5
+python scripts/quote_service.py --all --interval 15         # 全市场（限流风险自担）
+python scripts/quote_service.py --status                    # 只看链路心跳
+```
+
+轮询的一拍只有三种结果，都写进心跳，不静默：`ok`（发了 N 条变化）、`market_closed`
+（快照时间戳不是今天 → 休市/未开盘，**一条都不发**：把上个交易日的价当实时价推给策略比不发
+更危险）、`fetch_failed`（整轮为空 → 数据源故障，指数退避到 60 秒上限，恢复即回到正常节奏）。
+交易时段判断在 `realtime/session.py`（09:25–11:30、13:00–15:05，周末直接睡），节假日不硬编码
+日历表——靠交易所自己在快照里打的更新时间戳判定，比会过期的调休表稳。
+
+### 盘中策略引擎与告警（`stock_selector/intraday/`）
+
+链路的后半段，两个各自独立的常驻进程：
+
+```
+rt:ticks ─► intraday_engine：累计量还原分钟条 ─► talib 分钟指标 ─► 信号 ─► risk.RiskEngine
+                                                                        │
+                              rt:metric:{code} ◄──（指标）──────────────┤
+                              data/intraday_decisions/{date}.parquet ◄──┤─► rt:decisions ─► alert_pusher ─► 钉钉/企业微信
+```
+
+**风控只有一套**：盘中信号和盘后选股交给同一个 `RiskEngine`、同样五条规则，所以「盘中说可以买」
+与「选股建议买」不会是两套数。被拦下的信号照样落盘、照样进 `rt:decisions`（`verdict=block` +
+拦它的规则名 + 中文理由），只是不推消息；告警摘要单列一段「风控已拦截（不给下单建议，原因如下）」
+并写清风控的理由——用户要能区分「没有机会」和「有机会但下不了单」，这两种情况的后续动作完全不同。
+
+三类监控的 22 种 `kind`（阈值全在 `settings.yaml` 的 `intraday.signals`，`--kinds` 可只开子集）：
+
+| 类别 | 信号种类 | 判据来源 |
+|---|---|---|
+| 技术面 | 均线金叉/死叉、MACD 金叉/死叉、RSI 超卖回升/超买、布林上下轨突破、放量拉升、放量大跌、量比放大、换手过高、上穿 20 日压力位、跌破 20 日支撑位 | 分钟条 talib 指标（参数与日线宽表同一套：SMA 5/10/20/60、MACD 12/26/9、RSI 14、BBANDS 20/2/2）+ 形态列 `res20`/`sup20` |
+| 盘口 | 打单流入/流出、五档托单/压单 | 外盘−内盘的**相邻拍增量** × 现价（滚动 `flow_window` 分钟）；Σ买档量 / Σ卖档量 |
+| 基本面 | 利多/利空事件 | mongo `eastmoney_news.watch_target` 当日多空目标（十分钟刷一次） |
+| 成交性 | 触及涨停/跌停 | 快照里交易所给的涨跌停价，贴板标记由 `risk/snapshot.normalize` 统一算 |
+
+两条口径值得单说：分钟指标只在新的分钟条**收口**时重算（每票每分钟一次），交叉类一律在收口条上
+判——未收口那根的量还会继续涨，用它判「放量」就是同一分钟报三次、每次倍数都不一样；价格类信号
+（量比/换手/触板/事件）直接读 `rt:quote` 的最新快照，不跑 talib。
+
+全市场 6600 只的盘中计算很容易变成自我 DoS，预算全部写在 `intraday:` 里：`max_eval` 限制一轮跑
+talib 的只数，`cooldown` 抑制同票同信号重复刷屏，`replay_horizon` 让启动时回放的旧 tick **只补
+分钟条、不产信号**（那些价格是几分钟前的，此刻报出来只会诱导一个下不到的单）。日线宽表（流动性/
+冲击/风险分/压力位都要它）只在真有信号要过风控时才读，按 `kline_cache` 只数 LRU 缓存。
+
+```bash
+python scripts/quote_service.py --all --interval 15              # 1) 行情上行
+python scripts/intraday_engine.py --all --max-eval 300 --mongo   # 2) 指标 → 信号 → 风控 → 决策
+python scripts/intraday_engine.py --status                       #    看引擎心跳
+export ALERT_CHANNEL=dingtalk ALERT_WEBHOOK_URL='…' ALERT_WEBHOOK_SECRET='…'
+python scripts/alert_pusher.py --dry-run                         # 3) 先看消息，确认无误再常驻
+```
+
+上面三个脚本已由 supervisor 托管常驻（`selectstock-quote-service` / `-intraday-engine` /
+`-alert-pusher`，配置在 `deploy/`），手工命令用于调试与冒烟；告警那份因为仓库里不带密钥，
+默认 `autostart=false`，填好 webhook 才需要 `supervisorctl start`。
+
+告警进程**只排版不算术**：建议股数、预估成交价、滑点全部来自引擎与风控，它做单位换算和攒批
+（默认 30 秒合成一条 markdown，避免刷屏、也避开机器人 20 条/分钟限流），一批超过 40 条
+（`--max-lines`）时每段截断并指回当日决策文件——机器人对消息长度有上限，超长消息是整条拒收，
+比少列几条更糟。发送失败重试两次就放弃（决策已落盘，消息可丢）。启动时游标放在**流尾**，重启不会
+把上一交易日的存量当新信号重推（要重发用 `--replay`）。密钥只从环境变量读，日志里只打主机名——
+`access_token` 与 `sign` 都在 URL query 里，打出来等于泄露机器人。需求文档的「调用券商 API 下单」
+按约定**不做**：本系统只推告警。
+
+复盘落盘用 parquet（一天一个文件，同 `(code, kind, minute)` 后写覆盖先写，重跑当天不产生重复行）
++ 可选 mongo，而不是需求文档里的 TDengine：本机内存已经紧张，而复盘的读法是「按天全量扫 + 按代码
+过滤」，parquet 分区文件正好对上，和 `data/stock_kline`、`data/market_snapshot` 是同一套习惯。
+指标列一律带中文理由与 `source`（`live` = 完整快照，`tick` = 只有 tick 的降级快照，此时滑点走
+保守下限而不是假装看得见盘口）。
 
 ### 三种用法
 
@@ -259,6 +400,23 @@ selector:
   default_strategies: ["trend_rebound", "box_oscillate"]
   tolerate_errors: true    # 单票失败是否继续
   stock_limit: 0           # 股票池上限，0=不限（调试常用 200）
+risk:                      # 信号→决策的独立闸门，见《风控层》
+  enabled: true
+  capital: 200000          # 账户总资金（元）：单票上限与滑点都按它折算
+  max_position_pct: 0.2
+  min_avg_amount: 30000000 # 近 20 日日均成交额下限（元）
+  max_slippage_bp: 100     # 预估滑点上限（万分比）
+  use_limit: true          # 涨跌停可成交性
+  ml: {enabled: true, model_dir: "data/models"}   # 买入风险分腿
+intraday:                # 盘中计算引擎，见《盘中策略引擎与告警》
+  interval: 5            # 读 rt:ticks 的间隔（秒）
+  max_eval: 300          # 一轮最多几只跑 talib（全市场盘中的自我限流阀）
+  cooldown: 300          # 同票同信号的抑制窗口（秒）
+  replay_horizon: 60     # 旧过这个秒数的 tick 只补分钟条、不产信号
+  flow_window: 5         # 打单流入的滚动窗口（分钟）
+  signals:               # 信号阈值：换手/量比/放量倍数/突破确认幅度…全部外置
+    min_bars: 60         # 分钟条预热根数，不足只跑价格类信号
+    kinds: null          # 给了就是白名单，只跑列出的种类
 strategy_params:
   trend_rebound: {period: 20, pullback_pct: 0.05}
 server: {host: "0.0.0.0", port: 8000}
@@ -490,6 +648,12 @@ python scripts/backtest_main.py --strategy trend_rebound --universe 500 \
 两个刻意为之的细节：`score` 用三位小数展示（相邻名次常只差 0.001，两位会全显示成 1.00 而看不出排序）；
 `created_at` 是 naive UTC，展示前转本地并压到分钟，否则比本机时间早 8 小时。
 
+风控决策字段走的是同一条链，没有第二套口径：内核 `SelectResult.extra` → 后端 `risk_verdict/
+risk_reason/risk_shares/risk_amount/risk_fill_price/risk_slippage_bp` 六列（同样要过写入白名单，
+漏声明就静默丢值）→ `logic/view.js::orderPlanText/riskAdjustText` → 结果页一行
+「建议 3800 股 · 3.9 万元 · 预估成交 10.31 · 预估滑点 12.5bp」。前端只做单位换算与文案拼接，
+不重算下单量；风控关闭时跑出的旧批次这些列全空，页面上这一行整行不显示（不是显示成「建议 0 股」）。
+
 ### 已知限制（截至 2026-09-24）
 
 已解决（P1）：判据同源、`score/rank/asof/price/strategy` 回填、策略声明所需列与行数
@@ -516,7 +680,7 @@ python scripts/backtest_main.py --strategy trend_rebound --universe 500 \
 - `settings.yaml` 的 `server.port` 默认 8000，本机该端口被一个无关服务占用，实际部署请用
   `--port` 覆盖（如 18000/18002）并让后端 `SELECTION_PLUGIN_BASE_URL` 指向同一端口。
 
-## 涨停与风险分：买入剔除层（`selector.risk_filter`）
+## 涨停与风险分：买入剔除层（`risk.ml`）
 
 2026-10-11 那一轮涨停/因子研究的交付物。研究本身想回答的是"能不能用机器学习替掉手写判据去
 赚钱"，结论是**能赚的那部分是"别买"，不是"买什么"**。
@@ -547,9 +711,10 @@ HistGradientBoosting 走 2019-20/2021-22/2023-24/2025-26 四折 walk-forward，�
 模型没有新信息，它学到的就是"别买高位刚爆过量那批"（最低分票 pos60≈0.90、65-70% 在板后），
 但这条负面信息在**没有位置过滤的池上**（trend_rebound、自选股、mongo 规则策略）值 +6.8%/年量级。
 
-**接线**：`settings.yaml` 的 `selector.risk_filter.enabled: true`（已默认开启）。命中的票在
-出结果前过一遍 `risk_score.decide()`，预测 10 日超额低于阈值（`reject_threshold_ex10 = -0.0037`，
-即样本外分的后 30% 分位）的直接剔除，保留的把分数写进 `extra.risk_ex10_pp`（百分点）。
+**接线**：`settings.yaml` 的 `risk.ml.enabled: true`（已默认开启，2026-10-12 从
+`selector.risk_filter` 归入风控层，见下一节）。命中的票在出结果前过一遍 `risk_score.decide()`，
+预测 10 日超额低于阈值（`reject_threshold_ex10 = -0.0037`，即样本外分的后 30% 分位）的直接剔除，
+保留的把分数写进 `extra.risk_ex10_pp`（百分点）。
 **只剔不排**——分数不参与 `score`/`rank`。
 
 ```bash
@@ -694,7 +859,7 @@ python scripts/analyze_news_llm.py --stats trend --code BK0464 --start 2026-09-0
 
 ## 后台部署与运维（supervisor + nginx）
 
-整套后台由 supervisor 常驻五个进程，对外经 nginx 的 8080 端口反代（nginx 容器复用 `lex_math_new` 项目的 `lexmath-nginx`）。所有配置的源副本都在 `deploy/`，改完再拷去生效位置。
+整套后台由 supervisor 常驻八个进程，对外经 nginx 的 8080 端口反代（nginx 容器复用 `lex_math_new` 项目的 `lexmath-nginx`）。所有配置的源副本都在 `deploy/`，改完再拷去生效位置。
 
 | supervisor program | 端口 | 职责 | 配置副本 |
 |---|---|---|---|
@@ -703,12 +868,17 @@ python scripts/analyze_news_llm.py --stats trend --code BK0464 --start 2026-09-0
 | `selectstock-plugin-selector` | 8002 | 选股内核的 HTTP 适配层，后端薄代理 | `deploy/selectstock-plugin-selector.conf` |
 | `selectstock-plugin-portfolio` | 8001 | 持仓诊断插件（判定与收益公式都在这里） | `deploy/selectstock-plugin-portfolio.conf` |
 | `selectstock-scheduler` | — | 采集调度：APScheduler 跑 `config/inputs.conf` 的 `script://` 任务 | `deploy/selectstock-scheduler.conf` |
+| `selectstock-quote-service` | — | 盘中快照轮询 → Redis db5 的 `rt:quote` / `rt:ticks` | `deploy/selectstock-quote-service.conf` |
+| `selectstock-intraday-engine` | — | 盘中策略计算：分钟条 → 信号 → 风控 → `rt:decisions` + 当日 parquet | `deploy/selectstock-intraday-engine.conf` |
+| `selectstock-alert-pusher` | — | 决策 → 钉钉/企业微信摘要；**仓库副本 `autostart=false`**，填好 webhook 才开 | `deploy/selectstock-alert-pusher.conf` |
+
+**盘中三进程只在交易时段有用**：收盘后它们空转（没有新 tick 就没有决策），不产出内容也不影响盘后链路。告警进程的 `ALERT_WEBHOOK_URL` / `ALERT_WEBHOOK_SECRET` 是机器人凭据，**只写 `/etc/supervisor/conf.d/` 里那份**，仓库这份留空并关着自启；它和后端 `conf/notify_channels.json` 的推送渠道是两套东西，别改错地方。
 
 **端口为什么不是 8000**：文档约定后端占 8000，但本机 8000 已被 `/data/work/lex_math_new/backend` 占用，所以 API 改用 **8010**，对外统一走 nginx **8080**。换端口只需同时改 `deploy/selectstock-api.conf` 的 `--port` 与 `deploy/nginx/selectstock.conf` 的 upstream。
 
 ### 前置条件
 
-- Redis 在 `127.0.0.1:6379`，回测任务用 **db 3**（与旧 `stock_select` 项目分库隔离），broker 与 result 同库
+- Redis 在 `127.0.0.1:6379`，回测任务用 **db 3**（与旧 `stock_select` 项目分库隔离），broker 与 result 同库；盘中实时链路用 **db 5**（`rt:*` 一组键，见《盘中策略引擎与告警》）
 - MongoDB（`lexmath-mongo` 容器）可达：内核从 `stock_kline` 读行情，结果写回 `eastmoney_news`
 - Python 依赖：API 侧 `celery / redis / psutil` 见 `stock_selector_api/pyproject.toml`；worker 还要仓库根 `requirements.txt` 里的内核依赖（pandas / pyarrow / pymongo 等）
 
@@ -725,10 +895,10 @@ python3 -m pip install -r requirements.txt              # worker 侧：回测与
 python3 -c "import secrets,pathlib; p=pathlib.Path('stock_selector_api/.env'); \
 p.write_text('JWT_SECRET='+secrets.token_urlsafe(48)+chr(10)) if not p.exists() else print('已存在，跳过')"
 
-# 3) supervisor 五个常驻进程
+# 3) supervisor 八个常驻进程（盘中告警那份 autostart=false，填好 webhook 再 start）
 sudo cp deploy/selectstock-*.conf /etc/supervisor/conf.d/
 sudo supervisorctl reread && sudo supervisorctl update
-sudo supervisorctl status                               # 全部 RUNNING 才算起来
+sudo supervisorctl status                               # 除告警进程外全部 RUNNING 才算起来
 
 # 4) nginx 反代（复用 lexmath-nginx 容器；compose 里需保留 "8080:8080" 端口映射）
 cp deploy/nginx/selectstock.conf /data/work/lex_math_new/deploy/nginx/conf.d/selectstock.conf

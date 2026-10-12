@@ -24,13 +24,21 @@ async def test_enriched_fields_roundtrip():
         "signal": "trend_rebound", "reason": "回踩 MA20",
         "strategy": "trend_rebound", "asof": "2026-09-24",
         "price": 11.2, "score": 0.62, "rank_no": 1, "risk_ex10_pp": -0.21,
-        "buy_ref_price": 10.85, "buy_invalid_price": 10.31})
+        "buy_ref_price": 10.85, "buy_invalid_price": 10.31,
+        "risk_verdict": "adjust", "risk_reason": "[position] 单票上限 4 万元，建议改为 3800 股",
+        "risk_shares": 3800, "risk_amount": 39140.0,
+        "risk_fill_price": 10.31, "risk_slippage_bp": 12.5})
     row = (await select_results_repo.list_by_job(job["job_id"]))[0]
     assert (row["strategy"], row["asof"], row["rank_no"]) == ("trend_rebound", "2026-09-24", 1)
     assert row["price"] == 11.2 and row["score"] == 0.62
     # 风险分要过得了 schema 白名单：漏了字段名会静默丢值，接口返回里永远看不到
     assert row["risk_ex10_pp"] == -0.21
     assert row["buy_ref_price"] == 10.85 and row["buy_invalid_price"] == 10.31
+    # 风控决策同理：app 端「建议买多少股、预估什么价成交」全靠这几列
+    assert row["risk_verdict"] == "adjust" and row["risk_shares"] == 3800
+    assert row["risk_amount"] == 39140.0 and row["risk_fill_price"] == 10.31
+    assert row["risk_slippage_bp"] == 12.5
+    assert row["risk_reason"].startswith("[position]")
 
 
 async def test_find_running_and_list():
@@ -58,13 +66,16 @@ def test_ensure_select_result_columns_upgrades_old_table():
         _ensure_select_result_columns(conn)          # 幂等：跑两次不报错
         cols = {c["name"] for c in inspect(conn).get_columns("select_results")}
         conn.execute(text("INSERT INTO select_results (job_id, code, strategy, asof, price, score,"
-                          " rank_no, risk_ex10_pp, buy_ref_price, buy_invalid_price)"
+                          " rank_no, risk_ex10_pp, buy_ref_price, buy_invalid_price, risk_verdict,"
+                          " risk_shares, risk_amount, risk_fill_price, risk_slippage_bp)"
                           " VALUES ('j', '000001', 'trend_rebound', '2026-09-24', 11.2, 0.62, 1,"
-                          " -0.21, 10.85, 10.31)"))
+                          " -0.21, 10.85, 10.31, 'allow', 3800, 39140.0, 10.31, 12.5)"))
         assert conn.execute(text("SELECT rank_no FROM select_results")).scalar() == 1
         assert conn.execute(text("SELECT risk_ex10_pp FROM select_results")).scalar() == -0.21
-    assert {"strategy", "asof", "price", "score", "rank_no", "risk_ex10_pp",
-            "buy_ref_price", "buy_invalid_price"} <= cols
+        assert conn.execute(text("SELECT risk_shares FROM select_results")).scalar() == 3800
+    assert {"strategy", "asof", "price", "score", "rank_no", "risk_ex10_pp", "buy_ref_price",
+            "buy_invalid_price", "risk_verdict", "risk_reason", "risk_shares", "risk_amount",
+            "risk_fill_price", "risk_slippage_bp"} <= cols
 
 
 def test_ensure_diag_result_columns_upgrades_old_table():

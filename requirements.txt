@@ -22,3 +22,6 @@ zai-sdk>=0.2.3
 # Naive Bayes 训练 scripts/train_bayes.py + models/（连板吸筹效应识别）
 scikit-learn>=1.4
 joblib>=1.3
+
+# 盘中实时链路 scripts/quote_service.py（redis 作消息队列与行情缓存）
+redis>=5.0

@@ -134,17 +134,45 @@ def _rank(results: list[SelectResult]) -> list[SelectResult]:
     return results
 
 
-def _risk_gate(risk_cfg: dict | None):
-    """按配置决定是否启用买入风险剔除；未启用返回 None。
+def _risk_engine(risk_cfg: dict | None):
+    """按配置装配风控引擎；`risk.enabled: false`（或没有 `risk:` 段）时返回 None。
 
-    启用却缺模型时会报错而不是静默不过滤——"配置说要用风控但实际没用上"必须是故障。
+    引擎的 ML 腿要读模型，这里提前 `preflight()` 校验一次：模型缺失要在启动时报错，
+    而不是逐只股票反复抛、或干脆静默放行——"配置说要用风控但实际没用上"必须是故障。
     """
+    from ..risk import RiskEngine
+
     if not risk_cfg or not risk_cfg.get("enabled"):
         return None
-    from ..features import risk_score
+    engine = RiskEngine(risk_cfg)
+    engine.preflight()
+    return engine
 
-    risk_score.load(risk_cfg.get("model_dir"))   # 提前校验，避免逐只股票反复报错
-    return risk_score
+
+def _risk_review(engine, code: str, name: str, df, hits: list[SelectResult],
+                 counters: dict) -> list[SelectResult]:
+    """一股票的信号先过风控再进结果：被拦下的整批剔除，放行的把决策字段写进 extra。
+
+    基准日取**这只票自己最后一根日线**（停牌票的行情口径要跟着它的最后一天走），并且
+    不回落实时快照（`allow_live=False`）：同一份数据跑两次必须得到同一批结果，否则选股
+    不可复现，盘后批判定还会拿今天的涨跌停价去判昨天的信号。
+    """
+    from ..risk import build as build_context
+
+    day = str(df["date"].iloc[-1])[:10] if "date" in df.columns else ""
+    price = round(float(df["close"].iloc[-1]), 4) if "close" in df.columns else None
+    ctx = build_context(code, "buy", name=name, day=day, kline=df,
+                        allow_live=False, signal_price=price)
+    decision = engine.review(ctx)
+    if decision.blocked:
+        counters[decision.blocked_by or "risk"] = counters.get(decision.blocked_by or "risk", 0) + 1
+        logger.info("风控拦截 %s: %s", code, decision.reason)
+        return []
+    extra = decision.extra()
+    for r in hits:
+        r.decision = decision.verdict
+        r.extra.update(extra)
+    return hits
 
 
 def run_select(
@@ -161,9 +189,11 @@ def run_select(
         config: 注入的配置字典；None 则加载 settings.yaml。
         as_json: 为 True 时返回 JSON 字符串，否则返回 list[SelectResult]。
 
-    可选风控：`selector.risk_filter.enabled: true`（当前默认开启）时，命中的票会先过一遍
-    买入风险分（见 features/risk_score.py），预测 10 日超额低于阈值的直接剔除，保留的把分数
-    写进 `extra.risk_ex10_pp`。只剔不排；模型缺失时 `_risk_gate` 直接报错，不会静默不过滤。
+    风控：`risk.enabled: true`（当前默认开启）时，命中的信号**先过风控再输出决策**——
+    涨跌停可成交性、流动性下限、单票仓位上限、滑点预估、买入风险分五条规则按序短路，
+    被拦下的整只剔除，放行的把决策（结论/建议股数/预估成交价/滑点/理由）写进 `extra`。
+    策略只产生信号，能不能成为决策由 `stock_selector/risk/` 独立判定；模型缺失时
+    `_risk_engine` 直接报错，不会静默不过滤。
 
     Returns:
         list[SelectResult] 或 JSON 字符串。
@@ -175,8 +205,8 @@ def run_select(
     config = config or _load_config()
     params = config.get("strategy_params") or {}
     selector_cfg = config.get("selector") or {}
-    risk_cfg = selector_cfg.get("risk_filter") or {}
-    risk = _risk_gate(risk_cfg)
+    risk_cfg = config.get("risk") or {}
+    risk = _risk_engine(risk_cfg)
     # 非选股对象（货币/债券 ETF）按名字剔，见 settings.yaml 里的实测依据
     exclude = list(selector_cfg.get("exclude_name_keywords") or [])
 
@@ -193,8 +223,9 @@ def run_select(
         # 策略声明的数据需求下发给数据源，避免剪列后策略取不到指标列而静默 0 命中
         columns, rows = _requirements(instances)
         if risk is not None:
-            columns = list(dict.fromkeys(columns + risk.required_columns()))
-            rows = max(rows, risk.required_rows())
+            ml_columns, ml_rows = risk.data_requirements()
+            columns = list(dict.fromkeys(columns + ml_columns))
+            rows = max(rows, ml_rows)
         ds.prepare(columns=columns, rows=rows)
 
         stock_list = ds.get_stock_list()
@@ -206,8 +237,7 @@ def run_select(
         results: list[SelectResult] = []
         loaded = 0
         failed = 0
-        risk_dropped = 0        # 被买入风险分剔掉的命中条数
-        risk_unknown = 0        # 历史太短/缺列导致无法判分的股票数
+        risk_gates: dict[str, int] = {}   # 各条风控规则拦了多少只（复盘看这个就知道闸门在拦什么）
         excluded = 0            # 按名字剔出选股池的非选股标的（货币/债券 ETF）
 
         # 3. 遍历股票取数一次，执行全部目标策略
@@ -255,18 +285,9 @@ def run_select(
                         r.price = round(float(df["close"].iloc[-1]), 4)
                     stock_hits.append(r)
 
-            # 3b. 买入风险分：只剔不排。分数不可得（历史太短）时放行，不猜
+            # 3b. 风控闸门：策略只产生信号，先过风控再输出决策（被拦的整只剔除）
             if risk is not None and stock_hits:
-                rejected, value = risk.decide(df, risk_cfg.get("model_dir"))
-                if rejected:
-                    risk_dropped += 1
-                    logger.info("风险剔除 %s: 预测10日超额 %+.2fpp", code, 100 * value)
-                    continue
-                if value is None:
-                    risk_unknown += 1
-                else:
-                    for r in stock_hits:
-                        r.extra["risk_ex10_pp"] = round(100 * value, 2)
+                stock_hits = _risk_review(risk, code, stock_name, df, stock_hits, risk_gates)
             results.extend(stock_hits)
 
         asof = ds.max_date() or ""
@@ -282,12 +303,13 @@ def run_select(
                 f"失败 {failed} 次），请检查 datasource.type 配置与数据是否已生成"
             )
         if risk is not None:
-            logger.info("风险分: 剔除=%d 无法判分=%d 阈值=%.6f",
-                        risk_dropped, risk_unknown,
-                        risk.load(risk_cfg.get("model_dir"))[2])
+            detail = " ".join(f"{name}={n}" for name, n in sorted(risk_gates.items())) or "无"
+            logger.info("风控拦截明细: %s（合计 %d 只）", detail, sum(risk_gates.values()))
         logger.info(
-            "选股完成: 策略=%s 股票池=%d 有效=%d 剔除非选股标的=%d 命中=%d 失败=%d 基准日=%s",
-            target, len(stock_list), loaded, excluded, len(results), failed, ds.max_date(),
+            "选股完成: 策略=%s 股票池=%d 有效=%d 剔除非选股标的=%d 命中=%d 失败=%d "
+            "风控拦截=%d 基准日=%s",
+            target, len(stock_list), loaded, excluded, len(results), failed,
+            sum(risk_gates.values()), ds.max_date(),
         )
     finally:
         if owns_source:

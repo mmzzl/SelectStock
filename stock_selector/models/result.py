@@ -22,6 +22,7 @@ class SelectResult:
     price: float | None = None   # 基准日收盘价
     score: float | None = None   # 信号强度 0~1，用于排序；策略未给则为 None
     rank: int | None = None      # 名次：结果里有任一评分时由内核按分数降序赋值，否则保持产出顺序
+    decision: str = ""           # 风控后的最终决策：allow | adjust（block 的信号不会出现在结果里）
 
     def to_dict(self) -> dict:
         """转为可 JSON 序列化的字典。"""

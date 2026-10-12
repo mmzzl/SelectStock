@@ -26,3 +26,11 @@ class SelectResultCreate(BaseModel):
     risk_ex10_pp: float | None = None    # 买入风险分（百分点），闸门判不了时为 None
     buy_ref_price: float | None = None       # 买点参考位（策略判据里的均线/箱沿）
     buy_invalid_price: float | None = None   # 跌破它则本次信号失效
+    # 风控决策：内核五条规则放行后的最终口径，被拦下的票不会出现在这里。
+    # 空串/None 表示这批结果是风控关闭时跑的（不能落成 0，0 是"建议买 0 股"）。
+    risk_verdict: str = Field(default="", max_length=8)
+    risk_reason: str = Field(default="", max_length=512)
+    risk_shares: int | None = None
+    risk_amount: float | None = None
+    risk_fill_price: float | None = None
+    risk_slippage_bp: float | None = None
