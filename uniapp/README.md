@@ -33,7 +33,7 @@
 5. 验证地址注入是否进了包（构建期配置一律走 `VITE_*` + `import.meta.env`，见 `.env.production`）：
    `unzip -p select-stock.apk 'assets/apps/__UNI__9BE0E99/www/app-service.js' | grep -o 'baseUrl:"[^"]*" \|url:"w[^"]*"'`
 
-真机注意：`VITE_API_BASE` 用的是公网域名 `https://www.luro.uno`（Cloudflare + `cloudflared` 隧道 → 本机 nginx 8080 → `:8010`），外网/流量下也能连，且 HTTPS 规避了 Android 9+ 的明文流量限制；隧道不可用时可临时改回 `http://192.168.10.83:8080`（须与后端同局域网）。**WS 注意**：Cloudflare 免费代理约 100 秒空闲即断开，而 `logic/ws.js` 只在收到服务端消息时回 `pong`、自己不发 `ping`，服务端也不主动 `ping`，所以静默一段时间后连接会被切断再走指数退避重连（能自愈，但会反复重连）；要长期稳定需加客户端定时 `ping`。快速验证可跳过打包，菜单 运行 → 运行到手机或模拟器（标准调试基座）。HBuilderX 日志在 `~/.local/share/HBuilder X/.log`，`cli logcat pack` 常为空。
+真机注意：`VITE_API_BASE` 用的是公网域名 `https://www.luro.uno`（Cloudflare + `cloudflared` 隧道 → 本机 nginx 8080 → `:8010`），外网/流量下也能连，且 HTTPS 规避了 Android 9+ 的明文流量限制；隧道不可用时可临时改回 `http://192.168.10.83:8080`（须与后端同局域网）。**WS 注意**：保活分两层。服务端 uvicorn 默认每 20 秒发 WS **协议层** ping（`ws_ping_interval=20`，`websockets` 实现），浏览器和原生基座都会自动回 pong，所以隧道并不会因为页面安静被掐（2026-10-12 实测：客户端一帧不发也能连着 165 秒没断，之前记的「Cloudflare 100 秒空闲断开」在这条链路上不成立）。`logic/ws.js` 另外每 20 秒发一帧**应用层** `{"type":"ping"}`（`/ws/notify` 回 `pong`），价值是客户端自己发现半开连接——隧道悄悄断了不会触发 `onclose`，页面就再也不更新；连续 2 拍收不到 `pong` 就主动拆掉重连。**发送口径要小心**：uni 的 `SocketTask.send()` 先取 `options.data`（h5 与 App 运行时都是），裸 `WebSocket.send()` 只认字符串——传错边等于发出 `undefined`，首帧鉴权根本到不了服务端，表现是无限重连；`createNotifySocket` 用 `objectPayload` 区分两端，默认按 `globalThis.uni.connectSocket` 是否存在来判断。快速验证可跳过打包，菜单 运行 → 运行到手机或模拟器（标准调试基座）。HBuilderX 日志在 `~/.local/share/HBuilder X/.log`，`cli logcat pack` 常为空。
 
 ## 手动冒烟清单（双端）
 - [ ] 未登录访问任一 Tab → 登录页；登录成功进持仓；退出回登录
