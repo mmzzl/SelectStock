@@ -66,6 +66,10 @@ class FakeRedis:
     def hgetall(self, key):
         return dict(self.hashes.get(key, {}))
 
+    def hdel(self, key, *fields):
+        bucket = self.hashes.get(key, {})
+        return sum(1 for field in fields if bucket.pop(str(field), None) is not None)
+
     def hmget(self, key, fields):
         bucket = self.hashes.get(key, {})
         return [bucket.get(str(f)) for f in fields]

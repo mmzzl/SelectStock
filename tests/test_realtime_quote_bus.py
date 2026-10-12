@@ -129,6 +129,20 @@ def test_trading_window_margins(moment, expected):
     assert session.in_trading_window(at(moment)) is expected
 
 
+@pytest.mark.parametrize("moment,expected", [
+    ("2026-10-12 09:25:30", "2026-10-12 09:25:00"),
+    ("2026-10-12 11:00:00", "2026-10-12 09:25:00"),
+    ("2026-10-12 13:00:10", "2026-10-12 13:00:00"),
+    ("2026-10-12 11:30:00", None),          # 午间休市：没有「本段开盘时刻」
+    ("2026-10-12 15:30:00", None),
+    ("2026-10-11 09:30:00", None),          # 周日
+])
+def test_window_start_is_the_current_segment(moment, expected):
+    """看门狗用它算开盘宽限：只有「正在时段里」才有起点，盘外返回 None。"""
+    start = session.window_start(at(moment))
+    assert (None if start is None else start.strftime("%Y-%m-%d %H:%M:%S")) == expected
+
+
 def test_sleep_targets_next_window_and_is_capped():
     assert session.seconds_to_next_window(at("2026-10-12 09:00:00")) == 25 * 60
     assert session.seconds_to_next_window(at("2026-10-12 12:00:00")) == 60 * 60
@@ -238,3 +252,74 @@ def test_run_polls_and_sleeps_interval(client):
                   interval=7.0, sleeper=slept.append)
     poller.run(rounds=2)
     assert poller.rounds == 2 and slept == [7.0, 7.0]
+
+
+# —— 换日重取股票池 ——
+
+def test_refresh_swaps_codes_and_drops_yesterday_prices(client):
+    """刷新后要清掉上一拍缓存：隔夜价不可比，否则「有没有变化」在拿昨天当基准。"""
+    poller = make(["600000"], lambda codes: {}, client, universe_loader=lambda: ["1", "600000"])
+    poller.prev["600000"] = quote(price=99.0)
+    assert poller.refresh() == 2
+    assert poller.codes == ["000001", "600000"]        # 补齐六位：app.db 存的是短码
+    assert poller.prev == {}
+
+
+def test_refresh_without_loader_keeps_given_codes(client):
+    poller = make(["600000", "000001"], lambda codes: {}, client)
+    assert poller.refresh() == 2 and poller.codes == ["600000", "000001"]
+
+
+def test_refresh_keeps_previous_pool_when_loader_fails(client, caplog):
+    """读库失败不能让行情链路崩掉，也不能悄悄变成「今天一只都不看」。"""
+    def boom():
+        raise RuntimeError("app.db 读不到")
+
+    poller = make(["600000"], lambda codes: {}, client, universe_loader=boom)
+    with caplog.at_level("WARNING"):
+        assert poller.refresh() == 1
+    assert poller.codes == ["600000"] and "沿用上一批" in caplog.text
+
+
+def test_refresh_keeps_previous_pool_when_empty(client, caplog):
+    poller = make(["600000"], lambda codes: {}, client, universe_loader=lambda: [])
+    with caplog.at_level("WARNING"):
+        assert poller.refresh() == 1
+    assert poller.codes == ["600000"] and "刷新为空" in caplog.text
+
+
+def test_run_refreshes_pool_on_day_change(client):
+    """睡一觉跨到新交易日必须重取池：第二天盯的是前一天盘后选出来的名单。"""
+    moment = {"now": NOW}
+    asked, batches = [], [["000001", "600519"]]
+
+    def fetch(codes):
+        asked.append(list(codes))
+        return {c: quote(c) for c in codes}
+
+    def sleeper(_seconds):
+        moment["now"] = datetime(2026, 10, 13, 9, 30, 0)
+
+    poller = make(["600000"], fetch, client, now=lambda: moment["now"], sleeper=sleeper,
+                  universe_loader=lambda: batches.pop(0))
+    poller.run(rounds=2)
+    assert asked == [["600000"], ["000001", "600519"]]
+    assert batches == []                                # 启动那一轮不该多读一次库
+
+
+def test_run_keeps_pool_when_same_day(client):
+    moment = {"now": NOW}
+    asked, reads = [], [0]
+
+    def fetch(codes):
+        asked.append(list(codes))
+        return {c: quote(c) for c in codes}
+
+    def loader():
+        reads[0] += 1
+        return ["000001"]
+
+    poller = make(["600000"], fetch, client, now=lambda: moment["now"],
+                  sleeper=lambda _s: None, universe_loader=loader)
+    poller.run(rounds=3)
+    assert asked == [["600000"]] * 3 and reads == [0]

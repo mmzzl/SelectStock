@@ -10,9 +10,14 @@
 前置：`scripts/quote_service.py` 必须在跑，否则 rt:ticks 没有新数据，引擎只会读到旧流。
 （需求文档里的 TDengine 换成 parquet + mongo：本机内存已经紧张，复盘的读法也不需要时序库。）
 
+股票池口径要与上游一致（`--from-app`）：引擎按池过滤 tick，池外的票不建分钟条也不评估
+（空池表示「不限定」而不是「一只都不看」）；换日时自动重取，持仓市值同时作为「单票已用
+额度」进风控的 sizing。
+
 用法:
     python scripts/intraday_engine.py --code 600000 300750            # 调试两只
     python scripts/intraday_engine.py --watchlist data/watchlist.txt
+    python scripts/intraday_engine.py --from-app                       # 选股命中+持仓（推荐口径）
     python scripts/intraday_engine.py --rounds 1 --no-ml --cooldown 0  # 冒烟一轮
     python scripts/intraday_engine.py --status                         # 看引擎心跳
 """
@@ -20,6 +25,7 @@
 import argparse
 import logging
 import sys
+from functools import partial
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -28,6 +34,8 @@ from stock_selector.core.selector import _load_config
 from stock_selector.intraday import EngineConfig, IntradayEngine, store
 from stock_selector.intraday.signals import SignalConfig
 from stock_selector.realtime import bus, resolve_universe, session
+from stock_selector.realtime import pool as app_pool
+from stock_selector.realtime.pool import PoolError
 from stock_selector.risk import RiskEngine
 
 logger = logging.getLogger("intraday_engine")
@@ -56,7 +64,8 @@ def show_status(client) -> int:
         print(f"{bus.KEY_ENGINE_HEARTBEAT} 为空：引擎还没跑过（或 TTL 已过期）")
         return 1
     print(f"最新一轮 状态={stats.get('status')} 读到 tick={stats.get('ticks')} "
-          f"回放={stats.get('replayed')} 变化={stats.get('changed')} "
+          f"回放={stats.get('replayed')} 池外跳过={stats.get('skipped')} "
+          f"变化={stats.get('changed')} 池={stats.get('pool')} "
           f"评估={stats.get('evaluated')} 决策={stats.get('decisions')} 拦截={stats.get('blocked')} "
           f"耗时={stats.get('elapsed_s')}s")
     print(f"{bus.KEY_TICKS} 长度={bus.stream_len(client, bus.KEY_TICKS)}  "
@@ -71,6 +80,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--code", nargs="*", default=[], help="自选代码（六位）")
     p.add_argument("--watchlist", type=Path, help="自选清单文件（一行一个代码）")
     p.add_argument("--all", action="store_true", help="股票池取本地指标宽表全部代码（全市场）")
+    p.add_argument("--from-app", action="store_true",
+                   help="股票池=最近一次选股命中 + 当前持仓（读 app.db，换日自动重取，与上游轮询同口径）")
+    p.add_argument("--app-db", type=Path, default=app_pool.DEFAULT_DB, help="app.db 路径")
     p.add_argument("--limit", type=int, default=0, help="股票池上限，0=不限")
     p.add_argument("--interval", type=float, help="读流间隔秒数（默认取配置的 intraday.interval）")
     p.add_argument("--rounds", type=int, default=0, help="跑多少轮后退出，0=常驻")
@@ -80,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-eval", type=int, help="一轮最多给多少只算分钟指标")
     p.add_argument("--kinds", nargs="*", help="只开这些信号种类，缺省全开")
     p.add_argument("--held", nargs="*", default=[], metavar="代码=市值",
-                   help="已持有市值（元），单票仓位上限要先扣掉它")
+                   help="手工给出的已持有市值（元），单票仓位上限要先扣掉它；--from-app 时改用 app.db 的成本口径")
     p.add_argument("--no-ml", action="store_true", help="关掉买入风险分（少读 700 根日线，启动快）")
     p.add_argument("--out-dir", type=Path, default=store.DEFAULT_DIR, help="决策 parquet 目录")
     p.add_argument("--mongo", action="store_true", help="决策同时写 mongo（复盘查代码时用）")
@@ -100,9 +112,23 @@ def main(argv: list[str] | None = None) -> int:
     codes = list(args.code)
     if args.watchlist:
         codes += read_watchlist(args.watchlist)
-    pool = resolve_universe(codes, all_market=args.all, limit=args.limit)
+    plan_loader = None
+    auto_held: dict[str, float] = {}
+    if args.from_app:
+        if args.held:
+            raise SystemExit("--from-app 的持仓市值自动按 app.db 的成本口径取，"
+                             "与 --held 手工口径只能选一个（混着给会不知道信哪个）")
+        plan_loader = partial(app_pool.load, args.app_db, limit=args.limit, extra=codes)
+        try:
+            plan = plan_loader()
+        except PoolError as exc:
+            raise SystemExit(f"--from-app 取池失败：{exc}") from exc
+        pool, auto_held = plan.codes, plan.held
+    else:
+        pool = resolve_universe(codes, all_market=args.all, limit=args.limit)
     if not pool:
-        raise SystemExit("股票池为空：请给 --code/--watchlist，或用 --all 取全市场")
+        raise SystemExit("股票池为空：请给 --code/--watchlist，或用 --all 取全市场、"
+                         "--from-app 取「选股命中+持仓」")
 
     settings = _load_config()
     intraday = dict(settings.get("intraday") or {})
@@ -116,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
         engine_cfg.once_per_day = False
     if args.max_eval:
         engine_cfg.max_eval = args.max_eval
-    engine_cfg.held = parse_held(args.held)
+    engine_cfg.held = auto_held or parse_held(args.held)
 
     signal_cfg = SignalConfig.from_dict(raw_signals)
     if args.kinds:
@@ -129,9 +155,11 @@ def main(argv: list[str] | None = None) -> int:
         risk.preflight()        # 模型缺失要在启动时就炸，不能装着风控跑成摆设
 
     engine = IntradayEngine(client, pool, risk, cfg=engine_cfg, signal_cfg=signal_cfg,
-                            out_dir=args.out_dir, to_mongo=args.mongo)
-    logger.info("盘中引擎启动：%d 只，间隔 %.1f 秒，去重=%s，风控 %s",
-                len(pool), engine_cfg.interval,
+                            out_dir=args.out_dir, to_mongo=args.mongo,
+                            pool_loader=plan_loader)
+    logger.info("盘中引擎启动：%d 只（池口径=%s），间隔 %.1f 秒，去重=%s，风控 %s",
+                len(pool), "选股命中+持仓" if plan_loader else ("全市场" if args.all else "手工清单"),
+                engine_cfg.interval,
                 "当天每票每信号只报一次" if engine_cfg.once_per_day
                 else f"冷却 {engine_cfg.cooldown} 秒",
                 "开" if risk.cfg.enabled else "关")

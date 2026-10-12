@@ -16,6 +16,7 @@
 | `rt:engine-heartbeat` | String(JSON) | 上一轮引擎统计：读到多少 tick、评估多少只、出多少信号 |
 | `rt:emitted:{日期}` | Set | 当天已经报过的 `代码|信号种类`：盘中告警「一票一信号一天只报一次」的去重表 |
 | `rt:metric:{code}` | Hash | 盘中实时指标（均线/MACD/量比…），由策略引擎写、告警链路读 |
+| `rt:watchdog` | Hash(name → JSON) | 看门狗已经报过故障的链路 + 故障起始时刻：重复抑制与恢复通知的状态 |
 
 `rt:quote` 与 `rt:heartbeat` 都带 TTL：停服后不能让人读到「昨天的实时价」——行情数据
 一旦过期就不是数据而是误导。
@@ -36,6 +37,7 @@ KEY_DECISIONS = "rt:decisions"
 KEY_HEARTBEAT = "rt:heartbeat"
 KEY_ENGINE_HEARTBEAT = "rt:engine-heartbeat"
 KEY_EMITTED_PREFIX = "rt:emitted:"
+KEY_WATCHDOG = "rt:watchdog"
 METRIC_PREFIX = "rt:metric:"
 
 QUOTE_TTL = 4 * 3600          # 一个交易日 + 余量：隔天必读不到，也不会当天误过期

@@ -32,6 +32,22 @@ def in_trading_window(now: dt.datetime | None = None) -> bool:
     return MORNING[0] <= minutes < MORNING[1] or AFTERNOON[0] <= minutes < AFTERNOON[1]
 
 
+def window_start(now: dt.datetime | None = None) -> dt.datetime | None:
+    """当前所处交易时段的开始时刻（不在时段内返回 None）。
+
+    看门狗要用它算「开盘宽限」：心跳键带 4 小时 TTL，收盘到次日开盘之间必然是空的，而盘外
+    最长睡 900 秒的进程可能要到开盘后十几分钟才写下当天第一份心跳——那几分钟判故障是误报。
+    """
+    moment = clock_now(now)
+    if moment.weekday() >= 5:
+        return None
+    minutes = moment.hour * 60 + moment.minute
+    for start, end in (MORNING, AFTERNOON):
+        if start <= minutes < end:
+            return moment.replace(hour=start // 60, minute=start % 60, second=0, microsecond=0)
+    return None
+
+
 def seconds_to_next_window(now: dt.datetime | None = None) -> int:
     """距下一个交易时段开头还有多久：休市时按这个值休眠，开盘前一拍自然被唤醒。"""
     moment = clock_now(now)

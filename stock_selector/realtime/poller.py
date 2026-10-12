@@ -75,7 +75,8 @@ class QuotePoller:
 
     def __init__(self, client, codes: list[str], *, interval: float = 5.0,
                  maxlen: int = bus.DEFAULT_MAXLEN, fetch=tencent.fetch,
-                 now=dt.datetime.now, clock=time.monotonic, sleeper=time.sleep):
+                 now=dt.datetime.now, clock=time.monotonic, sleeper=time.sleep,
+                 universe_loader=None):
         self.client = client
         self.codes = [str(c).zfill(6) for c in codes]
         self.interval = interval
@@ -84,10 +85,41 @@ class QuotePoller:
         self.now = now
         self.clock = clock
         self.sleeper = sleeper
+        self.universe_loader = universe_loader
+        # 启动时 CLI 已经读过一次池，所以把「今天」当成已刷新，跨到明天才重取
+        self.day = self.now().date() if universe_loader else None
         self.prev: dict[str, dict] = {}
         self.rounds = 0
         self.consecutive_failures = 0
         self.backoff = interval
+
+    def refresh(self, stamp: dt.datetime | None = None) -> int:
+        """换日重取股票池（`universe_loader` 给了才生效），返回新的只数。
+
+        为什么必须换日重取：池来自盘后选股（17:30 那一批），常驻进程如果只在启动时读一次，
+        周二盯的还是周一早上那份名单——监控范围会静默过期，比不监控更误导。
+        取空了沿用上一批：池子中空的轮询等于「今天一只都不看」，那必须人来看日志，不该由
+        一次数据库读失败替运维做决定。
+        """
+        stamp = stamp or self.now()
+        if self.universe_loader is None:
+            self.day = stamp.date()
+            return len(self.codes)
+        try:
+            codes = [str(c).zfill(6) for c in (self.universe_loader() or [])]
+        except Exception as exc:                      # 池读失败不能让整条行情链路崩掉
+            logger.warning("股票池刷新失败（%s），沿用上一批 %d 只", exc, len(self.codes))
+            self.day = stamp.date()
+            return len(self.codes)
+        self.day = stamp.date()
+        if not codes:
+            logger.warning("股票池刷新为空，沿用上一批 %d 只", len(self.codes))
+            return len(self.codes)
+        if codes != self.codes:
+            logger.info("股票池刷新：%d 只 → %d 只", len(self.codes), len(codes))
+        self.codes = codes
+        self.prev = {}                                # 隔夜价不可比，新池第一拍一律算「有变化」
+        return len(codes)
 
     def round(self) -> dict:
         """跑一拍，返回本轮统计（同时写进心跳，供运维与告警链路判断链路是否活着）。"""
@@ -139,8 +171,11 @@ class QuotePoller:
         """常驻循环。`rounds` 只给测试与冒烟用，None 表示一直跑到进程被停。"""
         done = 0
         while rounds is None or done < rounds:
-            if not session.in_trading_window(self.now()):
-                wait = session.sleep_seconds(self.now())
+            moment = self.now()
+            if self.universe_loader and moment.date() != self.day:
+                self.refresh(moment)
+            if not session.in_trading_window(moment):
+                wait = session.sleep_seconds(moment)
                 logger.info("不在交易时段，休眠 %.0f 秒", wait)
                 self.sleeper(wait)
                 done += 1

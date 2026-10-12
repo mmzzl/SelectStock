@@ -25,7 +25,7 @@ AES-GCM 密文，本进程发送前解出明文，绝不写进文件也不打日
     export ALERT_WEBHOOK_SECRET='SECxxxx'                     # 或显式覆盖
     python scripts/alert_pusher.py --dry-run              # 只打印，不真发
     python scripts/alert_pusher.py                        # 常驻
-    python scripts/alert_pusher.py --once --rounds 1      # 冒烟
+    python scripts/alert_pusher.py --rounds 1 --dry-run    # 冒烟
 """
 
 import argparse

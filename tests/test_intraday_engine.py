@@ -26,7 +26,8 @@ from stock_selector.intraday.indicators import Snapshot                  # noqa:
 from stock_selector.intraday.signals import SignalConfig, View, evaluate  # noqa: E402
 from stock_selector.intraday.store import append_parquet, doc_id, row    # noqa: E402
 from stock_selector.realtime import bus                                  # noqa: E402
-from stock_selector.risk import RiskEngine                               # noqa: E402
+from stock_selector.realtime.pool import MonitorPool                     # noqa: E402
+from stock_selector.risk import RiskEngine                                # noqa: E402
 
 # 2026-10-12 是周一，10:00 在早盘时段内
 NOW = datetime(2026, 10, 12, 10, 0, 0)
@@ -572,6 +573,70 @@ def test_run_sleeps_outside_trading_window(client):
 def test_engine_config_ignores_unknown_keys():
     cfg = EngineConfig.from_dict({"interval": 3, "nonsense": 1})
     assert cfg.interval == 3 and cfg.cooldown == 300
+
+
+# —— 池：只盯「选股命中 + 持仓」，池外的 tick 直接丢 ——
+
+def test_ticks_outside_pool_are_not_built_or_evaluated(client, out_dir):
+    """上游轮询可能还在发全市场；给谁算指标由引擎的池决定，否则 max_eval 全花在没人看的票上。"""
+    feed(client, code="600000")
+    feed(client, code="000001")
+    engine = make_engine(client, pool=("600000",), out_dir=out_dir)
+    stats = engine.drain()
+    assert stats["skipped"] == 1 and stats["changed"] == 1
+    assert engine.bars.current("000001") is None          # 池外的票连分钟条都不建
+
+
+def test_empty_pool_means_no_filtering(client, out_dir):
+    """空池是「没给池口径」而不是「一只都不看」：不能因为参数漏了就静默停掉全部判定。"""
+    feed(client, code="600000")
+    feed(client, code="000001")
+    engine = make_engine(client, pool=(), out_dir=out_dir)
+    stats = engine.drain()
+    assert stats["skipped"] == 0 and stats["changed"] == 2
+
+
+def test_day_rollover_refreshes_pool_and_held(client, out_dir):
+    """换日重取：第二天盯的是前一天盘后选出来的名单，持仓市值也要跟着换成新的已用额度。"""
+    clock = {"value": NOW}
+    plan = MonitorPool(codes=["000001", "002855"], held={"002855": 5104.0},
+                       generated_at=clock["value"])
+    engine = make_engine(client, pool=("600000",), out_dir=out_dir,
+                         now=lambda: clock["value"], cfg=EngineConfig(held={"600000": 999.0}),
+                         pool_loader=lambda: plan)
+    engine.drain()
+    assert engine.pool == ["600000"] and engine.cfg.held == {"600000": 999.0}
+    clock["value"] = datetime(2026, 10, 13, 10, 0, 0)
+    engine.drain()
+    assert engine.pool == ["000001", "002855"]
+    assert engine._pool_set == {"000001", "002855"}
+    assert engine.cfg.held == {"002855": 5104.0}
+
+
+def test_pool_refresh_failure_keeps_previous_batch(client, out_dir, caplog):
+    """读库失败沿用上一批：宁可盯一份可能过期的名单，也不要一条判定都不做。"""
+    clock = {"value": NOW}
+
+    def boom():
+        raise RuntimeError("app.db 读不到")
+
+    engine = make_engine(client, pool=("600000",), out_dir=out_dir,
+                         now=lambda: clock["value"], pool_loader=boom)
+    clock["value"] = datetime(2026, 10, 13, 10, 0, 0)
+    with caplog.at_level("WARNING"):
+        engine.drain()
+    assert engine.pool == ["600000"] and "沿用上一批" in caplog.text
+
+
+def test_pool_refresh_empty_keeps_previous_batch(client, out_dir, caplog):
+    clock = {"value": NOW}
+    engine = make_engine(client, pool=("600000",), out_dir=out_dir,
+                         now=lambda: clock["value"],
+                         pool_loader=lambda: MonitorPool(codes=[]))
+    clock["value"] = datetime(2026, 10, 13, 10, 0, 0)
+    with caplog.at_level("WARNING"):
+        engine.drain()
+    assert engine.pool == ["600000"] and "刷新为空" in caplog.text
 
 
 # —— book_ratio / normalize ——

@@ -184,15 +184,25 @@ redis 用本机已有的 7.2.5（免密，**db 5**，与 celery 的 db 3、爬�
 | `rt:ticks` | Stream | **只有变化才发**的 tick 流，`MAXLEN ~` 限长（默认 2 万条） |
 | `rt:decisions` | Stream | 过完风控的最终决策（放行与被拦的都进），告警进程消费；限长 5000 |
 | `rt:heartbeat` | String(JSON) | 轮询服务上一轮统计（轮数/命中/耗时/状态） |
-| `rt:engine-heartbeat` | String(JSON) | 策略引擎上一轮统计（读到/回放/评估/决策/拦截/耗时） |
+| `rt:engine-heartbeat` | String(JSON) | 策略引擎上一轮统计（读到/回放/池外跳过/池/评估/决策/拦截/耗时） |
 | `rt:metric:{code}` | Hash | 盘中实时指标，由策略引擎写、告警与前端读 |
+| `rt:watchdog` | Hash(name → JSON) | 看门狗已报故障的链路与起始时刻：重复抑制、恢复通知用它算时长 |
 
 ```bash
 python scripts/quote_service.py --code 600000 000001        # 调试自选
 python scripts/quote_service.py --watchlist data/watchlist.txt --interval 5
+python scripts/quote_service.py --from-app --interval 5     # 选股命中 + 持仓（部署用的口径）
 python scripts/quote_service.py --all --interval 15         # 全市场（限流风险自担）
 python scripts/quote_service.py --status                    # 只看链路心跳
 ```
+
+**盯哪些票由 `realtime/pool.py` 决定**：`--from-app` 只读（`mode=ro`）打开 `app.db`，取最近一次
+`status='done'` 选股的代码（按 `rank_no`，与 App 里同一顺序）并上启用中的持仓，实测约 360 只。
+池是**换日自动重取**的：选股在盘后 17:30 产，第二天开盘盯的就是前一天那批名单，常驻进程只在启动
+时读一次会静默盯过期清单；读库失败或取到空池则沿用上一批并 WARN（「今天一只都不看」必须是人来
+决定的事）。持仓同时按 `quantity × cost_price` 的成本口径进风控 sizing，作为单票已用额度。
+盯全市场 6600 只的问题不在算不动，而在 15 秒一拍要发 111 个请求、下游 `max_eval` 的预算全花在
+没人看的票上——真正盘中要动的只有等买点的命中票和等卖点的持仓票。
 
 轮询的一拍只有三种结果，都写进心跳，不静默：`ok`（发了 N 条变化）、`market_closed`
 （快照时间戳不是今天 → 休市/未开盘，**一条都不发**：把上个交易日的价当实时价推给策略比不发
@@ -237,9 +247,13 @@ redis 的 `rt:emitted:{日期}`，所以引擎重启不会把上午报过的信�
 下不到的单）。日线宽表（流动性/冲击/风险分/压力位都要它）只在真有信号要过风控时才读，按
 `kline_cache` 只数 LRU 缓存。
 
+引擎也按池过滤：池外的 tick 直接丢（不建分钟条、不评估），所以 `--all` 的上游配 `--from-app`
+的引擎时，监控范围仍由引擎这一侧收敛；空池表示「没给池口径」而不是「一只都不看」，此时不过滤。
+换日时引擎与轮询服务同一时刻重取池，代码与持仓额度一起换。
+
 ```bash
-python scripts/quote_service.py --all --interval 15              # 1) 行情上行
-python scripts/intraday_engine.py --all --max-eval 300 --mongo   # 2) 指标 → 信号 → 风控 → 决策
+python scripts/quote_service.py --from-app --interval 5             # 1) 行情上行
+python scripts/intraday_engine.py --from-app --max-eval 300 --mongo # 2) 指标 → 信号 → 风控 → 决策
 python scripts/intraday_engine.py --status                       #    看引擎心跳
 python scripts/alert_pusher.py --dry-run                         # 3) 先看消息，确认无误再常驻
 python scripts/alert_pusher.py --channel-key ding_ops            #    发到页面「通知渠道」配的钉钉
@@ -252,6 +266,24 @@ python scripts/alert_pusher.py --channel-key ding_ops            #    发到页�
 在发送前才解出明文，日志里只留主机名。`ALERT_WEBHOOK_URL` / `ALERT_WEBHOOK_SECRET` 仍然有效，
 但退为「临时换群」的覆盖手段。仓库副本默认 `autostart=false`（它要能导入 backend 目录），
 确认群里收到过消息再打开。
+
+这条链路坏了的表现是**群里变安静**，而「安静」和「今天没机会」看起来一模一样，所以第四个进程
+`scripts/link_watchdog.py` 专门盯链路自己：每 60 秒按 `--status` 同一套口径读 `rt:heartbeat`
+与 `rt:engine-heartbeat`，三种情况算故障——读不到心跳键、心跳龄超过阈值、上一轮
+`status=fetch_failed`（价是旧的，指标不可信）。阈值会给「进程自己声明的休眠」让路
+（拉不到快照退避 60 秒、休市睡到 900 秒都不算卡死），并且开盘后 5 分钟内不判故障（心跳键带
+4 小时 TTL，那几分钟当天的心跳可能还没写上）。**只在交易时段判断**，收盘后静默。
+
+重复抑制与恢复通知的状态写在 redis `rt:watchdog`（不在进程内存里）：看门狗重启不会把上午报过
+的故障再报一遍，恢复时补一条并带上中断时长——只报坏不报好会让人以为链路一直是坏的。渠道与
+`alert_pusher` 同源（同一个 `--channel-key`），读不到 redis 时整轮跳过、一个字都不发（这时状态
+表也写不进去，发就等于刷屏）。
+
+```bash
+python scripts/link_watchdog.py --status                          # 现在有没有超阈值（盘外 rc=0）
+python scripts/link_watchdog.py --dry-run --ignore-session --rounds 1  # 试跑：只打印，不写状态表
+python scripts/link_watchdog.py --channel-key ding_ops            # 常驻
+```
 
 告警进程**只排版不算术**：建议股数、预估成交价、滑点全部来自引擎与风控，它做单位换算和攒批
 （默认 30 秒合成一条 markdown，避免刷屏、也避开机器人 20 条/分钟限流），一批超过 40 条

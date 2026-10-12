@@ -9,9 +9,14 @@
 本机没有正式行情授权，腾讯快照是可用口径里最快的一种（全市场一拍约 11 秒）；换真实
 Level-1 源时只替换 `stock_selector/quote/tencent.py` 的 fetch，上游键约定与下游引擎都不用改。
 
+股票池口径：`--from-app` 只盯「最近一次选股命中 + 当前持仓」（约 360 只，换日自动重取），
+`--all` 才是全市场 6600 只。盯全市场在 15 秒一拍里只是把免费接口的配额吃光——盘中真正要动
+的票只有等买点的命中票和等卖点的持仓票。
+
 用法:
     python scripts/quote_service.py --code 600000 000001                # 调试两只
     python scripts/quote_service.py --watchlist data/watchlist.txt
+    python scripts/quote_service.py --from-app --interval 5             # 选股命中+持仓（推荐口径）
     python scripts/quote_service.py --all --interval 15                 # 全市场（限流风险自担）
     python scripts/quote_service.py --rounds 1 --limit 50               # 冒烟一轮
     python scripts/quote_service.py --status                            # 看链路心跳
@@ -27,6 +32,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from stock_selector.quote import tencent
 from stock_selector.realtime import QuotePoller, bus, resolve_universe, session
+from stock_selector.realtime import pool as app_pool
+from stock_selector.realtime.pool import PoolError
 
 logger = logging.getLogger("quote_service")
 
@@ -56,6 +63,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--code", nargs="*", default=[], help="自选代码（六位，可带 sh/sz 前缀）")
     p.add_argument("--watchlist", type=Path, help="自选清单文件（一行一个代码）")
     p.add_argument("--all", action="store_true", help="股票池取本地指标宽表的全部代码（全市场）")
+    p.add_argument("--from-app", action="store_true",
+                   help="股票池=最近一次选股命中 + 当前持仓（读 app.db，换日自动重取）")
+    p.add_argument("--app-db", type=Path, default=app_pool.DEFAULT_DB, help="app.db 路径")
     p.add_argument("--limit", type=int, default=0, help="股票池上限，0=不限")
     p.add_argument("--interval", type=float, default=5.0, help="两轮之间的秒数")
     p.add_argument("--timeout", type=float, default=6.0, help="单次请求超时")
@@ -77,13 +87,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.status:
         return show_status(client)
 
-    universe = resolve_universe(codes, all_market=args.all, limit=args.limit)
+    universe: list[str] = []
+    plan_loader = None
+    if args.from_app:
+        # 换日自动重取：盘后 17:30 那批选股是第二天要盯的名单，只在启动读一次会静默过期
+        plan_loader = partial(app_pool.load, args.app_db, limit=args.limit, extra=codes)
+        try:
+            universe = plan_loader().codes
+        except PoolError as exc:
+            raise SystemExit(f"--from-app 取池失败：{exc}") from exc
+    else:
+        universe = resolve_universe(codes, all_market=args.all, limit=args.limit)
     if not universe:
         # 空池不是「今天没票」而是参数错了，必须显式说，不能静默 0 轮退出
-        raise SystemExit("股票池为空：请给 --code/--watchlist，或用 --all 取全市场")
+        raise SystemExit("股票池为空：请给 --code/--watchlist，或用 --all 取全市场、--from-app 取选股+持仓")
 
     poller = QuotePoller(client, universe, interval=args.interval, maxlen=args.maxlen,
-                         fetch=partial(tencent.fetch, timeout=args.timeout))
+                         fetch=partial(tencent.fetch, timeout=args.timeout),
+                         universe_loader=(lambda: plan_loader().codes) if plan_loader else None)
     logger.info("开始轮询 %d 只，间隔 %.1f 秒", len(universe), args.interval)
     poller.run(rounds=args.rounds or None)
     return 0

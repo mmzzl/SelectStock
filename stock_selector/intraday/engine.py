@@ -73,9 +73,11 @@ class IntradayEngine:
                  signal_cfg: signals.SignalConfig | None = None,
                  now=dt.datetime.now, sleeper=time.sleep, clock=time.monotonic,
                  kline_loader=None, event_loader=events.load, out_dir=None,
-                 to_mongo: bool = False):
+                 to_mongo: bool = False, pool_loader=None):
         self.client = client
         self.pool = [str(c).zfill(6) for c in pool]
+        self._pool_set = set(self.pool)
+        self.pool_loader = pool_loader
         self.risk = risk
         self.cfg = cfg or EngineConfig()
         self.signal_cfg = signal_cfg or signals.SignalConfig()
@@ -106,6 +108,30 @@ class IntradayEngine:
         self._day_ctx: dict[str, dict] = {}
         self._events_by_code: dict[str, list] = {}
         self._events_at = 0.0
+
+    def _refresh_pool(self) -> None:
+        """换日重取监控池（`pool_loader` 给了才生效）：代码与持仓市值都跟着 app.db 走。
+
+        选股批次盘后才产，持仓也在 App 里改；常驻进程只在启动时读一次的话，周二还在按周一
+        的名单算指标、按昨天的已用额度放行买入。刷新失败沿用上一批——「池空到一只都不看」
+        必须是人来决定的事，不该由一次读库失败替运维做。
+        """
+        if self.pool_loader is None:
+            return
+        try:
+            plan = self.pool_loader()
+        except Exception as exc:
+            logger.warning("盘中池刷新失败（%s），沿用上一批 %d 只", exc, len(self.pool))
+            return
+        codes = [str(c).zfill(6) for c in (getattr(plan, "codes", None) or [])]
+        if not codes:
+            logger.warning("盘中池刷新为空，沿用上一批 %d 只", len(self.pool))
+            return
+        self.pool = codes
+        self._pool_set = set(codes)
+        self.cfg.held = dict(getattr(plan, "held", None) or {})
+        logger.info("盘中引擎池刷新 → %d 只，%d 只按持仓市值占用额度",
+                    len(codes), len(self.cfg.held))
 
     def _kline(self, code: str):
         """读日线宽表（LRU）。风控的流动性/冲击/风险分与突破压力位共用这一份。"""
@@ -147,6 +173,7 @@ class IntradayEngine:
         moment = self.now()
         if moment.strftime("%Y-%m-%d") != self.day:
             self.reset(reason=f"换日 {self.day} → {moment:%Y-%m-%d}")
+            self._refresh_pool()
         started = self.clock()
 
         entries = bus.read_ticks(self.client, self.cursor, self.cfg.read_batch)
@@ -154,6 +181,7 @@ class IntradayEngine:
         touched: dict[str, dict] = {}
         sealed: set[str] = set()
         replayed = 0
+        skipped = 0
         for entry_id, raw in entries:
             self.cursor = entry_id
             tick = _decode(raw)
@@ -161,6 +189,11 @@ class IntradayEngine:
             if not code or not tick.get("price"):
                 continue
             code = code.zfill(6)
+            # 池外的票不建条也不评估：上游轮询可能还在发全市场，而「该给谁算指标」由这里的池决定。
+            # 空池 = 没给池口径，不是「一只都不监控」，所以这时不过滤。
+            if self._pool_set and code not in self._pool_set:
+                skipped += 1
+                continue
             if self.bars.apply(code, tick):
                 sealed.add(code)
             if now_ts - float(tick.get("ts") or 0) > self.cfg.replay_horizon:
@@ -194,6 +227,7 @@ class IntradayEngine:
                         len(rows), len(rows) - blocked, blocked, path)
 
         stats = {"ticks": len(entries), "replayed": replayed, "changed": len(touched),
+                 "skipped": skipped, "pool": len(self._pool_set),
                  "evaluated": evaluated, "decisions": len(rows),
                  "blocked": sum(1 for row in rows if row["verdict"] == "block"),
                  "cursor": self.cursor, "elapsed_s": round(self.clock() - started, 3),
