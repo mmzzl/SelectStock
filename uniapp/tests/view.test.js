@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { toHoldingRow, toTradeRow, toPnlView, toSelectionJobRow, toSelectionResultRow,
          toMessageRow, toDiagRow, toPreviewRow, toUpgradeInfo, fmtTime,
-         riskText, riskClass, sortByRiskDesc, buyLevelText, sellTriggerText } from "../src/logic/view.js";
+         riskText, riskClass, sortByRiskDesc, buyLevelText, sellTriggerText,
+         orderPlanText, riskAdjustText } from "../src/logic/view.js";
 
 test("时间格式化：naive UTC 转本地、压到分钟；带时区/非法值不崩", async () => {
   const { execFileSync } = await import("node:child_process");
@@ -120,6 +121,8 @@ test("选股结果行：字段映射透传", () => {
     code: "600519", name: "茅台", signal: "trend_rebound", reason: "MACD金叉",
     strategy: "trend_rebound", asof: "", price: null, score: null, rank: null, risk: null,
     buyRef: null, buyInvalid: null,
+    riskVerdict: "", riskReason: "", riskShares: null, riskAmount: null,
+    riskFill: null, riskSlippageBp: null,
   });
 });
 
@@ -137,6 +140,26 @@ test("选股结果行：插件富化字段落到 camelCase", () => {
   assert.equal(row.risk, -0.21);        // 后端列名 risk_ex10_pp → 前端 risk
   assert.equal(row.buyRef, 10.85);
   assert.equal(row.buyInvalid, 10.31);
+});
+
+test("下单口径文案：风控给多少就说多少，缺字段就不提；没开风控的批次整行不显示", () => {
+  assert.equal(orderPlanText({
+    riskShares: 3800, riskAmount: 39140, riskFill: 10.31, riskSlippageBp: 12.5,
+  }), "建议 3800 股 · 3.9 万元 · 预估成交 10.31 · 预估滑点 12.5bp");
+  // 只给了股数：金额必须留空而不是编一个 0 万元
+  assert.equal(orderPlanText({ riskShares: 3800 }), "建议 3800 股");
+  assert.equal(orderPlanText({ riskFill: 10.3, riskSlippageBp: 8 }), "预估成交 10.30 · 预估滑点 8.0bp");
+  assert.equal(orderPlanText({}), "");
+  // 风控关闭时跑的旧结果：字段全空，不能显示成「建议 0 股」
+  assert.equal(orderPlanText(toSelectionResultRow({ code: "1", signal: "x" })), "");
+  assert.equal(riskAdjustText(toSelectionResultRow({ code: "1", signal: "x" })), "");
+});
+
+test("风控调整理由只在 adjust 时出现，allow 不给噪音", () => {
+  assert.equal(riskAdjustText({ riskVerdict: "adjust", riskReason: "[position] 单票上限 4 万元" }),
+               "[position] 单票上限 4 万元");
+  assert.equal(riskAdjustText({ riskVerdict: "allow", riskReason: "" }), "");
+  assert.equal(riskAdjustText({ riskVerdict: "allow", riskReason: "[position] 不该出现" }), "");
 });
 
 test("买点文案：判据里有几个位就说几个，都没有就整行不显示", () => {

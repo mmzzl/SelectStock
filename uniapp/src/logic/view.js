@@ -103,7 +103,37 @@ export function toSelectionResultRow(s) {
     risk: num(s.risk_ex10_pp),
     // 买点参考位/失效位：策略判据里算出的均线、箱体上沿、6 日低点（不是预测价）
     buyRef: num(s.buy_ref_price), buyInvalid: num(s.buy_invalid_price),
+    // 风控后的最终决策：allow=信号原样可下单，adjust=能下单但下单量被规则压过。
+    // 被拦掉的票内核不会返回，所以这里不会出现 "block"；字段全空表示这批结果跑在风控关闭时。
+    riskVerdict: s.risk_verdict || "", riskReason: s.risk_reason || "",
+    riskShares: num(s.risk_shares), riskAmount: num(s.risk_amount),
+    riskFill: num(s.risk_fill_price), riskSlippageBp: num(s.risk_slippage_bp),
   };
+}
+
+/** 风控给元 → 显示用万元：只是单位换算，数字本身是内核算好的，前端不做业务计算。 */
+function wanText(v) {
+  return `${(v / 10000).toFixed(1)} 万元`;
+}
+
+/** 下单口径一行话：建议买多少股、预估什么价成交、预估滑点多少。缺哪个不说哪个。 */
+export function orderPlanText(r) {
+  const parts = [];
+  const shares = num(r?.riskShares);
+  if (shares !== null) {
+    const amount = num(r?.riskAmount);
+    parts.push(`建议 ${shares} 股${amount !== null ? ` · ${wanText(amount)}` : ""}`);
+  }
+  const fill = num(r?.riskFill);
+  if (fill !== null) parts.push(`预估成交 ${fill.toFixed(2)}`);
+  const bp = num(r?.riskSlippageBp);
+  if (bp !== null) parts.push(`预估滑点 ${bp.toFixed(1)}bp`);
+  return parts.join(" · ");
+}
+
+/** 风控改过下单量时把内核的中文理由原样说给用户；原样放行时不给噪音。 */
+export function riskAdjustText(r) {
+  return r?.riskVerdict === "adjust" ? (r.riskReason || "") : "";
 }
 
 /** 买点文案：两个位都来自策略自己的判据，缺哪个就不说哪个；都没有就整行不显示。 */
