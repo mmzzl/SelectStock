@@ -12,6 +12,13 @@ def _cost_step(qty: int, cost: float, buy_qty: int, price: float) -> float:
     return (cost * qty + price * buy_qty) / total if total > 0 else price
 
 
+def trade_order_key(t: dict) -> tuple:
+    """簿记排序键：同一天内买入先于卖出。交割单只精确到日，同日买卖的真实先后无从得知；
+    卖在前会在无仓可卖时被截断，最后凭空留下持仓，买在前不会。
+    后端持仓簿记（services/derive_holdings.py）用同一个键，回归测试锁一致（R1-2）。"""
+    return (t["stock_code"], t["trade_date"], 0 if t["direction"] == "buy" else 1)
+
+
 def compute_pnl(trades: list[dict], holdings: list[dict], latest_price_fn) -> dict:
     """trades 逐条移动加权；卖出即时结算已实现盈亏（费用扣减）。
     latest_price_fn(code)->float 现价；持仓快照仅兜底现成数量/成本。"""
@@ -19,7 +26,7 @@ def compute_pnl(trades: list[dict], holdings: list[dict], latest_price_fn) -> di
     realized: dict[str, float] = {}
     fees: dict[str, float] = {}
 
-    for t in sorted(trades, key=lambda x: (x["stock_code"], x["trade_date"])):
+    for t in sorted(trades, key=trade_order_key):
         code = t["stock_code"]
         cur = pos.setdefault(code, {"name": t.get("stock_name", ""), "qty": 0, "cost": 0.0})
         fee = float(t.get("commission", 0.0)) + float(t.get("stamp_tax", 0.0)) + float(t.get("transfer_fee", 0.0))

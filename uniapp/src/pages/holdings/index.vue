@@ -27,12 +27,17 @@ const GROUPS = [
   { key: "none", label: "暂无建议" },
 ];
 const grouped = computed(() => {
-  const pick = (g) => rows.value.filter((r) => (g.key === "none" ? !r.action : r.action === g.key));
+  // 诊断快照的 holding_pnl 只有当前仓位的浮动；买过又卖过一部分的股票，卖出那部分的
+  // 已实现盈亏在插件 per_code 里，这里按代码取过来一起显示（前端不加总）。
+  const byCode = new Map((summary.value?.rows || []).map((x) => [x.code, x]));
+  const withPnl = rows.value.map((r) => ({ ...r, agg: byCode.get(r.code) || null }));
+  const pick = (g) => withPnl.filter((r) => (g.key === "none" ? !r.action : r.action === g.key));
   return GROUPS.map((g) => ({ ...g, items: pick(g) })).filter((g) => g.items.length);
 });
 
 const pnlCls = (v) => (v === null || v === 0 ? "" : v > 0 ? "up" : "down");
 const money = (v) => (v === null || v === undefined ? "—" : Number(v).toFixed(2));
+const signed = (v) => (v === null || v === undefined ? "—" : (v > 0 ? "+" : "") + money(v));
 const goEdit = (r) => uni.navigateTo({ url: `/pages/holdings/edit${r ? `?code=${encodeURIComponent(r.code)}` : ""}` });
 const goImport = () => uni.navigateTo({ url: "/pages/holdings/import" });
 const goProfit = () => uni.navigateTo({ url: "/pages/profit/index" });
@@ -87,6 +92,7 @@ const goTrades = () => uni.navigateTo({ url: "/pages/trades/index" });
             <text class="d">现价 {{ r.latestPrice ?? "—" }} · 成本 {{ r.cost ?? "—" }} · {{ r.shares ?? "—" }} 股</text>
             <text class="n">{{ r.name }}（{{ r.code }}）</text>
             <text v-if="r.actionReason" class="sub">{{ r.actionReason }}</text>
+            <text v-if="r.agg && r.agg.realizedPnl" class="sub acc">已实现 {{ signed(r.agg.realizedPnl) }} · 含已实现合计 {{ signed(r.agg.totalPnl) }}</text>
             <text v-if="sellTriggerText(r)" class="sub trig">{{ sellTriggerText(r) }}</text>
           </view>
           <view class="r">
@@ -108,4 +114,5 @@ const goTrades = () => uni.navigateTo({ url: "/pages/trades/index" });
 .hero { padding: 10rpx 0 18rpx; }
 .hero .kv3 { margin-top: 6rpx; }
 .trow .trig { color: #e64545; }
+.trow .acc { color: #2b5cff; }
 </style>

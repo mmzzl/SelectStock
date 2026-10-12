@@ -31,7 +31,7 @@ const pnlCls = (v) => (v === null || v === undefined || v === 0 ? "" : v > 0 ? "
         <view class="k"><text class="n">{{ run.held_code_count }}</text><text class="l">诊断持仓</text></view>
         <view class="k"><text class="n">{{ run.action_count }}</text><text class="l">操作建议</text></view>
         <view class="k">
-          <text class="n" :class="pnlCls(run.total_pnl)">{{ money(run.total_pnl) }}</text><text class="l">总收益</text>
+          <text class="n" :class="pnlCls(run.total_pnl)">{{ money(run.total_pnl) }}</text><text class="l">持仓浮动盈亏</text>
         </view>
       </view>
       <text v-if="run.error" class="reason">失败原因：{{ run.error }}</text>

@@ -106,7 +106,6 @@ async def commit(user_id: str, rows: list[dict], batch_note: str = "") -> dict:
     batch_id = uuid.uuid4().hex[:12]
     for t in fresh:
         all_user_trades.append({**t, "source": "import", "batch_id": batch_id})
-    all_user_trades.sort(key=lambda t: (t["stock_code"], t["trade_date"]))
 
     holdings, unreliable = derive_holdings_from_trades(all_user_trades)
 
@@ -125,8 +124,7 @@ async def create_one(user_id: str, row: dict) -> dict:
     """手动录入单笔，同样推导更新持仓。"""
     t = {**_settled(row), "source": "manual", "batch_id": ""}
     all_user_trades = await trades_repo.list_all_by_user(user_id)
-    trial = sorted(all_user_trades + [t], key=lambda r: (r["stock_code"], r["trade_date"]))
-    holdings, unreliable = derive_holdings_from_trades(trial)
+    holdings, unreliable = derive_holdings_from_trades(all_user_trades + [t])
     if unreliable:
         raise BizError("卖出超过持仓：" + "、".join(unreliable) + "，请先补上更早的买入或核对数量")
     created = await trades_repo.create({**t, "user_id": user_id})
@@ -142,8 +140,7 @@ async def delete_one(user_id: str, trade_id: str) -> bool:
     if row["source"] != "manual":
         raise BizError("导入产生的记录不可单笔删除", code=400, status_code=400)
     remaining = [t for t in await trades_repo.list_all_by_user(user_id) if t["id"] != trade_id]
-    holdings, unreliable = derive_holdings_from_trades(
-        sorted(remaining, key=lambda r: (r["stock_code"], r["trade_date"])))
+    holdings, unreliable = derive_holdings_from_trades(remaining)
     if unreliable:
         raise BizError("删除后会出现卖出早于买入：" + "、".join(unreliable))
     await trades_repo.delete(trade_id)

@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 
+def trade_order_key(t: dict) -> tuple:
+    """簿记排序键：同一天内买入先于卖出，与插件利润口径（plugin/portfolio/realized.py）
+    同一个键。交割单只精确到日，卖在前会在无仓可卖时被截断、凭空留下持仓。"""
+    return (t["stock_code"], t["trade_date"], 0 if t["direction"] == "buy" else 1)
+
+
 def derive_holdings_from_trades(trades: list[dict]) -> tuple[list[dict], list[str]]:
     """按 stock_code 顺序处理交易记录，移动加权推导持仓快照。
     卖出的已实现盈亏属于插件口径，此处只维护数量与成本。
@@ -17,7 +23,7 @@ def derive_holdings_from_trades(trades: list[dict]) -> tuple[list[dict], list[st
         if code not in unreliable:
             unreliable.append(code)
 
-    for t in trades:
+    for t in sorted(trades, key=trade_order_key):
         code = t["stock_code"]
         qty = int(t["quantity"])
         price = float(t["price"])

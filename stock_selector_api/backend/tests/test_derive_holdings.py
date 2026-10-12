@@ -52,6 +52,19 @@ def test_sell_before_buy_makes_whole_code_unreliable():
     assert rows == []
 
 
+def test_same_day_buy_precedes_sell():
+    """与插件利润口径同一个排序键：同日买卖按原序读会先卖后买、无仓可卖，
+    于是整只被判推不准，持仓凭空少一只。"""
+    rows, unreliable = derive_holdings_from_trades([
+        _trade("09-01", "513310", "半导体ETF", "buy", 2900, 3.455),
+        _trade("09-02", "513310", "半导体ETF", "sell", 2900, 3.502),
+        _trade("09-03", "513310", "半导体ETF", "sell", 2900, 3.80),
+        _trade("09-03", "513310", "半导体ETF", "buy", 2900, 3.771),
+    ])
+    assert unreliable == []
+    assert rows == []
+
+
 def test_unreliable_code_does_not_affect_others():
     rows, unreliable = derive_holdings_from_trades([
         _trade("09-01", "600519", "茅台", "sell", 10, 100.0),

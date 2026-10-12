@@ -41,6 +41,33 @@ def test_moving_average_reused_by_backend_derive(prices):
     assert row["position"] == 200
 
 
+def test_same_day_sell_then_buy_leaves_no_phantom_position(prices):
+    """交割单精确到日，同日「卖 2900 / 买 2900」按原序读就是无仓可卖，截断后会凭空
+    留下 2900 股持仓（实盘 513310 已清仓却计入市值）。同日买入在前。"""
+    out = compute_pnl([
+        _t("09-01", "513310", "半导体ETF", "buy", 2900, 3.455),
+        _t("09-02", "513310", "半导体ETF", "sell", 2900, 3.502),
+        _t("09-03", "513310", "半导体ETF", "sell", 2900, 3.80),
+        _t("09-03", "513310", "半导体ETF", "buy", 2900, 3.771),
+    ], [], prices)
+    row = out["per_code"][0]
+    assert row["position"] == 0
+    assert out["unrealized_summary"]["holding_count"] == 0
+    assert out["unrealized_summary"]["total_value"] == 0.0
+
+
+def test_same_day_partial_sell_keeps_residual_and_realizes(prices):
+    """同日买 700 卖 300：剩余 400 股要留下，卖出那 300 股的盈亏要累加进来。"""
+    out = compute_pnl([
+        _t("09-01", "002855", "捷荣", "buy", 700, 12.76),
+        _t("09-02", "002855", "捷荣", "sell", 300, 11.66, fee=5.0, stamp=1.75),
+    ], [], prices)
+    row = out["per_code"][0]
+    assert row["position"] == 400
+    assert round(row["realized_pnl"], 2) == round((11.66 - 12.76) * 300 - 5.0 - 1.75, 2)
+    assert round(row["total_pnl"], 2) == round(row["realized_pnl"] + row["unrealized_pnl"], 2)
+
+
 def test_unrealized_uses_holdings_fallback(prices):
     out = compute_pnl([], [{"code": "000001", "name": "平安", "quantity": 1000, "cost_price": 10.0}], prices)
     row = out["per_code"][0]
