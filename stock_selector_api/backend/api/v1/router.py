@@ -15,6 +15,7 @@ from api.v1 import (
     trades,
     messages,
     selection,
+    sector,
     backtest,
     system,
     upgrade,
@@ -51,6 +52,9 @@ api_router.include_router(messages.router, dependencies=_password_gate)
 
 # —— 选股模块 ——
 api_router.include_router(selection.router, dependencies=_password_gate)
+
+# —— 板块热力图模块（预计算结果薄代理）——
+api_router.include_router(sector.router, dependencies=_password_gate)
 
 # —— 回测模块（Celery 投递）与系统监控 ——
 api_router.include_router(backtest.router, dependencies=_password_gate)

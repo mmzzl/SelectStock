@@ -10,11 +10,12 @@
 
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .core.selector import list_strategies, run_select, strategy_details
+from .sector_heat import HeatDataMissing, board_detail, heat, stock_kline
 
 # 内核用 logger("stock_selector") 打进度与风险剔除明细；本进程是入口，负责挂 handler，
 # 否则 uvicorn 只配自己的 logger，"命中被谁剔掉了"在生产日志里是看不见的。
@@ -57,6 +58,37 @@ def selector_run(req: RunRequest):
     """执行选股，返回标准化结果。"""
     results = run_select(strategies=req.strategies)
     return {"code": 0, "data": [r.to_dict() for r in results]}
+
+
+@app.get("/api/sector/heat")
+def sector_heat(window: int = Query(3, ge=1, le=250), kind: str = Query("all", pattern="^(all|industry|concept)$")):
+    """板块热力图格子（区间涨幅降序），窗口单位是交易日。"""
+    try:
+        return {"code": 0, "data": heat(window, kind)}
+    except HeatDataMissing as exc:
+        return {"code": 1, "message": str(exc), "data": None}
+
+
+@app.get("/api/sector/board")
+def sector_board(board_code: str = Query(..., min_length=2, max_length=16), window: int = Query(3, ge=1, le=250)):
+    """点进格子后的板块详情与成分股区间表现。"""
+    try:
+        return {"code": 0, "data": board_detail(board_code, window)}
+    except HeatDataMissing as exc:
+        return {"code": 1, "message": str(exc), "data": None}
+    except ValueError as exc:
+        return {"code": 2, "message": str(exc), "data": None}
+
+
+@app.get("/api/sector/kline")
+def sector_kline(code: str = Query(..., min_length=6, max_length=6), days: int = Query(120, ge=20, le=500)):
+    """个股日 K 尾部若干根，前端 canvas 自己画蜡烛图。"""
+    try:
+        return {"code": 0, "data": stock_kline(code, days)}
+    except HeatDataMissing as exc:
+        return {"code": 1, "message": str(exc), "data": None}
+    except ValueError as exc:
+        return {"code": 2, "message": str(exc), "data": None}
 
 
 @app.get("/api/health")

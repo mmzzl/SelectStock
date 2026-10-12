@@ -25,6 +25,7 @@ onShow(() => {
 
 function logout() { clearSession(); uni.reLaunch({ url: "/pages/login/index" }); }
 const goPassword = () => uni.navigateTo({ url: "/pages/mine/password" });
+const goSector = () => uni.navigateTo({ url: "/pages/sector/index" });
 
 // #ifdef APP-PLUS
 function isAndroidApp() {
@@ -83,6 +84,10 @@ function checkUpgrade() {
     <view class="cells">
       <view class="cell" @click="goPassword">
         <text class="t">修改密码</text>
+        <text class="arrow">›</text>
+      </view>
+      <view class="cell" @click="goSector">
+        <text class="t">板块热力图</text>
         <text class="arrow">›</text>
       </view>
       <view class="cell" @click="checkUpgrade">

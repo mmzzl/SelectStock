@@ -173,3 +173,51 @@ test("展示顺序：按预期超额降序，没判分的排最后且互保名�
   assert.deepEqual(rows.map((r) => r.code), ["A", "B", "C", "D", "E"]);   // 不改原数组
   assert.equal(sortByRiskDesc([]).length, 0);
 });
+// —— 板块热力图：颜色档、文案与字段透传 ——
+test("heatColor：红涨绿跌分档，缺值给中性灰而不是 0% 的平色", async () => {
+  const { heatColor } = await import("../src/logic/view.js");
+  assert.equal(heatColor(8).background, "#c62826");
+  assert.equal(heatColor(4).background, "#e05044");
+  assert.equal(heatColor(0.5).background, "#f7c7b8");
+  assert.equal(heatColor(0).background, "#e9edf5");
+  assert.equal(heatColor(-1).background, "#b9e2c8");
+  assert.equal(heatColor(-2).background, "#6fc79a");
+  assert.equal(heatColor(-8).background, "#12885a");
+  assert.equal(heatColor(null).background, "#f0f2f7");
+  assert.equal(heatColor(undefined).color, "#a2a9b5");
+});
+
+test("signedPct / yiText：正负号与亿万元量纲", async () => {
+  const { signedPct, yiText } = await import("../src/logic/view.js");
+  assert.equal(signedPct(3.2145), "+3.21%");
+  assert.equal(signedPct(-1.5), "-1.50%");
+  assert.equal(signedPct(null), "—");
+  assert.equal(yiText(2.5e8), "2.50亿");
+  assert.equal(yiText(3.4e5), "34万");
+  assert.equal(yiText(0), "0");
+  assert.equal(yiText(null), "—");
+});
+
+test("板块格子行：字段透传，前端不加总不重算", async () => {
+  const { toBoardTile } = await import("../src/logic/view.js");
+  const t = toBoardTile({
+    kind: "industry", board_code: "A05", board_name: "农林牧渔", ret_pct: 1.5,
+    stock_count: 7, member_count: 9, up_count: 7, down_count: 0, flat_count: 0,
+    limit_up_count: 3, turnover: 1.2e9, turnover_ratio: 1.58,
+    leader_name: "宏英智能", leader_ret: 11.86, lagger_name: "x", lagger_ret: -1,
+  });
+  assert.deepEqual([t.code, t.name, t.retText], ["A05", "农林牧渔", "+1.50%"]);
+  assert.deepEqual([t.stockCount, t.memberCount, t.limitUpCount], [7, 9, 3]);
+  assert.equal(t.heat.background, "#ef8371");
+  assert.equal(t.turnoverRatio, 1.58);
+});
+
+test("成分股行：停牌标记所需的 days/end_date 要带上", async () => {
+  const { toSectorMemberRow } = await import("../src/logic/view.js");
+  const m = toSectorMemberRow({ stock_code: "605303", stock_name: "园林股份", close: 32.21,
+    ret_pct: 23.6468, pct_last: 2.156, days: 3, limit_up: true, turnover: 8.6e8, end_date: "2026-10-09" });
+  assert.deepEqual([m.code, m.name, m.retText], ["605303", "园林股份", "+23.65%"]);
+  assert.equal(m.limitUp, true);
+  assert.equal(m.days, 3);
+  assert.equal(m.endDate, "2026-10-09");
+});

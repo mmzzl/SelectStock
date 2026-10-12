@@ -181,3 +181,86 @@ export function toUpgradeInfo(s) {
       : null,
   };
 }
+// —— 板块热力图（格子颜色 = 区间涨幅，红涨绿跌；其余指标只在详情页出文字）——
+const HEAT_STOPS = [
+  { min: 6, bg: "#c62826", fg: "#ffffff" },
+  { min: 3, bg: "#e05044", fg: "#ffffff" },
+  { min: 1.5, bg: "#ef8371", fg: "#ffffff" },
+  { min: 0.005, bg: "#f7c7b8", fg: "#7a2b21" },
+  { min: -0.005, bg: "#e9edf5", fg: "#5b6270" },
+  { min: -1.5, bg: "#b9e2c8", fg: "#1c5a35" },
+  { min: -3, bg: "#6fc79a", fg: "#0d3f24" },
+  { min: -6, bg: "#2fa26e", fg: "#ffffff" },
+  { min: -Infinity, bg: "#12885a", fg: "#ffffff" },
+];
+
+/** 格子底色：涨幅缺失（数据没跑出来）给中性灰，绝不给「0% 的平色」骗人。 */
+export function heatColor(ret) {
+  const v = num(ret);
+  if (v === null) return { background: "#f0f2f7", color: "#a2a9b5" };
+  const stop = HEAT_STOPS.find((s) => v >= s.min) || HEAT_STOPS[HEAT_STOPS.length - 1];
+  return { background: stop.bg, color: stop.fg };
+}
+
+export function signedPct(v, digits = 2) {
+  const n = num(v);
+  if (n === null) return "—";
+  return `${n > 0 ? "+" : ""}${n.toFixed(digits)}%`;
+}
+
+/** 成交额单位是元，页面按亿/万显示；后端已汇总好，这里只做量纲换词。 */
+export function yiText(v) {
+  const n = num(v);
+  if (n === null) return "—";
+  const a = Math.abs(n);
+  if (a >= 1e8) return `${(n / 1e8).toFixed(2)}亿`;
+  if (a >= 1e4) return `${(n / 1e4).toFixed(0)}万`;
+  return n.toFixed(0);
+}
+
+export function toBoardTile(b) {
+  return {
+    code: b.board_code,
+    kind: b.kind,
+    name: b.board_name || b.board_code,
+    ret: num(b.ret_pct),
+    retText: signedPct(b.ret_pct),
+    heat: heatColor(b.ret_pct),
+    stockCount: num(b.stock_count),
+    memberCount: num(b.member_count),
+    upCount: num(b.up_count),
+    downCount: num(b.down_count),
+    limitUpCount: num(b.limit_up_count),
+    turnover: num(b.turnover),
+    turnoverRatio: num(b.turnover_ratio),
+    leaderName: b.leader_name || "",
+    leaderRet: num(b.leader_ret),
+    laggerName: b.lagger_name || "",
+    laggerRet: num(b.lagger_ret),
+  };
+}
+
+export function toSectorMemberRow(m) {
+  return {
+    code: m.stock_code,
+    name: m.stock_name || m.stock_code,
+    close: num(m.close),
+    ret: num(m.ret_pct),
+    retText: signedPct(m.ret_pct),
+    pctLast: num(m.pct_last),
+    turnover: num(m.turnover),
+    days: num(m.days),
+    limitUp: m.limit_up === true,
+    endDate: m.end_date || "",
+  };
+}
+
+/** K 线条目：canvas 要的字段全在这里对齐好，缺最高/最低时退化成用收盘画。 */
+export function toKlineBar(b) {
+  return {
+    date: b.date,
+    open: num(b.open), high: num(b.high ?? b.close), low: num(b.low ?? b.close),
+    close: num(b.close), volume: num(b.volume),
+    ma5: num(b.ma5), ma10: num(b.ma10), ma20: num(b.ma20), ma60: num(b.ma60),
+  };
+}
