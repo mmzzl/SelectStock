@@ -23,3 +23,7 @@ import pytest
 def _isolate_env(tmp_path, monkeypatch):
     monkeypatch.setenv("PLUGIN_KLINE_DIR", str(tmp_path / "kline"))
     monkeypatch.setenv("PLUGIN_RULES_FILE", str(tmp_path / "no_rules.json"))
+    # 实时价有 30 秒进程内缓存：不清掉的话，上一个用例抓到的假价会漏进下一个用例
+    from portfolio import pricing
+
+    pricing._live_cache.clear()

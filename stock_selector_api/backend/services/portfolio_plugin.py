@@ -124,6 +124,33 @@ async def _http_pnl(payload: dict) -> dict:
         return resp.json()
 
 
+def _mock_quotes(holdings: list[dict]) -> dict:
+    """mock 没有行情，就不给价：让持仓列表继续用诊断落库的快照。
+
+    这里返回假价会把「诊断时算出来的盈亏」覆盖成编出来的数，比空着更糟——空着页面会显示
+    快照并标注来源，假价则让人照着假价做决策。
+    """
+    return {"results": []}
+
+
+async def _http_quotes(payload: dict) -> dict:
+    url = settings.plugin_base_url.rstrip("/") + "/api/portfolio/quotes"
+    # 短于 analyze 的 30 秒：这是每次打开持仓页都要走的一次问价，问不到就退回快照，不该拖住页面
+    async with httpx.AsyncClient(timeout=8) as client:
+        resp = await client.post(url, json=payload)
+        resp.raise_for_status()
+        body = resp.json()
+    return {"results": body.get("results", [])}
+
+
+async def call_plugin_quotes(payload: dict) -> dict:
+    """请求插件的持仓现值（latest_price/盈亏/价格时刻与来源），不落 run、不做判定。"""
+    payload = {**payload, "holdings": _canon_holdings(payload.get("holdings", []))}
+    if settings.plugin_mode == "http":
+        return await _http_quotes(payload)
+    return _mock_quotes(payload["holdings"])
+
+
 async def call_plugin_pnl(payload: dict) -> dict:
     """请求插件利润单点口径（per_code/realized_summary/unrealized_summary）。"""
     payload = {**payload,

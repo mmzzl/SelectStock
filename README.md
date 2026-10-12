@@ -933,7 +933,7 @@ supervisord 本身由发行版自带的 `supervisor.service` 托管并已 `enabl
 
 日志统一在 `logs/`：`api` / `celery-worker` / `plugin-selector` / `plugin-portfolio` / `scheduler` 各自的 `.out.log` 与 `.err.log`。
 
-> 注意有**两套互不重叠**的调度器：仓库根 `scheduler/scheduler.py` 跑 `config/inputs.conf` 的 `script://`（采集脚本）；后端进程内的 APScheduler 跑 `stock_selector_api/backend/conf/inputs.conf` 的 `task://`（设备巡检 5 分钟、17:30 选股、18:00 持仓诊断）。所以 API 进程要保持 `SCHEDULE_ENABLED=true`，同时**不要加 `--workers`**，否则定时任务会重复执行、SQLite 还会写锁竞争。
+> 注意有**两套互不重叠**的调度器：仓库根 `scheduler/scheduler.py` 跑 `config/inputs.conf` 的 `script://`（采集脚本）；后端进程内的 APScheduler 跑 `stock_selector_api/backend/conf/inputs.conf` 的 `task://`（设备巡检 5 分钟、17:30 选股、18:20 持仓诊断）。持仓诊断排在 18:20 是因为 `build_kline_features` 18:00 起跑、实测约 3 分钟，抢在它前面诊断出来的指标行还是上一交易日的。所以 API 进程要保持 `SCHEDULE_ENABLED=true`，同时**不要加 `--workers`**，否则定时任务会重复执行、SQLite 还会写锁竞争。
 
 ## session-context：跨会话上下文维护
 

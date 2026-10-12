@@ -58,28 +58,48 @@ class PnlBody(BaseModel):
     holdings: list[HoldingIn] = Field(default_factory=list)
 
 
+class QuotesBody(BaseModel):
+    natural_day: str = Field(min_length=8, max_length=16)
+    holdings: list[HoldingIn] = Field(min_length=1)
+
+
 @app.post("/api/portfolio/analyze")
 async def analyze(body: AnalyzeBody) -> dict:
+    from portfolio import pricing
+
+    holdings = [h.model_dump() for h in body.holdings]
+    # 只有「今天」需要实时价覆盖：历史日期的指标行收盘就是正确口径，不该去问行情，
+    # 也不该因为某只票本地没文件就顺带把 AKShare 拖进一次补跑。
+    quotes = (pricing.resolve([h["code"] for h in holdings], body.natural_day)
+              if pricing.wants_live(body.natural_day) else None)
     try:
-        out = analyze_holdings(
-            [h.model_dump() for h in body.holdings],
-            KlineProvider(natural_day=body.natural_day),
-        )
+        out = analyze_holdings(holdings, KlineProvider(natural_day=body.natural_day),
+                               quotes=quotes)
     except PricingError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     return out
 
 
+@app.post("/api/portfolio/quotes")
+async def quotes(body: QuotesBody) -> dict:
+    """持仓页的实时价：只给价格与盈亏现值，不落 run、不做判定（每次打开页面都会调）。"""
+    from portfolio.analyzer import quote_holdings
+
+    return quote_holdings([h.model_dump() for h in body.holdings], body.natural_day)
+
+
 @app.post("/api/portfolio/pnl")
 async def pnl(body: PnlBody) -> dict:
-    from portfolio.pricing import latest_price
+    from portfolio import pricing
     from portfolio.realized import compute_pnl
 
+    codes = {t.stock_code for t in body.trades} | {h.code for h in body.holdings}
+    pricing.prewarm(sorted(codes), body.natural_day)   # 逐只取价前先一次批量问完，别 N 个 HTTP
     try:
         return compute_pnl(
             [t.model_dump() for t in body.trades],
             [h.model_dump() for h in body.holdings],
-            lambda code: latest_price(code, body.natural_day),
+            lambda code: pricing.latest_price(code, body.natural_day),
         )
     except PricingError as exc:
         raise HTTPException(status_code=503, detail=str(exc))

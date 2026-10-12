@@ -119,7 +119,9 @@ class Settings(BaseSettings):
     upgrade_upload_dir: str = (BACKEND_DIR.parent / "data" / "uploads" / "upgrade").as_posix()
 
     # ---------- 定时任务（盘后）----------
-    daily_diag_time: str = "18:00"
+    # 实际触发时刻由 conf/inputs.conf 的 cron 决定（调度器读那份配置），这里只是留个可查的默认值；
+    # 诊断排在 18:20，等 18:00 的日线特征重建（约 3 分钟）跑完，否则指标行还是上一交易日的。
+    daily_diag_time: str = "18:20"
     daily_selection_time: str = "17:30"
 
     # 部署

@@ -30,10 +30,26 @@ export function toHoldingRow(s) {
     actionText: ACTION_TEXT[s.action] || "无建议",
     actionReason: s.action_reason || "",
     latestPrice: num(s.latest_price),
+    priceTime: s.price_time || "", priceSource: s.price_source || "",
     pnl: num(s.holding_pnl), pnlPct: num(s.pnl_pct),
     sellTrigger: num(s.sell_trigger_price),
     diagRunId: s.diag_run_id || null,
   };
+}
+
+/** 现价是哪一刻的数：实时价给时分，退回日线/诊断快照时给日期。
+ *  持仓价曾经整天不动（读的是上一交易日收盘），光看数字看不出它过期了，所以来源必须写出来。 */
+export function priceStampText(r) {
+  const stamp = String(r?.priceTime || "");
+  const src = r?.priceSource || "";
+  if (!stamp && !src) return "";
+  if (src === "live") {
+    // 腾讯行情时间是 20261012161445，页面只要时分
+    return /^\d{14}$/.test(stamp) ? `${stamp.slice(8, 10)}:${stamp.slice(10, 12)} 实时` : "实时";
+  }
+  const day = stamp.slice(5, 10);          // 日线/快照的时间戳就是一日期 YYYY-MM-DD
+  if (src === "snapshot") return day ? `${day} 诊断` : "诊断快照";
+  return day ? `${day} 收盘` : "";
 }
 
 /** 卖出价格线的文案。线是插件按同一条 sell 规则反算的翻转价，所以它和 action 不会打架：

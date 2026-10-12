@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { toHoldingRow, toTradeRow, toPnlView, toSelectionJobRow, toSelectionResultRow,
          toMessageRow, toDiagRow, toPreviewRow, toUpgradeInfo, fmtTime,
+         priceStampText,
          riskText, riskClass, sortByRiskDesc, buyLevelText, sellTriggerText,
          orderPlanText, riskAdjustText } from "../src/logic/view.js";
 
@@ -33,6 +34,24 @@ test("持仓行：快照字段透传，不重算", () => {
   assert.equal(row.action, "sell");
   assert.equal(row.diagRunId, "r9");
   assert.equal(row.sellTrigger, 1512.3);
+});
+
+test("持仓行：现价来源透传（老接口没有这两个字段时为空串）", () => {
+  const row = toHoldingRow({ code: "1", quantity: 1, cost_price: 1,
+                             price_time: "20261012161445", price_source: "live" });
+  assert.equal(row.priceTime, "20261012161445");
+  assert.equal(row.priceSource, "live");
+  const legacy = toHoldingRow({ code: "1", quantity: 1, cost_price: 1 });
+  assert.equal(legacy.priceTime, "");
+  assert.equal(legacy.priceSource, "");
+});
+
+test("现价时刻文案：实时给时分，日线/快照给日期，让旧价一眼看得出来的", () => {
+  assert.equal(priceStampText({ priceTime: "20261012161445", priceSource: "live" }), "16:14 实时");
+  assert.equal(priceStampText({ priceTime: "2026-10-11", priceSource: "kline" }), "10-11 收盘");
+  assert.equal(priceStampText({ priceTime: "2026-10-11", priceSource: "snapshot" }), "10-11 诊断");
+  assert.equal(priceStampText({ priceTime: "", priceSource: "snapshot" }), "诊断快照");
+  assert.equal(priceStampText({ priceTime: "", priceSource: "" }), "");
 });
 
 test("卖出触发价文案：未触发说\"动到哪开始卖\"，已触发说\"动回去就不必卖\"", () => {

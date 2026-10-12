@@ -213,6 +213,10 @@ curl -s http://localhost:8000/api/portfolio/analyze \
 
 同一 `user_id + natural_day + holdings` 重复调用 → 返回相同 `run_id`（幂等重放）。
 
+**取价口径（`plugin/portfolio/pricing.py`）**：判定的基准日是**今天**时先问腾讯批量行情（一次请求覆盖整批代码，30 秒进程内缓存），问不到才退回日线 parquet 那一根；基准日是**历史日期**时只用那一天的收盘，绝不问行情——否则同一份数据两次诊断出两个盈亏。`latest_price` 因此可能是实时价，而买卖判定始终来自指标行。
+
+**`POST /api/portfolio/quotes`** — 持仓页每次打开都调它取「现在这一眼」的价：不落 run、不做判定，只回 `latest_price`/`holding_pnl`/`pnl_pct`/`market_value` 加 `price_time`、`price_source`（`live` 时是 `20261012150000` 这样的行情时刻，`kline`/`snapshot` 时是日期）。后端 `GET /api/v1/holdings` 会把它盖在诊断快照之上，插件不可达则保留快照并标 `price_source=snapshot`，App 持仓页把来源与时刻显示在现价后面。
+
 **`GET /api/portfolio/runs`** — 按 user_id 隔离的诊断历史列表：
 
 ```bash

@@ -104,3 +104,24 @@ async def test_db_trades_with_datetime_are_canonicalized(monkeypatch):
         "stamp_tax": 3.94, "transfer_fee": 0.0, "settled_amount": 7871.06}]
     assert captured["payload"]["holdings"] == [{
         "code": "002927", "name": "泰永长征", "quantity": 400, "cost_price": 18.0}]
+
+
+async def test_quotes_mock_mode_gives_no_prices(monkeypatch):
+    """mock 插件没有行情：返回空 results，持仓列表才不会拿假价盖掉诊断快照。"""
+    monkeypatch.setattr(portfolio_plugin.settings, "plugin_mode", "mock")
+    out = await portfolio_plugin.call_plugin_quotes({"natural_day": "2026-10-12",
+                                                     "holdings": HOLDINGS})
+    assert out == {"results": []}
+
+
+async def test_quotes_http_posts_canonical_holdings(monkeypatch):
+    captured = _use_http_plugin(monkeypatch, {"results": [
+        {"code": "600519", "latest_price": 1400.0, "price_time": "20261012150000",
+         "price_source": "live"}]})
+    out = await portfolio_plugin.call_plugin_quotes({
+        "user_id": "u1", "natural_day": "2026-10-12", "holdings": HOLDINGS})
+    assert captured["url"] == "http://p:8001/api/portfolio/quotes"
+    assert captured["payload"]["holdings"] == [
+        {"code": h["code"], "name": h["name"], "quantity": h["quantity"],
+         "cost_price": h["cost_price"]} for h in HOLDINGS]
+    assert out["results"][0]["latest_price"] == 1400.0

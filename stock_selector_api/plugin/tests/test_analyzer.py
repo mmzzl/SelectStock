@@ -59,3 +59,54 @@ def test_analyze_missing_row_sorted_to_sell(monkeypatch):
     assert by_code["600003"]["action"] == "hold"
     assert by_code["600003"]["action_reason"] == "行情缺失，维持原判不做交易建议"
     assert by_code["600003"]["sell_trigger_price"] is None   # 没行情就没法反算，不能编一个价
+
+
+def test_analyze_swaps_only_the_price_when_live_quote_given(monkeypatch):
+    """18:00 之前手动触发诊断：指标行还是上一交易日的，判定照旧，但落库的盈亏得按现价算。"""
+    monkeypatch.setenv("PLUGIN_RULES_FILE", "")
+    out = analyze_holdings(HOLDINGS[:1], FakeProvider(ROWS),
+                           quotes={"600001": {"price": 9.6}})
+    r = out["results"][0]
+    assert r["latest_price"] == 9.6
+    assert r["holding_pnl"] == -40.0
+    assert r["action"] == "sell"                 # 判定仍来自指标行（close 9.0）
+    assert r["sell_trigger_price"] == 9.5
+
+
+def test_quote_holdings_reports_price_with_time_and_source(monkeypatch):
+    from portfolio import pricing
+    from portfolio.analyzer import quote_holdings
+
+    monkeypatch.setattr(pricing, "resolve", lambda codes, day: {
+        "600001": {"price": 9.5, "price_time": "20261012150000", "price_source": "live"},
+        "600002": {"price": 25.0, "price_time": "2026-10-10", "price_source": "kline"},
+    })
+    out = quote_holdings(HOLDINGS, "2026-10-12")
+    by = {r["code"]: r for r in out["results"]}
+    assert by["600001"]["latest_price"] == 9.5
+    assert by["600001"]["holding_pnl"] == round((9.5 - 10.0) * 100, 2)
+    assert by["600001"]["market_value"] == 950.0
+    assert by["600001"]["price_source"] == "live"
+    assert by["600002"]["price_time"] == "2026-10-10"    # 旧价带着旧日期回来
+    assert by["600003"]["latest_price"] is None          # 取不到价就留空，不编一个数
+    assert "holding_pnl" not in by["600003"]
+
+
+def test_quote_holdings_survives_one_code_without_data(monkeypatch):
+    """一只票（退市/没建过档案）取不到价不能让整页没有价。"""
+    from portfolio import pricing
+    from portfolio.analyzer import quote_holdings
+    from portfolio.pricing import PricingError
+
+    def resolve(codes, day):
+        if len(codes) > 1:
+            raise PricingError("整批取价失败")
+        if codes[0] == "600003":
+            raise PricingError(f"无行情: {codes[0]}")
+        return {codes[0]: {"price": 10.0, "price_time": "2026-10-10", "price_source": "kline"}}
+
+    monkeypatch.setattr(pricing, "resolve", resolve)
+    out = quote_holdings(HOLDINGS, "2026-10-12")
+    by = {r["code"]: r for r in out["results"]}
+    assert by["600001"]["latest_price"] == 10.0
+    assert by["600003"]["latest_price"] is None

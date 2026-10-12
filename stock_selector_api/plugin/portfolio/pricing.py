@@ -1,9 +1,21 @@
-"""portfolio/pricing.py — 行情取价：K线 parquet 优先（含指标列），AKShare 实时兜底。"""
+"""portfolio/pricing.py — 行情取价：**「今天」实时优先**（腾讯批量），日线 parquet 兜底。
+
+原来的口径是「parquet 优先、实时只在文件缺失时才问」，代价是持仓价整天不动：日线 parquet
+由 `build_kline_features.py` 每天 18:00 重建，所以收盘前读到的永远是**上一交易日**的收盘，
+盘中手动触发诊断也会把旧收盘落进当天 run。现在只要判据的日期就是今天，先问行情。
+
+历史日期不动：补跑 `natural_day=上周三` 必须用上周三那根收盘，否则同一份数据两次跑出两个
+盈亏，历史 run 也没法比。
+
+单位与字段解析统一走 `stock_selector.quote.tencent`，这里不再重复一遍下标。
+"""
 from __future__ import annotations
 
 import logging
 import os
+from datetime import date
 from pathlib import Path
+from time import monotonic
 
 import pandas as pd
 
@@ -11,6 +23,10 @@ from stock_selector.datasource.ak_source import AKShareSource
 from stock_selector.quote import tencent as tencent_quote
 
 logger = logging.getLogger(__name__)
+
+LIVE_CACHE_TTL = 30.0        # 秒：一次请求里同批代码只问一次行情（持仓列表每只都发一次是浪费）
+
+_live_cache: dict[str, tuple[float, str, float]] = {}    # code → (价格, 行情时刻, 本地抓取时刻)
 
 
 class PricingError(Exception):
@@ -49,13 +65,23 @@ def _load_kline_df(code: str) -> pd.DataFrame:
     return df
 
 
-def latest_price_from_df(df: pd.DataFrame, natural_day: str) -> float:
+def _latest_bar(df: pd.DataFrame, natural_day: str) -> pd.Series:
     if df is None or df.empty or "close" not in df.columns:
         raise PricingError("行情数据为空或缺少 close 列")
     sub = df[df["date"] <= natural_day] if "date" in df.columns else df
     if sub.empty:
         raise PricingError(f"natural_day({natural_day}) 前无行情")
-    return float(sub.sort_values("date").iloc[-1]["close"])
+    return sub.sort_values("date").iloc[-1]
+
+
+def latest_price_from_df(df: pd.DataFrame, natural_day: str) -> float:
+    return float(_latest_bar(df, natural_day)["close"])
+
+
+def _bar_date(df: pd.DataFrame, natural_day: str) -> str:
+    """那一根日线的日期——`price_source=kline` 时必须让调用方看得见价是哪天的。"""
+    row = _latest_bar(df, natural_day)
+    return str(row["date"])[:10] if "date" in row.index else ""
 
 
 def _ak_latest(code: str) -> float:
@@ -71,17 +97,36 @@ def _ak_latest(code: str) -> float:
     raise PricingError(f"AKShare 无行情: {code}")
 
 
-def _tencent_latest(code: str) -> float | None:
-    """实时价兜底：东财掐连接时（ETF 接口尤其频繁）腾讯行情仍给得到同一天收盘价。
+def live_quotes(codes: list[str]) -> dict[str, tuple[float, str]]:
+    """批量实时价（一次腾讯请求）+ `LIVE_CACHE_TTL` 秒进程内缓存，返回 {代码: (价格, 行情时刻)}。
 
-    字段解析统一走 stock_selector.quote.tencent，这里不再重复一遍下标和单位。
+    缓存不是可有可无的优化：持仓列表、利润分析、持仓诊断三条路径会在同一次页面加载里问同一
+    批代码，逐个问就是把三个请求当成三百个用。字段解析统一走 `stock_selector.quote.tencent`。
     """
-    try:
-        price = (tencent_quote.fetch([code]).get(str(code)) or {}).get("price")
-    except Exception as exc:   # 网络层异常要变成「缺价」而不是把整次诊断打挂
-        logger.warning("腾讯实时价(%s) 失败: %s", code, exc)
-        return None
-    return price if price and price > 0 else None
+    wanted = [str(c) for c in codes]
+    now = monotonic()
+    pending = [c for c in wanted
+               if _live_cache.get(c) is None or now - _live_cache[c][2] > LIVE_CACHE_TTL]
+    if pending:
+        try:
+            fetched = tencent_quote.fetch(pending)
+        except Exception as exc:      # 行情问不到 = 今天没有实时价，退回日线，不能把整次诊断打挂
+            logger.warning("腾讯实时价批量（%d 只）失败: %s", len(pending), exc)
+            fetched = {}
+        for code in pending:
+            item = fetched.get(code) or {}
+            price = item.get("price")
+            if price and price > 0:
+                _live_cache[code] = (float(price), str(item.get("quote_time") or ""), monotonic())
+    fresh = monotonic()
+    return {c: (_live_cache[c][0], _live_cache[c][1]) for c in wanted
+            if c in _live_cache and fresh - _live_cache[c][2] <= LIVE_CACHE_TTL}
+
+
+def _tencent_latest(code: str) -> float | None:
+    """单只实时价：走批量入口，保证同一次请求里不会为每只票各发一个 HTTP。"""
+    hit = live_quotes([str(code)]).get(str(code))
+    return hit[0] if hit else None
 
 
 # 场内基金（ETF/LOF）不在 stock_zh_a_hist 里，那条接口对 15/5 字头代码返回空表
@@ -110,10 +155,43 @@ def _window_start() -> str:
     return (date.today() - timedelta(days=240)).strftime("%Y%m%d")
 
 
+def wants_live(natural_day: str) -> bool:
+    """今天及以后才允许用实时价。补跑历史日期必须用那一天的收盘，否则同一份数据两次
+    诊断出两个盈亏，历史 run 之间也没法比。"""
+    return str(natural_day)[:10] >= date.today().isoformat()
+
+
+def resolve(codes: list[str], natural_day: str) -> dict[str, dict]:
+    """每只票的价 + 时刻 + 来源：今天实时优先，问不到行情退回日线那一根；历史只认那根收盘。
+
+    返回值里 `price_time` 对 `kline` 是**那根日线的日期**——持仓价一旦可能过期，就必须让
+    看的人知道它是几点/哪天的数，否则「今天跌了 9% 而页面纹丝不动」这种事无从发现。
+    """
+    live = live_quotes([str(c) for c in codes]) if wants_live(natural_day) else {}
+    out: dict[str, dict] = {}
+    for raw in codes:
+        code = str(raw)
+        if code in live:
+            price, stamp = live[code]
+            out[code] = {"price": round(price, 4), "price_time": stamp, "price_source": "live"}
+            continue
+        try:
+            df = _load_kline_df(code)
+        except PricingError:                     # 本地没文件（新标的/没建过）才走 AKShare
+            out[code] = {"price": round(_ak_latest(code), 4),
+                         "price_time": "", "price_source": "akshare"}
+            continue
+        out[code] = {"price": round(latest_price_from_df(df, natural_day), 4),
+                     "price_time": _bar_date(df, natural_day), "price_source": "kline"}
+    return out
+
+
+def prewarm(codes: list[str], natural_day: str) -> None:
+    """一次把整批代码的实时价问进缓存：逐只取价的旧调用点用它把 N 个请求压成 1 个。"""
+    if wants_live(natural_day) and codes:
+        live_quotes([str(c) for c in codes])
+
+
 def latest_price(code: str, natural_day: str) -> float:
-    """K线 parquet 优先；文件缺失 → AKShare 实时兜底。"""
-    try:
-        df = _load_kline_df(code)
-        return latest_price_from_df(df, natural_day)
-    except PricingError:
-        return _ak_latest(code)
+    """单只取价，口径同 `resolve`。批量场景请直接用 `resolve`/`prewarm`。"""
+    return resolve([code], natural_day)[str(code)]["price"]

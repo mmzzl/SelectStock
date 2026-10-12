@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 import re
+from datetime import date
 
 from core.exceptions import BizError
 from repositories import holdings_repo, portfolio_results, portfolio_runs, trades_repo
 from services import portfolio_plugin
+
+logger = logging.getLogger("holdings_service")
 
 MAX_HOLDINGS = 200
 _CODE_RE = re.compile(r"^\d{6}$")
@@ -26,7 +30,8 @@ async def list_holdings(user_id: str, enabled_only: bool = False) -> list[dict]:
         rows = await holdings_repo.list_enabled(user_id)
     else:
         rows = await holdings_repo.list_by_user(user_id)
-    return await _attach_diag_snapshot(user_id, rows)
+    rows = await _attach_diag_snapshot(user_id, rows)
+    return await _attach_live_quotes(rows)
 
 
 async def _attach_diag_snapshot(user_id: str, rows: list[dict]) -> list[dict]:
@@ -46,6 +51,40 @@ async def _attach_diag_snapshot(user_id: str, rows: list[dict]) -> list[dict]:
                     "suggestion", "sell_trigger_price"):
             h[key] = snap.get(key) if snap else None
         h["diag_run_id"] = latest["run_id"]
+        # 快照里的价是那次诊断（通常是前一天 18:00 之后）取的，不标出来就会被当成最新价读
+        h["price_time"] = latest.get("natural_day") or ""
+        h["price_source"] = "snapshot"
+    return rows
+
+
+async def _attach_live_quotes(rows: list[dict]) -> list[dict]:
+    """现价改问插件（批量行情，今天实时优先），快照退成兜底。
+
+    原来持仓页只显示诊断落库的那个数：日线 parquet 每天 18:00 才重建，收盘前打开页面看到的
+    永远是上一交易日收盘，「今天跌了 9% 而页面纹丝不动」就是这么来的。
+    插件不可达/没有行情时整页照常返回快照价，并把来源标成 snapshot，页面能显示它是旧价。
+    """
+    if not rows:
+        return rows
+    try:
+        out = await portfolio_plugin.call_plugin_quotes({
+            "natural_day": date.today().isoformat(),
+            "holdings": [{"code": r["code"], "name": r.get("name", ""),
+                          "quantity": r["quantity"], "cost_price": r["cost_price"]}
+                         for r in rows]})
+    except Exception as exc:            # 行情服务抖动不能让持仓页 500
+        logger.warning("持仓现价刷新失败，退回诊断快照: %s", exc)
+        return rows
+    by_code = {str(r["code"]): r for r in out.get("results", [])}
+    for h in rows:
+        q = by_code.get(str(h["code"]))
+        if not q or q.get("latest_price") is None:
+            continue
+        for key in ("latest_price", "holding_pnl", "pnl_pct", "market_value"):
+            if key in q:
+                h[key] = q[key]
+        h["price_time"] = q.get("price_time") or ""
+        h["price_source"] = q.get("price_source") or ""
     return rows
 
 

@@ -3,7 +3,7 @@
 import { ref, computed } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
-import { sellTriggerText, toHoldingRow, toPnlView } from "../../logic/view.js";
+import { priceStampText, sellTriggerText, toHoldingRow, toPnlView } from "../../logic/view.js";
 
 const rows = ref([]); const loading = ref(false); const err = ref("");
 const summary = ref(null);           // 来自 /holdings/pnl 的 summary，前端不做加总
@@ -38,6 +38,8 @@ const grouped = computed(() => {
 const pnlCls = (v) => (v === null || v === 0 ? "" : v > 0 ? "up" : "down");
 const money = (v) => (v === null || v === undefined ? "—" : Number(v).toFixed(2));
 const signed = (v) => (v === null || v === undefined ? "—" : (v > 0 ? "+" : "") + money(v));
+// 现价后面带上「16:14 实时」/「10-11 收盘」：光看数字分不出它是新价还是昨天的收盘
+const stamp = (r) => { const t = priceStampText(r); return t ? `（${t}）` : ""; };
 const goEdit = (r) => uni.navigateTo({ url: `/pages/holdings/edit${r ? `?code=${encodeURIComponent(r.code)}` : ""}` });
 const goImport = () => uni.navigateTo({ url: "/pages/holdings/import" });
 const goProfit = () => uni.navigateTo({ url: "/pages/profit/index" });
@@ -89,7 +91,7 @@ const goTrades = () => uni.navigateTo({ url: "/pages/trades/index" });
         </view>
         <view v-for="r in g.items" :key="r.code" class="trow" @click="goEdit(r)">
           <view class="l">
-            <text class="d">现价 {{ r.latestPrice ?? "—" }} · 成本 {{ r.cost ?? "—" }} · {{ r.shares ?? "—" }} 股</text>
+            <text class="d">现价 {{ r.latestPrice ?? "—" }}{{ stamp(r) }} · 成本 {{ r.cost ?? "—" }} · {{ r.shares ?? "—" }} 股</text>
             <text class="n">{{ r.name }}（{{ r.code }}）</text>
             <text v-if="r.actionReason" class="sub">{{ r.actionReason }}</text>
             <text v-if="r.agg && r.agg.realizedPnl" class="sub acc">已实现 {{ signed(r.agg.realizedPnl) }} · 含已实现合计 {{ signed(r.agg.totalPnl) }}</text>
