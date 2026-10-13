@@ -84,7 +84,10 @@ def save_watch_mongo(db, docs, collect_date) -> int:
     for d in docs:
         doc = dict(d)
         doc["source_news_ids"] = list(doc.get("source_news_ids") or [])
-        key = f"{collect_date}|{doc['direction']}|{doc['code'] or doc['name']}"
+        # 键口径要和 _merge_target 一致（无代码时用 NAME: 前缀）。这里曾写成 code or name，
+        # 于是 (code="BK0474", name=…) 与 (code="", name="BK0474") 撞同一个 _id，
+        # ordered insert 从第 541 条中止：一晚 1070 个标的只进了一半，日志仅一行 warning。
+        key = f"{collect_date}|{doc['direction']}|{doc['code'] or ('NAME:' + doc['name'])}"
         doc["_id"] = md5(key.encode("utf-8")).hexdigest()[:16]
         out.append(doc)
     if out:

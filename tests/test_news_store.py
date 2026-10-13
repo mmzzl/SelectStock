@@ -96,6 +96,21 @@ class TestStoreMongo:
         assert len(doc["_id"]) == 16 and doc["_id"] == doc["_id"].lower()
         assert self.db["watch_target"].count_documents({"collect_date": "2026-09-06"}) == 1
 
+    def test_watch_mongo_code_and_name_keys_do_not_collide(self):
+        # (code="BK0474") 与 (code="", name="BK0474") 是两个不同标的。_id 键曾写成
+        # `code or name`，没带合并键用的 NAME: 前缀，两条撞同一个 _id，
+        # ordered insert 从中间断掉：一晚 1070 个标的只落库 541 个。
+        docs = [
+            {"collect_date": "2026-09-07", "code": "BK0474", "name": "芯片", "category": "板块",
+             "direction": "bullish", "score": 3, "priority": "", "reason": "r1",
+             "source_news_ids": ["n1"], "llm_model": "m"},
+            {"collect_date": "2026-09-07", "code": "", "name": "BK0474", "category": "板块",
+             "direction": "bullish", "score": 2, "priority": "", "reason": "r2",
+             "source_news_ids": ["n2"], "llm_model": "m"},
+        ]
+        save_watch_mongo(self.db, docs, "2026-09-07")
+        assert self.db["watch_target"].count_documents({"collect_date": "2026-09-07"}) == 2
+
     def test_indexes(self):
         create_indexes(self.db)
         news_indexes = [i["name"] for i in self.db["news_analysis"].list_indexes()]

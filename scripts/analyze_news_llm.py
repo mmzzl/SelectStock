@@ -14,6 +14,7 @@
     python scripts/analyze_news_llm.py --no-mongo             # 只写 parquet
     python scripts/analyze_news_llm.py --stats heat --start 2026-09-01 --end 2026-09-08 --category 板块 --top 20
     python scripts/analyze_news_llm.py --stats trend --code BK0464 --start 2026-09-01 --end 2026-09-08
+    python scripts/analyze_news_llm.py --rebuild-watch 2026-10-13   # 改了合并规则后回补，不重跑 LLM
 """
 
 import argparse
@@ -29,7 +30,7 @@ import pandas as pd
 import yaml
 
 from stock_selector.news.analyze import analyze_news
-from stock_selector.news.fetch import fetch_news
+from stock_selector.news.fetch import fetch_news, news_to_item
 from stock_selector.news.names import load_name_maps
 from stock_selector.news.schema import ANALYSIS_SCHEMA, WATCH_SCHEMA
 from stock_selector.news.stats import (
@@ -122,17 +123,17 @@ def run_analysis(args, cfg):
     mongo_cfg = cfg.get("mongodb", {})
     collect_date = datetime.today().strftime("%Y-%m-%d")
 
+    name_maps = None
     if args.demo:
         news_list = _demo_items()
     else:
         db = connect_mongo(mongo_cfg)
         news_list = []
-        name_maps = None
         if db is not None:
             try:
                 name_maps = load_name_maps(db)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("[mongo] 名称映射加载失败(%s)，hint 回退仅代码", exc)
+                logger.warning("[mongo] 名称映射加载失败(%s)，hint 回退仅代码、代码校验跳过", exc)
             try:
                 news_list = fetch_news(db[mongo_cfg.get("collection", "news")],
                                        days=args.days, limit=args.limit, name_maps=name_maps)
@@ -159,7 +160,7 @@ def run_analysis(args, cfg):
                      100 * failed / max(len(rows), 1))
 
     watch_docs = [] if all_failed else build_watch_targets(
-        rows, hints_by_news, collect_date, llm_cfg.get("model", ""))
+        rows, hints_by_news, collect_date, llm_cfg.get("model", ""), name_maps)
     if all_failed:
         # 全军覆没时不重写 watch：整日 delete+insert 会把昨天那批好数据换成空表，
         # 页面和盘中腿会一起变成「今天没有消息面」。留着上一批，比留着一片空白有用。
@@ -218,6 +219,46 @@ def print_watch_summary(watch_docs):
             print(f"[{t['category']}] {ident} {t['name']} ({t['direction']} {t['score']:+d}, {t['priority']}, {len(t['source_news_ids'])}条新闻)")
         else:
             print(f"[{t['category']}] {ident} {t['name']} ({t['direction']} {t['score']:+d}, {len(t['source_news_ids'])}条新闻)")
+
+
+def rebuild_watch(args, cfg):
+    """不重跑 LLM，只用库里已有的 news_analysis 行重新合并 watch_target。
+
+    合并规则（targets.py）一改就得回补，而重跑一晚 167 条是 40 分钟外加一轮限流配额。
+    """
+    from bson.errors import InvalidId
+    from bson.objectid import ObjectId
+
+    day = args.rebuild_watch
+    mongo_cfg = cfg.get("mongodb", {})
+    db = connect_mongo(mongo_cfg)
+    if db is None:
+        raise SystemExit("回补需要 MongoDB，--no-mongo 在这里不适用")
+    name_maps = load_name_maps(db)
+    rows = list(db["news_analysis"].find({"collect_date": day}))
+    if not rows:
+        raise SystemExit(f"{day} 没有 news_analysis 行")
+
+    news_col = db[mongo_cfg.get("collection", "news")]
+    hints_by_news = {}
+    for row in rows:
+        news_id = row.get("news_id", "")
+        try:
+            doc = news_col.find_one({"_id": ObjectId(news_id)})
+        except (InvalidId, TypeError):
+            doc = None
+        if doc:
+            hints_by_news[news_id] = news_to_item(doc, name_maps)["hints"]
+
+    watch_docs = build_watch_targets(rows, hints_by_news, day,
+                                     rows[0].get("llm_model", ""), name_maps)
+    if not watch_docs:
+        # 整日 delete+insert 会把好数据换成空表，宁可不写
+        raise SystemExit(f"{day} 合并后没有任何标的，拒绝覆盖既有 watch_target")
+    save_watch_parquet(pd.DataFrame(watch_docs, columns=WATCH_SCHEMA), day, WATCH_DIR)
+    save_watch_mongo(db, watch_docs, day)
+    print(f"回补 {day}：{len(rows)} 条新闻 → {len(watch_docs)} 个标的")
+    print_watch_summary(watch_docs)
 
 
 def run_stats(args, cfg):
@@ -285,6 +326,8 @@ def main() -> None:
     parser.add_argument("--demo", action="store_true", help="用内置示例新闻演示")
     parser.add_argument("--no-mongo", action="store_true", help="只写 parquet，不写 Mongo")
     parser.add_argument("--stats", choices=["heat", "trend"], help="跨天统计（与分析互斥）")
+    parser.add_argument("--rebuild-watch", default=None, metavar="YYYY-MM-DD",
+                        help="只用已有 news_analysis 重新合并 watch_target，不重跑 LLM")
     parser.add_argument("--start", default=None, help="统计起始 YYYY-MM-DD")
     parser.add_argument("--end", default=None, help="统计结束 YYYY-MM-DD")
     parser.add_argument("--category", default=None, help="统计 category 过滤（heat）")
@@ -295,6 +338,10 @@ def main() -> None:
 
     setup_logging()
     cfg = load_config()
+
+    if args.rebuild_watch:
+        rebuild_watch(args, cfg)
+        return
 
     if args.stats:
         if args.stats == "trend" and not args.code:

@@ -32,11 +32,54 @@ def _backfill_code(item, hints):
     return ""
 
 
-def _to_target(item, direction, hints, collect_date, llm_model):
+def _norm_name(name: str) -> str:
+    """名称对不上大多是全角/空格问题：「张 裕Ａ」和「张裕A」是同一只。"""
+    s = str(name or "").replace(" ", "").replace("\u3000", "").upper()
+    return s.translate(str.maketrans("ＡＢＣＤ", "ABCD"))
+
+
+def _names_match(left: str, right: str) -> bool:
+    a, b = _norm_name(left), _norm_name(right)
+    if not a or not b:
+        return False
+    return a == b or a in b or b in a
+
+
+def _verify_code(code: str, name: str, name_maps) -> str:
+    """代码要能被名称佐证，否则丢掉代码（名称仍保留）。
+
+    LLM 会给出境外市场的代码：000830 在韩国是 SK海力士、在 A 股是鲁西化工，1347 是华虹宏力
+    的港股代码。这些代码原样透出会让 App 把它当 A 股跳去 K 线页，显示的完全是另一只股票。
+    BK 打头的是东财板块命名空间，本表没收录也不跟 A 股代码撞，直接留着。
+    """
+    if not code or not name_maps:
+        return code
+    board_map, stock_map = name_maps
+    if code.upper().startswith("BK"):
+        return code
+    official = stock_map.get(code)
+    if official is not None:
+        return code if _names_match(name, official) else ""
+    return ""
+
+
+def _resolve_name(name: str, code: str, name_maps) -> str:
+    """模型会把 hint 里的代码当名字抄过来（「BK0800」），能查到权威名就换掉。"""
+    if not name_maps or not code:
+        return name
+    if name and name != code:
+        return name
+    board_map, stock_map = name_maps
+    return board_map.get(code) or stock_map.get(code) or name
+
+
+def _to_target(item, direction, hints, collect_date, llm_model, name_maps=None):
+    name = item.get("name", "")
+    code = _verify_code(_backfill_code(item, hints), name, name_maps)
     return {
         "collect_date": collect_date,
-        "code": _backfill_code(item, hints),
-        "name": item.get("name", ""),
+        "code": code,
+        "name": _resolve_name(name, code, name_maps),
         "category": item.get("category", ""),
         "direction": direction,
         "score": int(item.get("score", 0) or 0),
@@ -78,21 +121,25 @@ def _merge_target(merged, target, news_id):
             old[field] = target[field]
 
 
-def build_watch_targets(rows, hints_by_news, collect_date, llm_model):
+def build_watch_targets(rows, hints_by_news, collect_date, llm_model, name_maps=None):
     """把当日 news_analysis 行拆解合并为 watch_target 列表。
 
     hints_by_news: {news_id: [NormalizedHint, ...]} 用于 code 回填。
+    name_maps: (board_map, stock_map)，用于校验代码确实是名称那只标的；不传则不校验。
     """
     merged = {}
     for row in rows:
         news_id = row.get("news_id", "")
         hints = hints_by_news.get(news_id, []) if hints_by_news else []
         for it in _dict_items(row, "bullish"):
-            _merge_target(merged, _to_target(it, "bullish", hints, collect_date, llm_model), news_id)
+            _merge_target(merged, _to_target(it, "bullish", hints, collect_date, llm_model,
+                                            name_maps), news_id)
         for it in _dict_items(row, "bearish"):
-            _merge_target(merged, _to_target(it, "bearish", hints, collect_date, llm_model), news_id)
+            _merge_target(merged, _to_target(it, "bearish", hints, collect_date, llm_model,
+                                            name_maps), news_id)
         for it in _dict_items(row, "watchlist"):
-            _merge_target(merged, _to_target(it, "watch", hints, collect_date, llm_model), news_id)
+            _merge_target(merged, _to_target(it, "watch", hints, collect_date, llm_model,
+                                            name_maps), news_id)
         for it in _dict_items(row, "risks"):
             _merge_target(merged, _risk_to_target(it, collect_date, llm_model), news_id)
     return list(merged.values())
