@@ -350,3 +350,53 @@ export function toKlineBar(b) {
     ma5: num(b.ma5), ma10: num(b.ma10), ma20: num(b.ma20), ma60: num(b.ma60),
   };
 }
+
+/** 消息面四类的展示口径：标签和颜色在前端固定，方向/强度/理由全部来自服务端。 */
+export const NEWS_DIRS = [
+  { key: "bearish", label: "利空", text: "利空", cls: "neg" },
+  { key: "risk", label: "风险", text: "风险", cls: "warn" },
+  { key: "bullish", label: "利好", text: "利好", cls: "pos" },
+  { key: "watch", label: "关注", text: "关注", cls: "neu" },
+];
+
+const NEWS_DIR = Object.fromEntries(NEWS_DIRS.map((d) => [d.key, d]));
+
+/** code 只有六位数字才是个股；BK 开头的是板块码，不能拿去开个股 K 线。 */
+export function toNewsItem(r) {
+  const d = NEWS_DIR[r.direction] || { text: r.direction || "", cls: "neu" };
+  const isStock = /^\d{6}$/.test(String(r.code || ""));
+  const score = num(r.score) ?? 0;
+  return {
+    code: r.code || "",
+    name: r.name || r.code || "—",
+    category: r.category || "",
+    direction: r.direction || "",
+    dirText: d.text, dirCls: d.cls,
+    score,
+    scoreText: r.direction === "watch" ? (r.priority || "中") : `${score > 0 ? "+" : ""}${score}`,
+    reason: r.reason || "",
+    newsCount: num(r.news_count) ?? 0,
+    holding: r.holding === true,
+    isStock,
+  };
+}
+
+/**
+ * 顶部健康条：批次缺失、批次过期、LLM 分析失败率高都要出声。
+ * 这条是「静默空转」的最后防线——没内容可看时，至少要让人知道为什么。
+ */
+export function newsBanner(data) {
+  if (!data || !data.day) {
+    return { text: "近 5 天没有成功的消息面批次：LLM 分析可能全失败或调度没跑", cls: "bad" };
+  }
+  const h = data.health || {};
+  const rate = num(h.fail_rate);
+  if (rate !== null && rate > 0.2) {
+    return { text: `${data.day} 批次：分析失败 ${h.failed ?? 0}/${h.analyzed ?? 0} 条，清单可能不全`, cls: "bad" };
+  }
+  const stale = num(data.stale_days);
+  if (stale !== null && stale > 0) {
+    return { text: `这是 ${data.day} 的批次（${stale} 天前）`, cls: "muted" };
+  }
+  return { text: "", cls: "" };
+}

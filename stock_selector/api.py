@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .core.selector import list_strategies, run_select, strategy_details
+from .news import read as news_read
 from .sector_heat import HeatDataMissing, board_detail, heat, stock_kline
 
 # 内核用 logger("stock_selector") 打进度与风险剔除明细；本进程是入口，负责挂 handler，
@@ -89,6 +90,16 @@ def sector_kline(code: str = Query(..., min_length=6, max_length=6), days: int =
         return {"code": 1, "message": str(exc), "data": None}
     except ValueError as exc:
         return {"code": 2, "message": str(exc), "data": None}
+
+
+@app.get("/api/news/daily")
+def news_daily(day: str = Query("", max_length=10, description="YYYY-MM-DD；留空取最近一批"),
+               limit: int = Query(60, ge=1, le=200)):
+    """消息面当日全貌：利好/利空/风险/关注四类清单 + LLM 分析健康位。"""
+    db = news_read.connect()
+    if db is None:
+        return {"code": 1, "message": "消息面数据源不可用", "data": None}
+    return {"code": 0, "data": news_read.daily(db, day or None, limit=limit)}
 
 
 @app.get("/api/health")

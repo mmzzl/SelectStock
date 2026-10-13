@@ -96,17 +96,20 @@ def get_client(llm_cfg: dict):
 
 
 def chat_completion(llm_cfg: dict, messages: list[dict]) -> str:
-    """调用智谱 zai-sdk chat.completions，返回模型文本。"""
+    """调用智谱 zai-sdk chat.completions，返回模型文本。
+
+    参数一律听 config.yaml 的 `llm` 节。这里曾经写死 `max_tokens=65536`、`temperature=1.0`
+    并且不开思考开关，实测一条新闻 55 秒（配置写的 2048 被完全忽略）；关掉思考模式同一
+    条 23 秒、token 从 2064 降到 1260，多空/风险的拆解结果不变。一晚 167 条新闻，
+    差的是 2.5 小时和 6 小时。
+    """
     client = get_client(llm_cfg)
     resp = client.chat.completions.create(
         model=llm_cfg["model"],
         messages=messages,
-        # thinking={
-        # "type": "enabled",    # 启用深度思考模式
-        # },
-        max_tokens=65536,          # 最大输出 tokens
-        temperature=1.0           # 控制输出的随机性
-        # temperature=float(llm_cfg.get("temperature", 0.3)),
+        max_tokens=int(llm_cfg.get("max_tokens", 2048)),
+        temperature=float(llm_cfg.get("temperature", 0.3)),
+        thinking={"type": llm_cfg.get("thinking", "disabled")},
     )
     return resp.choices[0].message.content.strip()
 
@@ -121,6 +124,18 @@ def _extract_json(text: str) -> dict:
     if start == -1 or end <= start:
         raise ValueError(f"输出中没有 JSON: {text[:200]}")
     return json.loads(text[start : end + 1])
+
+
+def _retry_wait(exc: Exception, attempt: int) -> float:
+    """限流要等一个配额窗口，普通异常 2s/4s 就够。
+
+    6 线程并发实测把智谱账户打到 429(1302 速率限制)，而 2s 的退避正好撞在同一个窗口里，
+    三条重试全部白费——一晚 18 条失败 13 条。限流必须长等。
+    """
+    text = str(exc)
+    if "429" in text or "速率限制" in text or "1302" in text:
+        return 30.0 * attempt
+    return 2.0 * attempt
 
 
 def analyze_news(llm_cfg: dict, news: dict, hints: list[dict] | None = None,
@@ -139,7 +154,7 @@ def analyze_news(llm_cfg: dict, news: dict, hints: list[dict] | None = None,
         except Exception as exc:  # noqa: BLE001
             logger.warning("[attempt %d/%d] 分析失败: %s", attempt, retries, exc)
             if attempt < retries:
-                time.sleep(2 * attempt)
+                time.sleep(_retry_wait(exc, attempt))
     else:
         parsed = {
             "summary": "", "sentiment": "中性", "sentiment_score": 0,

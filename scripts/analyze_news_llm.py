@@ -89,6 +89,34 @@ def _demo_items():
              "hints": []} for n in DEMO_NEWS]
 
 
+def _analyze_all(llm_cfg, news_list, collect_date, hints_by_news, workers):
+    """并发跑完整批新闻，返回与 news_list 同序的结果行。
+
+    串行时一条 20~55 秒，167 条要跑到凌晨；串行是当初图省事留下的，不是必要约束。
+    先在主线程把 SDK client 建好，避免 N 个线程抢着初始化同一个全局单例。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from stock_selector.news.analyze import get_client
+
+    get_client(llm_cfg)
+    total = len(news_list)
+    done = [0]
+
+    def _one(news):
+        row = analyze_news(llm_cfg, news, hints=hints_by_news.get(news["news_id"], []),
+                           collect_date=collect_date)
+        done[0] += 1
+        logger.info("[%d/%d] %s → %s", done[0], total, news.get("title", "")[:32],
+                    "ok" if row.get("raw") else "失败")
+        return row
+
+    if workers <= 1:
+        return [_one(n) for n in news_list]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(_one, news_list))
+
+
 def run_analysis(args, cfg):
     llm_cfg = cfg.get("llm", {})
     mongo_cfg = cfg.get("mongodb", {})
@@ -115,21 +143,28 @@ def run_analysis(args, cfg):
             logger.warning("MongoDB 无新闻，改用 --demo 演示...")
             news_list = _demo_items()
 
-    logger.info("开始分析 %d 条新闻，model=%s", len(news_list), llm_cfg.get("model"))
-    rows = []
-    hints_by_news = {}
-    for i, news in enumerate(news_list, 1):
-        logger.info("[%d/%d] 分析: %s", i, len(news_list), news.get("title", "")[:40])
-        hints_by_news[news["news_id"]] = news.get("hints", [])
-        rows.append(analyze_news(llm_cfg, news, hints=news.get("hints", []),
-                                 collect_date=collect_date))
+    logger.info("开始分析 %d 条新闻，model=%s workers=%d", len(news_list),
+                llm_cfg.get("model"), args.workers)
+    hints_by_news = {news["news_id"]: news.get("hints", []) for news in news_list}
+    rows = _analyze_all(llm_cfg, news_list, collect_date, hints_by_news, args.workers)
 
+    failed = sum(1 for r in rows if not r.get("raw"))
+    all_failed = bool(rows) and failed == len(rows)
     df = pd.DataFrame(rows, columns=ANALYSIS_SCHEMA)
     save_analysis_parquet(df, collect_date, OUTPUT_DIR)
+    if failed:
+        # 曾经连续两周每晚 100% 失败（zai-sdk 没装），日志里一条错误都没有——
+        # 因为异常被 analyze_news 的重试吞掉了，而 warning 又没挂 handler。失败必须出声。
+        logger.error("分析失败 %d/%d 条（失败率 %.0f%%）", failed, len(rows),
+                     100 * failed / max(len(rows), 1))
 
-    watch_docs = build_watch_targets(rows, hints_by_news, collect_date, llm_cfg.get("model", ""))
-    watch_df = pd.DataFrame(watch_docs, columns=WATCH_SCHEMA)
-    save_watch_parquet(watch_df, collect_date, WATCH_DIR)
+    watch_docs = [] if all_failed else build_watch_targets(
+        rows, hints_by_news, collect_date, llm_cfg.get("model", ""))
+    if all_failed:
+        # 全军覆没时不重写 watch：整日 delete+insert 会把昨天那批好数据换成空表，
+        # 页面和盘中腿会一起变成「今天没有消息面」。留着上一批，比留着一片空白有用。
+        # news_analysis 照写——健康位（失败率）就是要如实记下今晚失败了。
+        logger.error("本轮全部失败，保留既有 watch_target（%s）不覆盖", collect_date)
 
     if not args.no_mongo:
         db = connect_mongo(mongo_cfg)
@@ -137,12 +172,18 @@ def run_analysis(args, cfg):
             try:
                 create_indexes(db)
                 save_analysis_mongo(db, df, collect_date)
-                save_watch_mongo(db, watch_docs, collect_date)
+                if watch_docs:
+                    save_watch_mongo(db, watch_docs, collect_date)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[mongo] 写入失败(%s)，parquet 仍为准", exc)
 
+    if not all_failed:
+        save_watch_parquet(pd.DataFrame(watch_docs, columns=WATCH_SCHEMA), collect_date, WATCH_DIR)
+
     print_summary(df)
     print_watch_summary(watch_docs)
+    if all_failed:
+        raise SystemExit(3)
 
 
 def print_summary(df):
@@ -215,21 +256,32 @@ def run_stats(args, cfg):
 
 
 def setup_logging() -> None:
+    """把 handler 挂到 root，而不是只挂本模块的 logger。
+
+    只挂 `analyze_news_llm` 时，`news.analyze` 的重试失败告警、`news.store` 的写入条数
+    全都落在没人接的 logger 上：那两周每晚 167 条全失败，日志里一个字都没有。
+    """
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-    logger.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+                            datefmt="%Y-%m-%d %H:%M:%S")
     console = logging.StreamHandler()
     console.setFormatter(fmt)
-    logger.addHandler(console)
-    fh = logging.FileHandler(LOG_DIR / f"news_analyze_{time.strftime('%Y%m%d')}.log", encoding="utf-8")
+    fh = logging.FileHandler(LOG_DIR / f"news_analyze_{time.strftime('%Y%m%d')}.log",
+                             encoding="utf-8")
     fh.setFormatter(fmt)
-    logger.addHandler(fh)
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(console)
+    root.addHandler(fh)
+    logger.setLevel(logging.INFO)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="LLM 解读新闻，落盘两层结构并支持跨天统计")
     parser.add_argument("--days", type=int, default=1, help="读取最近 N 天新闻（0=不管时间）")
     parser.add_argument("--limit", type=int, default=50, help="最多分析条数")
+    parser.add_argument("--workers", type=int, default=2,
+                        help="并发分析线程数（1=串行）；6 路实测会触发智谱 429 限流，反而更慢")
     parser.add_argument("--demo", action="store_true", help="用内置示例新闻演示")
     parser.add_argument("--no-mongo", action="store_true", help="只写 parquet，不写 Mongo")
     parser.add_argument("--stats", choices=["heat", "trend"], help="跨天统计（与分析互斥）")

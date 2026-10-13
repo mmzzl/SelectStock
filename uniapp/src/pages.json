@@ -11,6 +11,7 @@
     { "path": "pages/sector/index", "style": { "navigationBarTitleText": "板块热力图" } },
     { "path": "pages/sector/board", "style": { "navigationBarTitleText": "板块详情" } },
     { "path": "pages/sector/kline", "style": { "navigationBarTitleText": "日K线" } },
+    { "path": "pages/news/index", "style": { "navigationBarTitleText": "消息面" } },
     { "path": "pages/diag/index", "style": { "navigationBarTitleText": "诊断历史" } },
     { "path": "pages/diag/detail", "style": { "navigationBarTitleText": "诊断明细" } },
     { "path": "pages/messages/index", "style": { "navigationBarTitleText": "消息" } },

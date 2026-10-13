@@ -318,3 +318,60 @@ test("成分股行：停牌标记所需的 days/end_date 要带上", async () =>
   assert.equal(m.days, 3);
   assert.equal(m.endDate, "2026-10-09");
 });
+
+test("消息面行：方向标签与强度口径由前端固定，个股/板块要分得开", async () => {
+  const { toNewsItem, NEWS_DIRS } = await import("../src/logic/view.js");
+  assert.deepEqual(NEWS_DIRS.map((d) => d.key), ["bearish", "risk", "bullish", "watch"]);
+
+  const bear = toNewsItem({ code: "000869", name: "张裕A", category: "个股", direction: "bearish",
+    score: -8, reason: "控股股东减持", news_count: 3, holding: true });
+  assert.deepEqual([bear.dirText, bear.dirCls, bear.scoreText], ["利空", "neg", "-8"]);
+  assert.equal(bear.isStock, true);
+  assert.equal(bear.holding, true);
+  assert.equal(bear.newsCount, 3);
+
+  // 板块码不是六位数字：不能当成个股跳 K 线
+  const board = toNewsItem({ code: "BK0438", name: "电池", direction: "bearish", score: -6 });
+  assert.equal(board.isStock, false);
+  assert.equal(board.newsCount, 0);
+
+  // 关注没有分数，显示优先级；未知方向不能崩
+  const w = toNewsItem({ code: "", name: "捷荣技术", direction: "watch", priority: "高", score: 0 });
+  assert.deepEqual([w.dirText, w.scoreText], ["关注", "高"]);
+  assert.equal(toNewsItem({ direction: "奇怪", name: "" }).name, "—");
+});
+
+test("消息面健康条：缺批次/失败率高/旧批次都要出声，健康时留空", async () => {
+  const { newsBanner } = await import("../src/logic/view.js");
+  assert.equal(newsBanner({}).cls, "bad");
+  assert.match(newsBanner({ day: "" }).text, /近 5 天/);
+
+  const failing = newsBanner({ day: "2026-10-13", stale_days: 0,
+    health: { analyzed: 167, failed: 120, fail_rate: 0.72 } });
+  assert.equal(failing.cls, "bad");
+  assert.match(failing.text, /120\/167/);
+
+  const stale = newsBanner({ day: "2026-10-11", stale_days: 2,
+    health: { analyzed: 167, failed: 10, fail_rate: 0.06 } });
+  assert.equal(stale.cls, "muted");
+  assert.match(stale.text, /2 天前/);
+
+  assert.deepEqual(newsBanner({ day: "2026-10-13", stale_days: 0,
+    health: { analyzed: 167, failed: 0, fail_rate: 0 } }), { text: "", cls: "" });
+});
+
+test("消息面页面在路由白名单里（否则进页面会被弹回持仓）", async () => {
+  const { resolveRoute } = await import("../src/logic/guard.js");
+  assert.deepEqual(resolveRoute({ path: "pages/news/index", loggedIn: true }), { ok: true });
+  assert.deepEqual(resolveRoute({ path: "pages/news/index", loggedIn: false }),
+    { redirect: "pages/login/index" });
+});
+
+test("风险条目按读取层整形后的样子渲染：标题一行、没有重复正文", async () => {
+  const { toNewsItem } = await import("../src/logic/view.js");
+  // 整形在 stock_selector/news/read.py 做（一处，App 与推送共用），前端只透传
+  const r = toNewsItem({ code: "", name: "IPO欺诈调查可能导致茶百道上市失败或严重推迟",
+    category: "", direction: "risk", score: -8, reason: "" });
+  assert.deepEqual([r.name, r.reason, r.category, r.scoreText],
+    ["IPO欺诈调查可能导致茶百道上市失败或严重推迟", "", "", "-8"]);
+});

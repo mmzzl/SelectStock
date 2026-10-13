@@ -18,6 +18,7 @@ export const PAGE_PATHS = [
   "pages/sector/index",
   "pages/sector/board",
   "pages/sector/kline",
+  "pages/news/index",
   "pages/diag/detail",
   "pages/mine/password",
 ];

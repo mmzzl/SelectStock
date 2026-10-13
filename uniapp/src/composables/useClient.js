@@ -7,6 +7,7 @@ import { selectionApi } from "../api/selection.js";
 import { messagesApi } from "../api/messages.js";
 import { upgradeApi } from "../api/upgrade.js";
 import { sectorApi } from "../api/sector.js";
+import { newsApi } from "../api/news.js";
 import { loadSession, clearSession, setSession } from "../store/session.js";
 
 const BASE = import.meta.env.VITE_API_BASE || "";
@@ -31,6 +32,7 @@ export function useClient() {
     messages: messagesApi(client),
     upgrade: upgradeApi(client),
     sector: sectorApi(client),
+    news: newsApi(client),
   };
   return _cached;
 }

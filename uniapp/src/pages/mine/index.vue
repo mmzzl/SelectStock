@@ -26,6 +26,7 @@ onShow(() => {
 function logout() { clearSession(); uni.reLaunch({ url: "/pages/login/index" }); }
 const goPassword = () => uni.navigateTo({ url: "/pages/mine/password" });
 const goSector = () => uni.navigateTo({ url: "/pages/sector/index" });
+const goNews = () => uni.navigateTo({ url: "/pages/news/index" });
 
 // #ifdef APP-PLUS
 function isAndroidApp() {
@@ -88,6 +89,10 @@ function checkUpgrade() {
       </view>
       <view class="cell" @click="goSector">
         <text class="t">板块热力图</text>
+        <text class="arrow">›</text>
+      </view>
+      <view class="cell" @click="goNews">
+        <text class="t">消息面</text>
         <text class="arrow">›</text>
       </view>
       <view class="cell" @click="checkUpgrade">
