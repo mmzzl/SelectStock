@@ -83,6 +83,64 @@ def test_hold_row_carries_flip_rate_and_others_do_not():
     assert pd.isna(sell.iloc[0]["flip_sell_20_pct"])
 
 
+def test_summarize_day_weighted_can_reverse_the_point_mean():
+    """点级均值和日等权必须分开落盘：判据扎堆的日子会让两者符号相反。
+
+    这里造一条卖出规则——暴跌日一次判出 300 个点（每点 +0.5%），其余 104 天每天只有 1 个点
+    （每点 −0.2%）。点级均值 +0.32% 看着像买入理由，日等权 −0.19% 才是「这条规则典型地值多少」。
+    """
+    days = pd.date_range("2019-01-01", periods=105, freq="B").strftime("%Y-%m-%d")
+    sell = [(days[0], 1, 0.005)] * 300 + [(d, 1, -0.002) for d in days[1:]]
+    hold = [(days[0], 3, 0.0)] * 20 + [(d, 3, 0.004) for d in days[1:]] * 20
+    rows = sell + hold
+    frame = pd.DataFrame({
+        "date": [r[0] for r in rows],
+        "code": [f"{i % 40:06d}" for i in range(len(rows))],
+        "action": np.array([r[1] for r in rows], dtype=np.int8),
+        "heat": np.full(len(rows), 95.0),
+        "heat_bin": np.full(len(rows), 4, dtype=np.int8),
+        "fwd_ret_10": np.array([r[2] for r in rows], dtype=np.float64),
+        "fwd_ret_20": np.array([r[2] for r in rows], dtype=np.float64),
+        "flip_sell_20": np.zeros(len(rows), dtype=np.int8),
+    })
+    out = mod.summarize(frame)
+    cell = out[(out["action"] == "sell") & (out["heat_bin"] == "全部")].iloc[0]
+    assert cell["fwd10_mean_pct"] > 0 and cell["daymean_fwd10_pct"] < 0
+    assert cell["vs_hold_daymean_pp"] < 0 and cell["vs_hold_t"] < -2
+    assert cell["vs_hold_days"] == 105 and bool(cell["vs_hold_era_stable"])
+    # hold 自己那格不跟自己比：只给日等权均值，差分段留空
+    hold_cell = out[(out["action"] == "hold") & (out["heat_bin"] == "全部")].iloc[0]
+    assert np.isfinite(hold_cell["daymean_fwd10_pct"])
+    assert pd.isna(hold_cell["vs_hold_daymean_pp"])
+
+
+def test_summarize_drops_diff_when_days_too_few():
+    """可比交易日不足 MIN_DIFF_DAYS 就不给差分和 t，宁缺不编（样本量本身是够的）。"""
+    days = pd.date_range("2024-01-01", periods=mod.MIN_DIFF_DAYS - 8, freq="B")
+    rows = [(d, act) for d in days for act in (1, 3) for _ in range(20)]
+    frame = pd.DataFrame({
+        "date": [d.strftime("%Y-%m-%d") for d, _ in rows],
+        "code": [f"{i % 20:06d}" for i in range(len(rows))],
+        "action": np.array([a for _, a in rows], dtype=np.int8),
+        "heat": np.full(len(rows), 95.0),
+        "heat_bin": np.full(len(rows), 4, dtype=np.int8),
+        "fwd_ret_10": np.linspace(-0.02, 0.02, len(rows)),
+        "fwd_ret_20": np.linspace(-0.02, 0.02, len(rows)),
+        "flip_sell_20": np.zeros(len(rows), dtype=np.int8),
+    })
+    cell = mod.summarize(frame)
+    cell = cell[(cell["action"] == "sell") & (cell["heat_bin"] == "全部")].iloc[0]
+    assert cell["n"] == 440 and np.isfinite(cell["daymean_fwd10_pct"])
+    # 全表都没有差分时这列压根不存在（下游按「未标定」退化），有列则必须是 NaN
+    diff = cell.get("vs_hold_daymean_pp")
+    assert diff is None or pd.isna(diff)
+
+    hold = mod.summarize(_ledger(action=3))
+    assert hold.iloc[0]["flip_sell_20_pct"] == pytest.approx(50.0)
+    sell = mod.summarize(_ledger(action=1))
+    assert pd.isna(sell.iloc[0]["flip_sell_20_pct"])
+
+
 def test_era_stability_uses_return_sign_not_frequency():
     """三段收益同号才算稳；前两段赚的小尾巴亏的大亏能翻掉结论。"""
     lf = mod._era_ids(np.arange(900))
@@ -195,3 +253,20 @@ def test_labels_windows_are_forward_only():
     assert np.isnan(fwd10[-1, 0]) and np.isnan(fwd20[-1, 0])
     assert flip[0, 0] and not flip[5, 0]      # 当天已是 sell 不算「未来会变 sell」
     assert not flip[6, 0]                      # 窗口内只有当天那一次，之后没有
+
+
+def test_rolling_max_prev_excludes_today():
+    close = np.array([[1.0], [5.0], [2.0], [3.0], [9.0]], dtype=np.float32)
+    hi = mod._rolling_max_prev(close, 2)
+    assert np.isnan(hi[0, 0]) and np.isnan(hi[1, 0])   # 不足窗口 + 不含当天
+    assert hi[2, 0] == 5.0 and hi[3, 0] == 5.0
+    assert hi[4, 0] == 3.0                             # 当天的 9 不算进自己的高点
+
+
+def test_fired_within_prev_looks_back_not_at_today():
+    fired = np.zeros((6, 1), dtype=bool)
+    fired[3, 0] = True
+    prev = mod._fired_within_prev(fired, 2)
+    assert not prev[3, 0]                  # 当天自己那次不算「提前预警」
+    assert prev[4, 0] and prev[5, 0]
+    assert not prev[2, 0]                  # 窗口只看前 2 行

@@ -107,7 +107,9 @@ class _StubClient:
                        "risk_verdict": "adjust",
                        "risk_reason": "[position] 单票上限 4 万元，建议改为 3800 股",
                        "risk_shares": "3800", "risk_amount": "39140.0",
-                       "risk_fill_price": "10.31", "risk_slippage_bp": "12.5"}},
+                       "risk_fill_price": "10.31", "risk_slippage_bp": "12.5",
+                       "signal_posterior": {"verdict": "换时代/换抽样会翻号，未标定",
+                                            "excess_pp": -0.32, "n": 166120}}},
             {"code": "", "signal": "box_oscillate"},      # 无代码脏行必须丢掉
         ]})
 
@@ -128,6 +130,26 @@ async def test_http_run_maps_enriched_fields(monkeypatch):
     assert row["risk_amount"] == 39140.0 and row["risk_fill_price"] == 10.31
     assert row["risk_slippage_bp"] == 12.5
     assert row["risk_reason"].startswith("[position]")
+    # 判据后验藏在 extra.signal_posterior：verdict 是页面唯一该显示的字段（它已含翻号/样本不足），
+    # 数字另存两列，供排序与「未标定」判定用。
+    assert row["posterior_verdict"] == "换时代/换抽样会翻号，未标定"
+    assert row["posterior_excess_pp"] == -0.32 and row["posterior_n"] == 166120
+
+
+async def test_http_run_maps_posterior_absent_as_unlabeled(monkeypatch):
+    """后验表还没建时内核不挂这个 key → 必须落空串/NULL，不能落 0（0 是「超额为零」这个判定）。"""
+    class _NoPosteriorClient(_StubClient):
+        async def post(self, url, json=None):
+            return _StubResponse({"code": 0, "data": [{
+                "code": "000003", "signal": "box_oscillate",
+                "extra": {"risk_ex10_pp": "0.10", "signal_posterior": None}}]})
+
+    monkeypatch.setattr(selection_service.httpx, "AsyncClient", _NoPosteriorClient)
+    row = (await selection_service._http_run([]))[0]
+    assert row["posterior_verdict"] == ""
+    assert row["posterior_excess_pp"] is None and row["posterior_n"] is None
+    # 风险分照常映射，说明后验缺失不会连带打掉别的字段
+    assert row["risk_ex10_pp"] == 0.10
 
 
 async def test_http_run_tolerates_missing_enriched_fields(monkeypatch):

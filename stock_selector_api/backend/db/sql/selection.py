@@ -47,3 +47,10 @@ class SelectResult(Base, IdMixin, TimestampMixin):
     risk_amount: Mapped[float | None] = mapped_column(Float, nullable=True)      # 建议下单金额（元）
     risk_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)  # 含滑点的预估成交价
     risk_slippage_bp: Mapped[float | None] = mapped_column(Float, nullable=True)  # 预估滑点（万分比）
+    # 这条判据本身的历史后验（scripts/build_signal_posterior.py 落盘的表，按策略名查）。
+    # 存的是「判据值多少钱」而不是「这只票打了多少分」，且 verdict 已经把
+    # 「样本够不够」和「换时代/换抽样是否同号」合成一句话——页面只该显示 verdict，
+    # 单独显示 excess_pp 会把翻号的抽样噪声说成结论。全为 NULL = 后验表还没建。
+    posterior_verdict: Mapped[str] = mapped_column(String(64), default="")
+    posterior_excess_pp: Mapped[float | None] = mapped_column(Float, nullable=True)
+    posterior_n: Mapped[int | None] = mapped_column(Integer, nullable=True)

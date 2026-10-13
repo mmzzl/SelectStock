@@ -105,7 +105,19 @@ async def _http_run(strategies: list[str]) -> list[dict]:
         "risk_amount": _num((it.get("extra") or {}).get("risk_amount")),
         "risk_fill_price": _num((it.get("extra") or {}).get("risk_fill_price")),
         "risk_slippage_bp": _num((it.get("extra") or {}).get("risk_slippage_bp")),
+        # 判据级历史后验：verdict 已经把「样本够不够」和「换时代/换抽样同不同号」合成一句话，
+        # 页面只显示它，单独显示 excess_pp 会把翻号的抽样噪声说成结论。
+        # 后验表还没建时三个字段留空/NULL——不能填 0，0 是「超额为零」，那是一项判定。
+        "posterior_verdict": str(_sp(it).get("verdict") or "")[:64],
+        "posterior_excess_pp": _num(_sp(it).get("excess_pp")),
+        "posterior_n": _num(_sp(it).get("n"), integer=True),
     } for it in items if it.get("code")]
+
+
+def _sp(it: dict) -> dict:
+    """内核挂在 extra.signal_posterior 上的策略级后验；缺失时返回空 dict（按「未标定」处理）。"""
+    value = (it.get("extra") or {}).get("signal_posterior")
+    return value if isinstance(value, dict) else {}
 
 
 async def start_run(user_id: str, strategies: list[str] | None,

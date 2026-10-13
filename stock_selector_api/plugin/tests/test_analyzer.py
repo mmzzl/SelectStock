@@ -134,7 +134,8 @@ def test_hold_row_carries_quantified_conviction(monkeypatch):
     # 线在 ma10*0.95=10.45，现价 10.5 → 卖点在下方 0.5%
     assert "均线卖点在下方 0.5%" in r["suggestion"]
     assert "再亏" in r["suggestion"] and "元" in r["suggestion"]
-    assert "转为卖出" in r["suggestion"]
+    assert "自行转卖" in r["suggestion"]
+    assert "后 10 日上涨" in r["suggestion"]      # 数字直读 posterior.parquet
     assert "回本需 +2.9%" in r["suggestion"]         # 现价 10.5 低于成本 10.8
 
 

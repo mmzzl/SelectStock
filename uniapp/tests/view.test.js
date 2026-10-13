@@ -2,9 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { toHoldingRow, toTradeRow, toPnlView, toSelectionJobRow, toSelectionResultRow,
          toMessageRow, toDiagRow, toPreviewRow, toUpgradeInfo, fmtTime,
-         priceStampText,
+         priceStampText, convictionText,
          riskText, riskClass, sortByRiskDesc, buyLevelText, sellTriggerText,
-         orderPlanText, riskAdjustText } from "../src/logic/view.js";
+         orderPlanText, riskAdjustText, posteriorText } from "../src/logic/view.js";
 
 test("时间格式化：naive UTC 转本地、压到分钟；带时区/非法值不崩", async () => {
   const { execFileSync } = await import("node:child_process");
@@ -24,6 +24,7 @@ test("持仓行：快照字段透传，不重算", () => {
   const s = { code: "600519", name: "贵州茅台", cost_price: 1680.5, quantity: 100,
               action: "sell", action_reason: "跌破MA10", latest_price: 1500,
               holding_pnl: -18050, pnl_pct: -10.7, diag_run_id: "r9",
+              suggestion: "已跌破均线卖点 2.5%｜回本需 +12.0%",
               sell_trigger_price: 1512.3 };
   const row = toHoldingRow(s);
   assert.equal(row.cost, 1680.5);
@@ -34,6 +35,18 @@ test("持仓行：快照字段透传，不重算", () => {
   assert.equal(row.action, "sell");
   assert.equal(row.diagRunId, "r9");
   assert.equal(row.sellTrigger, 1512.3);
+  assert.equal(row.suggestion, "已跌破均线卖点 2.5%｜回本需 +12.0%");
+});
+
+test("可信度行：列表页剥掉卖点线（那是诊断当时的价算的，现价已换成实时），详情页原样", () => {
+  const r = { suggestion: "均线卖点在下方 0.6%｜同类 hold 20 日内 45% 转为卖出｜回本需 +5.0%" };
+  assert.equal(convictionText(r), "可信度 · 同类 hold 20 日内 45% 转为卖出｜回本需 +5.0%");
+  assert.equal(convictionText(r, true),
+               "可信度 · 均线卖点在下方 0.6%｜同类 hold 20 日内 45% 转为卖出｜回本需 +5.0%");
+  // 只有一句卖点线时剥完就没什么可说的，别留个孤零零的前缀
+  assert.equal(convictionText({ suggestion: "均线卖点在下方 0.6%" }), "");
+  assert.equal(convictionText({ suggestion: "" }), "");
+  assert.equal(convictionText({}), "");
 });
 
 test("持仓行：现价来源透传（老接口没有这两个字段时为空串）", () => {
@@ -142,6 +155,8 @@ test("选股结果行：字段映射透传", () => {
     buyRef: null, buyInvalid: null,
     riskVerdict: "", riskReason: "", riskShares: null, riskAmount: null,
     riskFill: null, riskSlippageBp: null,
+    // 判据后验：后端没给这三列时必须是空串/null（页面据此显示「未标定」）
+    posteriorVerdict: "", posteriorExcess: null, posteriorN: null,
   });
 });
 
@@ -201,6 +216,32 @@ test("风险分展示：缺值给占位符而不是 0，正负分别红绿", () 
   assert.equal(riskClass(0.2), "up");
   assert.equal(riskClass(0), "up");
   assert.equal(riskClass(null), "");
+});
+
+test("依据文案：显示判据级 verdict，缺失时显式说未标定而不是整行消失", () => {
+  assert.equal(posteriorText({ posteriorVerdict: "换时代/换抽样会翻号，未标定",
+                               posteriorExcess: -0.32, posteriorN: 166120 }),
+               "依据 · 换时代/换抽样会翻号，未标定 · 10日超额 -0.32pp · 样本 16.6 万点");
+  // 正超额也要带符号，样本数不到 1 万就原样写
+  assert.equal(posteriorText({ posteriorVerdict: "正超额·三轴同号",
+                               posteriorExcess: 0.096, posteriorN: 8825 }),
+               "依据 · 正超额·三轴同号 · 10日超额 +0.10pp · 样本 8825点");
+  // 后验表还没建（后端给空串/None）：必须出现"未标定"，不能返回空串让这行消失——
+  // 空行会被读成"没问题"，而真实含义是"还没测"。
+  assert.equal(posteriorText({}), "依据 · 未标定（判据后验表还没建）");
+  assert.equal(posteriorText({ posteriorVerdict: "  " }), "依据 · 未标定（判据后验表还没建）");
+  assert.equal(posteriorText(undefined), "依据 · 未标定（判据后验表还没建）");
+  // 只有 verdict、没有数字时不编造数字
+  assert.equal(posteriorText({ posteriorVerdict: "分格样本不足（单格上涨概率区间>2pp），不定论" }),
+               "依据 · 分格样本不足（单格上涨概率区间>2pp），不定论");
+
+  // 映射层：后端列名 → camelCase，超额/样本数按数值取
+  const row = toSelectionResultRow({ code: "1", signal: "s", posterior_verdict: "正超额·三轴同号",
+                                     posterior_excess_pp: "1.20", posterior_n: "300" });
+  assert.equal(row.posteriorVerdict, "正超额·三轴同号");
+  assert.equal(row.posteriorExcess, 1.2);
+  assert.equal(row.posteriorN, 300);
+  assert.equal(posteriorText(row), "依据 · 正超额·三轴同号 · 10日超额 +1.20pp · 样本 300点");
 });
 
 test("展示顺序：按预期超额降序，没判分的排最后且互保名次序", () => {

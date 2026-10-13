@@ -34,3 +34,8 @@ class SelectResultCreate(BaseModel):
     risk_amount: float | None = None
     risk_fill_price: float | None = None
     risk_slippage_bp: float | None = None
+    # 判据级历史后验（不是个股评分）。verdict 已含「样本不足/翻号未标定」，
+    # 所以它是页面唯一该显示的字段；excess_pp/n 为 None 表示后验表还没建。
+    posterior_verdict: str = Field(default="", max_length=64)
+    posterior_excess_pp: float | None = None
+    posterior_n: int | None = None

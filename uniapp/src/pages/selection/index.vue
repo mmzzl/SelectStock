@@ -3,7 +3,7 @@
 import { computed, ref } from "vue";
 import { onShow, onUnload } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
-import { toSelectionResultRow, toStrategyOption, riskText, riskClass, sortByRiskDesc, buyLevelText, orderPlanText, riskAdjustText } from "../../logic/view.js";
+import { toSelectionResultRow, toStrategyOption, riskText, riskClass, sortByRiskDesc, buyLevelText, orderPlanText, riskAdjustText, posteriorText } from "../../logic/view.js";
 
 const { selection } = useClient();
 const strategies = ref([]);        // [{ name, label, desc }]
@@ -95,6 +95,9 @@ const fixed3 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) 
         「买入参考/跌破失效」是策略判据里的日均线位（收盘口径），只用来对照盘面，不是实时挂单价。
         「建议股数/预估成交/预估滑点」是风控层给的下单口径：涨停买不进、盘子太薄、超过单票上限的信号
         已经在风控这一步被剔除，不会出现在列表里；橙色一句表示风控改过建议下单量。
+        灰色一句「依据」说的是**这条判据本身**历史上值多少钱（T+10 相对当日全样本的超额，
+        按时代与股票抽样各跑一遍合成），不是这只票的评分；写「未标定」或「会翻号」时
+        表示这条判据现在没有可复现的历史优势，名次只是规则排序，不能当买入理由。
       </view>
       <view v-for="r in ordered" :key="r.code" class="card">
         <view class="row1">
@@ -110,6 +113,7 @@ const fixed3 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) 
         <text v-if="buyLevelText(r)" class="levels">{{ buyLevelText(r) }}</text>
         <text v-if="orderPlanText(r)" class="levels">{{ orderPlanText(r) }}</text>
         <text v-if="riskAdjustText(r)" class="adjust">{{ riskAdjustText(r) }}</text>
+        <text class="posterior">{{ posteriorText(r) }}</text>
         <text class="reason">{{ r.reason }}</text>
       </view>
       <view v-if="job && !results.length && polling" class="empty">全市场扫描中，请稍候…</view>
@@ -125,6 +129,7 @@ const fixed3 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) 
 .kv3 .n.date { font-size: 24rpx; font-weight: 600; color: #5c6470; }
 .levels { display: block; margin-top: 8rpx; font-size: 24rpx; color: #2b5cff; }
 .adjust { display: block; margin-top: 6rpx; font-size: 22rpx; color: #c8641e; }
+.posterior { display: block; margin-top: 6rpx; font-size: 22rpx; color: #8a919f; }
 .sortnote {
   font-size: 22rpx; color: #8a919f; line-height: 1.6;
   margin: -6rpx 4rpx 16rpx;

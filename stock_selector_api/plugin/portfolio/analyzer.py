@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 
+from portfolio import posterior
 from portfolio.judge import (HOLD_FLIP_PCT, HOLD_TAIL_P5_PCT, judge_holding,
                             sell_trigger_price)
 from portfolio.revenue import snapshot, summarize
@@ -64,12 +65,61 @@ def _conviction_line(base: dict, cost: float, qty: int) -> str:
     else:
         bits.append("本判据不含价格线")
     if base["action"] == "hold":
-        bits.append(f"同类 hold 20 日内 {HOLD_FLIP_PCT:.0f}% 转为卖出")
-        tail = price * qty * HOLD_TAIL_P5_PCT / 100
-        bits.append(f"尾部 p5 −{HOLD_TAIL_P5_PCT:.1f}%≈再亏 {tail:,.0f} 元")
+        bits.extend(_posterior_bits(base["action"], price, qty))
+    else:
+        post = posterior.lookup(base["action"])
+        if post:
+            bits.append(_cross_hold_line(post))
     if cost > 0 and price < cost:
         bits.append(f"回本需 {(cost - price) / price * 100:+.1f}%")
     return "｜".join(bits)
+
+
+def _cross_hold_line(post: dict) -> str:
+    """sell/add 相对**同日 hold** 的实测差：只有同日配对才把当天的大盘水位抵消掉。
+
+    这里原来印的是点级均值，而点级均值会被「判据扎堆的日子」主导：2026-10-13 实测同一份台账
+    sell 格点级 +0.87%、日等权同日差分 −0.47pp，方向相反，等于把一条卖出规则夸成买入理由。
+    台账没给差分（可比交易日不足）时退回上涨频率那一行，宁可口径旧一点也不印反掉的均值。
+    """
+    diff = post.get("vs_hold_pp")
+    if diff is not None:
+        t, days = post.get("vs_hold_t"), int(post.get("vs_hold_days") or 0)
+        return (f"后 10 日比同日 hold {diff:+.2f}pp"
+                + ("·三段同号" if post.get("vs_hold_era_stable") else "·三段不同号")
+                + (f"(配对{days}日 t={t:+.1f})" if t is not None else f"(配对{days}日)"))
+    return (f"同类判据后 10 日上涨 {post['up_pct']:.1f}%、"
+            f"均值 {post['fwd10_mean_pct']:+.2f}%"
+            + ("" if post["era_sign_stable"] else "（跨时代不同号）"))
+
+
+def _posterior_bits(action: str, price: float, qty: int) -> list[str]:
+    """hold 这一格的后验分布：上涨概率（含区间）、20 日自行转卖比例、尾部再亏多少元。
+
+    数字直读 `data/judgement_ledger/posterior.parquet`（每天 19:00 全市场重算），台账没建时
+    退回 judge.py 里 2026-10-12 那次全量标定的常数——两者口径相同，只是新鲜度不同。
+    """
+    post = posterior.lookup(action)
+    if post is None:
+        post = {"up_pct": None, "n": 0, "credible": True, "era_sign_stable": True,
+                "flip_sell_20_pct": HOLD_FLIP_PCT, "fwd20_p5_pct": -HOLD_TAIL_P5_PCT}
+    tail_txt = ""
+    if post.get("up_pct") is not None:
+        tag = "" if post["credible"] else f"·样本不足(宽{post['ci_width_pp']:.1f}pp)"
+        tail_txt = (f"同类 hold 后 10 日上涨 {post['up_pct']:.1f}%"
+                    f"[{post['ci_low_pct']:.1f},{post['ci_high_pct']:.1f}]{tag}")
+    flip = post.get("flip_sell_20_pct")
+    p5 = post.get("fwd20_p5_pct")
+    bits = []
+    if tail_txt:
+        bits.append(tail_txt)
+    if flip is not None:
+        bits.append(f"20 日内 {flip:.0f}% 自行转卖")
+    if p5 is not None:
+        bits.append(f"尾部 p5 {p5:.1f}%≈再亏 {price * qty * abs(p5) / 100:,.0f} 元")
+    if not post["era_sign_stable"]:
+        bits.append("三段历史不同号")
+    return bits
 
 
 def _price_for(code: str, row: dict, quotes: dict | None) -> float:

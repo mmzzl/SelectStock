@@ -29,6 +29,7 @@ export function toHoldingRow(s) {
     action: s.action || null,
     actionText: ACTION_TEXT[s.action] || "无建议",
     actionReason: s.action_reason || "",
+    suggestion: s.suggestion || "",
     latestPrice: num(s.latest_price),
     priceTime: s.price_time || "", priceSource: s.price_source || "",
     pnl: num(s.holding_pnl), pnlPct: num(s.pnl_pct),
@@ -63,6 +64,17 @@ export function sellTriggerText(r) {
   const down = trig < latest;
   if (r.action === "sell") return `${down ? "跌破" : "涨回"} ${p} 解除卖出信号`;
   return `${down ? "跌破" : "涨破"} ${p} 触发卖出`;
+}
+
+/** 判定可信度：插件给的是「处在同一状态的持仓点整体后来怎么样」的同类频率，不是这只票的预测。
+ *  串的第一段永远是卖点线差价，而它是拿**诊断当时**的价算的；持仓页的现价已经换成实时价，
+ *  留着会出现「说在下方、其实已跌破」的反话，所以列表页剥掉第一段（触发价另有 sellTriggerText 现算）。
+ *  诊断详情页整行都在讲那一次快照，价格口径自洽，传 withLine=true 原样给。 */
+export function convictionText(r, withLine = false) {
+  const bits = String(r?.suggestion || "").split("｜").map((s) => s.trim()).filter(Boolean);
+  if (!bits.length) return "";
+  if (!withLine) bits.shift();
+  return bits.length ? `可信度 · ${bits.join("｜")}` : "";
 }
 
 export function toPnlRow(s) {
@@ -124,7 +136,25 @@ export function toSelectionResultRow(s) {
     riskVerdict: s.risk_verdict || "", riskReason: s.risk_reason || "",
     riskShares: num(s.risk_shares), riskAmount: num(s.risk_amount),
     riskFill: num(s.risk_fill_price), riskSlippageBp: num(s.risk_slippage_bp),
+    // 判据级历史后验（这条判据本身值多少钱，不是这只票的评分）。
+    // verdict 已经由内核把「样本够不够」和「换时代/换抽样同不同号」合成一句话，
+    // 页面只显示 verdict，绝不单独显示 excess —— 那会把翻号的抽样噪声说成结论。
+    posteriorVerdict: s.posterior_verdict || "",
+    posteriorExcess: num(s.posterior_excess_pp), posteriorN: num(s.posterior_n),
   };
+}
+
+/** 依据一行话（与诊断页 `可信度 · …` 同一措辞风格）。后验表还没建时必须显式说「未标定」，
+ *  不能整行消失——用户看到"没有这一行"会理解成"没问题"，而实际是"还没测"。 */
+export function posteriorText(r) {
+  const verdict = (r?.posteriorVerdict || "").trim();
+  if (!verdict) return "依据 · 未标定（判据后验表还没建）";
+  const parts = [`依据 · ${verdict}`];
+  const excess = num(r?.posteriorExcess);
+  if (excess !== null) parts.push(`10日超额 ${excess > 0 ? "+" : ""}${excess.toFixed(2)}pp`);
+  const n = num(r?.posteriorN);
+  if (n !== null) parts.push(`样本 ${n >= 10000 ? `${(n / 10000).toFixed(1)} 万` : n}点`);
+  return parts.join(" · ");
 }
 
 /** 风控给元 → 显示用万元：只是单位换算，数字本身是内核算好的，前端不做业务计算。 */

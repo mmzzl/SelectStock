@@ -16,7 +16,17 @@ ACTION_ADD = "add"
 ACTION_HOLD = "hold"
 RULE_KEYS = (ACTION_SELL, ACTION_ADD, ACTION_HOLD)
 
-# 默认规则（常量；与回测 evaluate_holdings 语义一致：跌破均线→sell，站上均线且未过热→add）
+# 默认规则（常量；与回测 evaluate_holdings 语义一致：跌破均线→sell，站上均线且未过热→add）。
+#
+# **出处要查清再用：这两条都没有标定过。**
+# - `price <= ma10 * 0.95` 最早是初始提交里 `tests/test_backtest_rules.py` 的**测试夹具**
+#   （只为验证 RuleEvaluator 能跑通），M2（2026-09-17 计划文档）原样抄成了默认卖出规则；
+# - `close >= ma5 * 1.03 and rsi14 <= 65` 连夹具都没有，是那份计划里现编的。
+# 所以 0.95 / 1.03 / 65 三个常数**不是标定值，是占位值**。台账量出来的 hold 转卖 45.3%、
+# sell 后 10 日均值 +0.87% 是「这条未验证规则的后验」，它说明这个标签值多少钱，不等于这条规则好。
+# 已知结构性毛病：固定百分比不按波动率归一（同一把尺子量 ATR 3% 和 1% 的票）、ma10 自身下行
+# 等于追跌、不看位置不看成本、hold 只是「两条都不沾」的兜底。改判据走 `scripts/build_judgement_ledger.py
+# --ab-rules` 的同源并跑，别凭感觉换。
 DEFAULT_SELL_RULE = "price <= ma10 * 0.95"
 DEFAULT_ADD_RULE = "close >= ma5 * 1.03 and rsi14 <= 65"
 DEFAULT_HOLD_RULE = "close >= ma1 and close <= ma99"  # 兜底恒真（无触发时 hold）

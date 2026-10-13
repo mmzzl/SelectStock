@@ -15,6 +15,7 @@ from ..datasource import AKShareSource, BaseDataSource, MongoSource, ParquetSour
 from ..models import SelectResult
 from ..utils.io_helper import to_json
 from .base_strategy import BaseSelectStrategy
+from .signal_posterior import for_strategy as _signal_posterior
 from .strategy_loader import StrategyLoader
 
 logger = logging.getLogger("stock_selector")
@@ -175,6 +176,21 @@ def _risk_review(engine, code: str, name: str, df, hits: list[SelectResult],
     return hits
 
 
+def _attach_posterior(results: list[SelectResult]) -> None:
+    """每条命中挂上该策略的历史后验（extra.signal_posterior），表没建就留空。
+
+    同一次运行按策略名只读一次 parquet。挂着的是**这条判据本身**值多少钱，不是这只票的评分：
+    `sign_stable=False` 时消费方必须显示，否则等于把抽样噪声说成结论。
+    """
+    cache: dict[str, dict | None] = {}
+    for r in results:
+        key = r.strategy or r.signal
+        if key not in cache:
+            cache[key] = _signal_posterior(key)
+        if cache[key]:
+            r.extra["signal_posterior"] = cache[key]
+
+
 def run_select(
     strategies: list[str] | str | None = None,
     datasource: BaseDataSource | None = None,
@@ -295,6 +311,7 @@ def run_select(
             if not r.asof:
                 r.asof = asof
         results = _rank(results)
+        _attach_posterior(results)
 
         # 4. 全市场一条行情都没取到属于数据源故障，必须显式暴露而非返回空集
         if stock_list and loaded == 0:

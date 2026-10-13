@@ -11,11 +11,12 @@ REASON = {
 }
 REASON_DISASTER = "浮亏越过成本灾难线（−{pct:g}%），这条持有的理由已作废，建议减仓止损"
 
-# 2026-10-12 全市场回验（6631 只、72.4 万个判为 hold 的时点、往后 20 个交易日）的标定值。
+# 台账（scripts/build_judgement_ledger.py → data/judgement_ledger/posterior.parquet）的
+# 2026-10-13 全量快照，只在台账文件读不到时当兜底常数用（正常路径由 portfolio/posterior.py 直读表）。
 # 它们不是个股预测，是「hold 这个状态」的整体分布——展示时要按同类基线说，别说成这只票会怎样。
 HOLD_WINDOW_DAYS = 20
-HOLD_FLIP_PCT = 45.3    # 这些 hold 点里有 45.3% 在 20 日内自己变成 sell
-HOLD_TAIL_P5_PCT = 17.5  # 同一批点 20 日收益的 p5 是 −17.5%（尾部，不是均值；均值只有 +0.62%）
+HOLD_FLIP_PCT = 46.1     # 这些 hold 点里有 46.1% 在 20 日内自己变成 sell
+HOLD_TAIL_P5_PCT = 17.8  # 同一批点 20 日收益的 p5 是 −17.8%（尾部，不是均值；均值只有 +0.15%）
 
 _eval = RuleEvaluator()
 

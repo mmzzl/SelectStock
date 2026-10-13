@@ -54,6 +54,41 @@ async def test_list_holdings_enriched_with_diag():
     assert rows[0]["diag_run_id"] == run["run_id"]
 
 
+async def test_list_holdings_uses_the_run_just_refreshed():
+    """同一天两行 run：定时/刷新按钮原地重跑（created_at 早、updated_at 新），按日期外部触发另建一行。
+    持仓页要跟着「刚算出来的那次」，否则点了刷新看着像没生效（可信度那行一直是空的）。"""
+    uid = f"u-{uuid.uuid4().hex[:8]}"
+    await holdings_repo.create({"user_id": uid, "code": "600519", "name": "茅台",
+                                "quantity": 100, "cost_price": 1688.0})
+    seeded = await portfolio_runs.create({"batch_id": "day-key", "user_id": uid,
+                                          "natural_day": "2026-09-20", "status": "completed",
+                                          "held_code_count": 1, "action_count": 1})
+    await portfolio_results.create({"run_id": seeded["run_id"], "code": "600519", "name": "茅台",
+                                    "action": "hold", "action_reason": "未触发",
+                                    "latest_price": 1600.0, "quantity": 100,
+                                    "holding_pnl": -8800.0, "pnl_pct": -5.21,
+                                    "suggestion": "同类 hold 20 日内 45% 转为卖出"})
+    later = await portfolio_runs.create({"batch_id": "md5-key", "user_id": uid,
+                                         "natural_day": "2026-09-20", "status": "completed",
+                                         "held_code_count": 1, "action_count": 1})
+    await portfolio_results.create({"run_id": later["run_id"], "code": "600519", "name": "茅台",
+                                    "action": "sell", "action_reason": "跌破MA10",
+                                    "latest_price": 1500.0, "quantity": 100,
+                                    "holding_pnl": -18800.0, "pnl_pct": -11.14})
+    assert seeded["created_at"] < later["created_at"]      # 前提：新行确实更晚建
+
+    # 刷新按钮的「原地重跑」把 updated_at 推到当下，这行虽然建得早，却是刚算出来的那次
+    # （写回同一个 status 不会触发 UPDATE，所以用 plugin_time_ms 这个一定会变的字段）
+    await portfolio_runs.update(seeded["run_id"], {"plugin_time_ms": 11})
+    rows = await holdings_service.list_holdings(uid)
+    assert rows[0]["diag_run_id"] == seeded["run_id"]
+    assert rows[0]["suggestion"] == "同类 hold 20 日内 45% 转为卖出"
+
+    await portfolio_runs.update(later["run_id"], {"plugin_time_ms": 22})
+    rows = await holdings_service.list_holdings(uid)
+    assert rows[0]["diag_run_id"] == later["run_id"]
+
+
 async def test_list_holdings_no_diag_leaves_rows_clean():
     uid = f"u-{uuid.uuid4().hex[:8]}"
     await holdings_repo.create({"user_id": uid, "code": "000001", "name": "平安",

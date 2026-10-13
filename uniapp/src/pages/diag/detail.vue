@@ -3,7 +3,7 @@
 import { ref } from "vue";
 import { onLoad } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
-import { sellTriggerText, toHoldingRow } from "../../logic/view.js";
+import { convictionText, sellTriggerText, toHoldingRow } from "../../logic/view.js";
 
 const run = ref(null); const results = ref([]); const err = ref("");
 const { diag } = useClient();
@@ -42,6 +42,7 @@ const pnlCls = (v) => (v === null || v === undefined || v === 0 ? "" : v > 0 ? "
         <text class="d">现价 {{ money(r.latestPrice) }} · {{ r.shares ?? "—" }} 股</text>
         <text class="n">{{ r.name }}（{{ r.code }}）</text>
         <text v-if="r.actionReason" class="sub">{{ r.actionReason }}</text>
+        <text v-if="convictionText(r, true)" class="sub">{{ convictionText(r, true) }}</text>
         <text v-if="sellTriggerText(r)" class="sub trig">{{ sellTriggerText(r) }}</text>
       </view>
       <view class="r">

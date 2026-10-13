@@ -3,7 +3,7 @@
 import { ref, computed } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
-import { priceStampText, sellTriggerText, toHoldingRow, toPnlView } from "../../logic/view.js";
+import { convictionText, priceStampText, sellTriggerText, toHoldingRow, toPnlView } from "../../logic/view.js";
 
 const rows = ref([]); const loading = ref(false); const err = ref("");
 const summary = ref(null);           // 来自 /holdings/pnl 的 summary，前端不做加总
@@ -96,6 +96,7 @@ const goTrades = () => uni.navigateTo({ url: "/pages/trades/index" });
             <text v-if="r.actionReason" class="sub">{{ r.actionReason }}</text>
             <text v-if="r.agg && r.agg.realizedPnl" class="sub acc">已实现 {{ signed(r.agg.realizedPnl) }} · 含已实现合计 {{ signed(r.agg.totalPnl) }}</text>
             <text v-if="sellTriggerText(r)" class="sub trig">{{ sellTriggerText(r) }}</text>
+            <text v-if="convictionText(r)" class="sub">{{ convictionText(r) }}</text>
           </view>
           <view class="r">
             <text class="badge" :class="r.action || 'none'">{{ r.actionText }}</text>

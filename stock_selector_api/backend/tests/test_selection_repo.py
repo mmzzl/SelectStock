@@ -67,15 +67,21 @@ def test_ensure_select_result_columns_upgrades_old_table():
         cols = {c["name"] for c in inspect(conn).get_columns("select_results")}
         conn.execute(text("INSERT INTO select_results (job_id, code, strategy, asof, price, score,"
                           " rank_no, risk_ex10_pp, buy_ref_price, buy_invalid_price, risk_verdict,"
-                          " risk_shares, risk_amount, risk_fill_price, risk_slippage_bp)"
+                          " risk_shares, risk_amount, risk_fill_price, risk_slippage_bp,"
+                          " posterior_verdict, posterior_excess_pp, posterior_n)"
                           " VALUES ('j', '000001', 'trend_rebound', '2026-09-24', 11.2, 0.62, 1,"
-                          " -0.21, 10.85, 10.31, 'allow', 3800, 39140.0, 10.31, 12.5)"))
+                          " -0.21, 10.85, 10.31, 'allow', 3800, 39140.0, 10.31, 12.5,"
+                          " '换时代/换抽样会翻号，未标定', -0.32, 166120)"))
         assert conn.execute(text("SELECT rank_no FROM select_results")).scalar() == 1
         assert conn.execute(text("SELECT risk_ex10_pp FROM select_results")).scalar() == -0.21
         assert conn.execute(text("SELECT risk_shares FROM select_results")).scalar() == 3800
+        # 后验三列：中文 verdict 存得住（64 字符上限），超额与样本数按数值存
+        assert conn.execute(text("SELECT posterior_excess_pp FROM select_results")).scalar() == -0.32
+        assert conn.execute(text("SELECT posterior_n FROM select_results")).scalar() == 166120
     assert {"strategy", "asof", "price", "score", "rank_no", "risk_ex10_pp", "buy_ref_price",
             "buy_invalid_price", "risk_verdict", "risk_reason", "risk_shares", "risk_amount",
-            "risk_fill_price", "risk_slippage_bp"} <= cols
+            "risk_fill_price", "risk_slippage_bp",
+            "posterior_verdict", "posterior_excess_pp", "posterior_n"} <= cols
 
 
 def test_ensure_diag_result_columns_upgrades_old_table():

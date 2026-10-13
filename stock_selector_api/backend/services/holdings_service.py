@@ -5,7 +5,7 @@ import csv
 import io
 import logging
 import re
-from datetime import date
+from datetime import date, datetime
 
 from core.exceptions import BizError
 from repositories import holdings_repo, portfolio_results, portfolio_runs, trades_repo
@@ -34,15 +34,34 @@ async def list_holdings(user_id: str, enabled_only: bool = False) -> list[dict]:
     return await _attach_live_quotes(rows)
 
 
+async def _latest_run(user_id: str) -> dict | None:
+    """取「最近算出来的那次诊断」，不是「最近建的那一行」。
+
+    同一天可能有两个 run：18:20 定时/刷新按钮走 `diag_service`（按 (用户, 日期) 幂等，原地重跑
+    复用旧行、只把 updated_at 推到当下），外部按日期触发的走 `portfolio_service`（按持仓快照
+    哈希幂等，会新建行）。只按 created_at 取第一行时，点了「刷新诊断」后持仓页仍然读着那条
+    更晚建、但更早算出来的旧 run，看起来像按钮没生效。
+    """
+    runs, _ = await portfolio_runs.list_by_user(user_id, page=1, size=20)
+    if not runs:
+        return None
+    return max(runs, key=_recency)
+
+
+def _recency(run: dict) -> datetime:
+    """created_at/updated_at 里较新的那个；缺时间戳的行排在最旧。"""
+    stamps = [run.get(k) for k in ("created_at", "updated_at") if isinstance(run.get(k), datetime)]
+    return max(stamps) if stamps else datetime.min
+
+
 async def _attach_diag_snapshot(user_id: str, rows: list[dict]) -> list[dict]:
     """最近一次诊断 run 明细附到持仓行（latest_price/holding_pnl/pnl_pct/action）。
     无诊断 run 时原样返回（R1-2：后端不计算，仅透传插件落库的快照）。"""
     if not rows:
         return rows
-    runs, _ = await portfolio_runs.list_by_user(user_id, page=1, size=1)
-    if not runs:
+    latest = await _latest_run(user_id)
+    if not latest:
         return rows
-    latest = runs[0]
     results = await portfolio_results.list_by_run(latest["run_id"])
     by_code = {r["code"]: r for r in results}
     for h in rows:
