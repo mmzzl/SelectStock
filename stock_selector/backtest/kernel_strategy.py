@@ -31,6 +31,7 @@ class KernelStrategy:
         max_hold_days: int = 10,
         stop_loss_pct: float = 0.05,
         take_profit_pct: float = 0.0,
+        reject_gate=None,
     ) -> None:
         self.strategy = strategy
         self.provider = provider
@@ -39,7 +40,9 @@ class KernelStrategy:
         self.max_hold_days = int(max_hold_days or 0)
         self.stop_loss_pct = float(stop_loss_pct or 0.0)
         self.take_profit_pct = float(take_profit_pct or 0.0)
+        self.reject_gate = reject_gate
         self.broker = None
+        self.rejected = 0
         self._entry: dict[str, str] = {}
         self._date_index: dict[str, int] | None = None
 
@@ -70,6 +73,11 @@ class KernelStrategy:
                 continue
             hit = self.signal_on(date, code)
             if hit is None:
+                continue
+            # 闸门挂在命中之后、下单之前，与实盘 `selector` 的 risk_filter 同一个位置：
+            # 信号照出，能不能成为决策由闸门判。判不到（历史没打分）按放行处理。
+            if self.reject_gate is not None and not self.reject_gate(date, code):
+                self.rejected += 1
                 continue
             scored.append((hit.score if hit.score is not None else 0.0, code, hit))
         scored.sort(key=lambda item: (-item[0], item[1]))

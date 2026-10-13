@@ -65,11 +65,36 @@ class Metrics:
 
     @property
     def profit_factor(self) -> float:
+        """总盈利/总亏损（钱量口径）：>1 说明赚的钱比亏的多，与单笔赔率不是一回事。"""
         gross_profit = sum(p for p in self.closed_pnls if p > 0)
         gross_loss = abs(sum(p for p in self.closed_pnls if p < 0))
         if gross_loss == 0:
             return math.inf if gross_profit > 0 else 0.0
         return gross_profit / gross_loss
+
+    @property
+    def avg_win(self) -> float:
+        wins = [p for p in self.closed_pnls if p > 0]
+        return sum(wins) / len(wins) if wins else 0.0
+
+    @property
+    def avg_loss(self) -> float:
+        losses = [abs(p) for p in self.closed_pnls if p < 0]
+        return sum(losses) / len(losses) if losses else 0.0
+
+    @property
+    def payoff_ratio(self) -> float:
+        """平均盈利/平均亏损（单笔赔率口径）：止盈止损不对称就直接体现在这里。"""
+        if self.avg_loss == 0:
+            return math.inf if self.avg_win > 0 else 0.0
+        return self.avg_win / self.avg_loss
+
+    @property
+    def expectancy(self) -> float:
+        """单笔期望盈亏（元，已扣佣金/印花税）：赔率再高，这个 <=0 就是亏钱。"""
+        if not self.closed_pnls:
+            return 0.0
+        return sum(self.closed_pnls) / len(self.closed_pnls)
 
     @property
     def trade_count(self) -> int:
@@ -83,6 +108,10 @@ class Metrics:
             "win_rate": round(self.win_rate, 6),
             "sharpe": round(self.sharpe, 6),
             "profit_factor": self._pf_serializable(self.profit_factor),
+            "payoff_ratio": self._pf_serializable(self.payoff_ratio),
+            "avg_win": round(self.avg_win, 2),
+            "avg_loss": round(self.avg_loss, 2),
+            "expectancy": round(self.expectancy, 2),
             "trade_count": self.trade_count,
         }
 

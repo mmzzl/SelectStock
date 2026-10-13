@@ -86,6 +86,37 @@ class TestProfitFactor:
         assert m.profit_factor == 0.0
 
 
+class TestPayoffRatio:
+    def test_payoff_is_avg_win_over_avg_loss(self):
+        m = make_metrics([100000], 100000, closed_pnls=[1000, 3000, -500, -1500])
+        assert m.avg_win == pytest.approx(2000)
+        assert m.avg_loss == pytest.approx(1000)
+        assert m.payoff_ratio == pytest.approx(2.0)
+
+    def test_payoff_differs_from_profit_factor(self):
+        # 胜率 25% 时高赔率只对应利润因子 2.0：两个口径不能混用
+        m = make_metrics([100000], 100000, closed_pnls=[600, -100, -100, -100])
+        assert m.payoff_ratio == pytest.approx(6.0)
+        assert m.profit_factor == pytest.approx(2.0)
+
+    def test_payoff_zero_loss_returns_inf(self):
+        m = make_metrics([100000], 100000, closed_pnls=[100, 200])
+        assert m.payoff_ratio == math.inf
+
+
+class TestExpectancy:
+    def test_expectancy_is_mean_of_closed_pnls(self):
+        m = make_metrics([100000], 100000, closed_pnls=[1000, -500, -250])
+        assert m.expectancy == pytest.approx(250 / 3)
+
+    def test_to_dict_exposes_both_ratios(self):
+        m = make_metrics([100000], 100000, closed_pnls=[1000, 3000, -500, -1500])
+        d = m.to_dict()
+        assert d["payoff_ratio"] == pytest.approx(2.0)
+        assert d["expectancy"] == pytest.approx(500.0)
+        assert d["profit_factor"] == pytest.approx(4000 / 2000)
+
+
 class TestTradeCount:
     def test_trade_count_is_num_closed(self):
         m = make_metrics([100000], 100000, closed_pnls=[1, 2, 3, 4])

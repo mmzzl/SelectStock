@@ -217,6 +217,27 @@ class TestEngineIntegration:
         k = KernelStrategy(BandStrategy(), provider, universe=["000001"])
         assert {o.code for o in k.propose_buys("2026-01-10", 1e9, {})} == {"000001"}
 
+    def test_reject_gate_blocks_only_the_code_it_rejects(self, provider):
+        """闸门挂在买入腿：信号照出、下单前被拦，与实盘「先有信号再过风控」同一顺序。"""
+        asked: list[tuple[str, str]] = []
+
+        def gate(date, code):
+            asked.append((date, code))
+            return code != "000001"
+
+        k = KernelStrategy(BandStrategy(), provider, reject_gate=gate)
+        orders = k.propose_buys("2026-01-10", 1e9, {})
+        assert {o.code for o in orders} == {"000002"}
+        assert k.rejected == 1 and ("2026-01-10", "000001") in asked
+
+    def test_reject_gate_not_asked_without_a_signal(self, provider):
+        """没命中的票不该问闸门——它没产生信号，本来就不在决策入口上。"""
+        asked: list[str] = []
+        k = KernelStrategy(BandStrategy(), provider,
+                           reject_gate=lambda d, c: asked.append(c) or True)
+        k.propose_buys("2026-01-05", 1e9, {})
+        assert asked == []
+
     def test_real_selection_strategy_is_usable_in_backtest(self, tmp_path):
         """真实插件策略（趋势回踩）不改一行代码即可被回测逐日求值，判据与实盘一致。"""
         from stock_selector.core.selector import create_strategy

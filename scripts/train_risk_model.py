@@ -142,6 +142,10 @@ def main() -> None:
     ap.add_argument("--cap", type=int, default=1_500_000, help="单次训练最多样本数（内存保护）")
     ap.add_argument("--reject-pct", type=float, default=0.30)
     ap.add_argument("--out", default=str(DEFAULT_OUT))
+    ap.add_argument("--oof-out", default="",
+                    help="把 walk-forward 拼接的样本外打分另存成 parquet（回测装剔除层要用它）")
+    ap.add_argument("--no-final", action="store_true",
+                    help="只出样本外打分，不重训/不覆盖 data/models/ 里的现役模型")
     args = ap.parse_args()
 
     all_files = [p for p in sorted(Path(args.dir).glob("*.parquet"))
@@ -189,12 +193,22 @@ def main() -> None:
                        ("绝对阈值", e["score"] <= abs_thr)):
         leg_table(e, mask, name)
 
+    if args.oof_out:
+        # 回测装剔除层只能用这份拼接样本外分：现役模型是全样本重训的，拿它打历史=前视。
+        e.assign(reject=(e["score"] <= abs_thr).astype("int8")).to_parquet(args.oof_out, index=False)
+        print(f"\n样本外打分 → {args.oof_out}"
+              f"（{len(e):,} 行 / {e['code'].nunique():,} 只 / 阈值 {abs_thr:+.6f}）")
+
     print("\n=== 放行腿对照（前30%，证明它不能当排序用）===")
     top = e[e["score"].rank(pct=True) >= 1 - args.reject_pct]
     d = top.groupby("date")["ex10"].mean()
     print(f"  ex10 {100 * d.mean():+.2f}pp (t{d.mean() / (d.std() / np.sqrt(len(d))):+6.1f})")
     yr = top.groupby(top["date"].dt.year)["ex10"].mean()
     print("  分年 " + "  ".join(f"{int(k)}:{100 * v:+.2f}" for k, v in yr.items()))
+
+    if args.no_final:
+        print("\n=== --no-final：跳过全样本重训与落盘，现役 data/models/ 未改动 ===")
+        return
 
     print("\n=== 最终模型：全样本重训并落盘 ===")
     fitm = panel

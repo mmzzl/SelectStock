@@ -27,6 +27,7 @@ class BacktestEngine:
         start_date: str | None = None,
         end_date: str | None = None,
         progress_cb=None,
+        params: dict | None = None,
     ) -> None:
         self.strategy = strategy
         self.data = data
@@ -42,6 +43,7 @@ class BacktestEngine:
         )
         self.task_id = task_id or str(uuid.uuid4())
         self.strategy_name = strategy_name or type(strategy).__name__
+        self.params = dict(params or {})
         self.progress_cb = progress_cb
         self._initial_capital = float(capital)
         self.last_close: dict[str, float] = {}
@@ -145,7 +147,7 @@ class BacktestEngine:
         return BacktestResult(
             task_id=self.task_id,
             strategy=self.strategy_name,
-            params={},
+            params=self.params,
             start_date=dates[0] if dates else "",
             end_date=dates[-1] if dates else "",
             metrics=metrics.to_dict(),

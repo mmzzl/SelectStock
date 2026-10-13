@@ -40,6 +40,14 @@ a { color: #409eff; text-decoration: none; cursor: pointer; }
 .empty { color: #909399; text-align: center; padding: 40px; }
 .hint { color: #909399; font-size: 13px; margin-right: 8px; }
 
+/* ---------- 回测达标判定（目标 ①+④：期望/赔率/胜率/利润因子同时过线） ---------- */
+.verdict { margin: 12px 0 16px; padding: 10px 12px; background: #fff; border-radius: 6px; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
+.verdict b { margin-right: 8px; }
+.vd-list { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; }
+.vd { font-size: 12px; padding: 3px 8px; border-radius: 3px; border: 1px solid transparent; }
+.vd.ok { color: #0a7d32; background: #e8f6ec; border-color: #b7e3c4; }
+.vd.no { color: #b3391f; background: #fdeeeb; border-color: #f5c2b5; }
+
 /* ---------- 按钮 ---------- */
 .btn { display: inline-block; white-space: nowrap; padding: 8px 16px; border: 1px solid #dcdfe6; border-radius: 4px; background: #fff; color: #303133; cursor: pointer; font-size: 14px; }
 .btn:hover { border-color: #409eff; color: #409eff; }

@@ -46,9 +46,37 @@
     return Number.isFinite(n) ? n.toFixed(digits) : '-';
   }
 
+  // 目标 ①+④ 的达标判定：单笔期望、赔率、胜率、利润因子四项**同时**过线才算达标。
+  // 四个数缺一不可——赔率可以靠截断亏损凑出来而期望仍为负，胜率可以靠"多买多亏"
+  // 压到 50% 以下换高赔率，利润因子在胜率很低时照样能过 2。所以这里逐项列出来，
+  // 让人看见是哪一项没过，而不是只给一个"达标/不达标"的结论。
+  const TARGETS = { payoff: 2.0, winRate: 0.5, profitFactor: 2.0, minTrades: 30 };
+
+  function verdictHtml(m, tradeCount) {
+    const n = Number(m.trade_count ?? tradeCount);
+    const exp = Number(m.expectancy);
+    const payoff = Number(m.payoff_ratio);
+    const pf = Number(m.profit_factor);
+    const wr = Number(m.win_rate);
+    if (!Number.isFinite(exp)) return '';
+    const items = [
+      ['单笔期望>0', Number.isFinite(exp) && exp > 0, exp.toFixed(0) + ' 元'],
+      ['赔率≥' + TARGETS.payoff.toFixed(1), Number.isFinite(payoff) && payoff >= TARGETS.payoff, fmtNum(payoff, 2)],
+      ['胜率≥' + (TARGETS.winRate * 100).toFixed(0) + '%', Number.isFinite(wr) && wr >= TARGETS.winRate, fmtRatio(wr)],
+      ['利润因子≥' + TARGETS.profitFactor.toFixed(1), Number.isFinite(pf) && pf >= TARGETS.profitFactor, fmtNum(pf, 2)],
+      ['成交≥' + TARGETS.minTrades + ' 笔', Number.isFinite(n) && n >= TARGETS.minTrades, (Number.isFinite(n) ? n : '-') + ' 笔'],
+    ];
+    const all = items.every((it) => it[1]);
+    const chips = items.map((it) =>
+      '<span class="vd ' + (it[1] ? 'ok' : 'no') + '">' + (it[1] ? '✓' : '✗') + ' ' + esc(it[0]) +
+      ' ' + esc(it[2]) + '</span>').join('');
+    return '<div class="verdict"><b>' + (all ? '①+④ 全项达标' : '①+④ 未全项达标') +
+      '</b><span class="hint">（胜率与赔率是两个口径：赔率=均盈/均亏，利润因子=总盈/总亏，' +
+      '只有胜率过半时两者才同向）</span><div class="vd-list">' + chips + '</div></div>';
+  }
+
   function fmtTime(value) {
-    const s = String(value || '');
-    if (!s) return '';
+    const s = String(value || '');    if (!s) return '';
     // SQLite 读回来是 naive UTC，补 Z 才能按本地时区显示；自带偏移的（Mongo）原样交给 Date
     const hasOffset = /Z$|[+-]\d{2}:?\d{2}$/.test(s);
     const d = new Date(hasOffset ? s : s.replace(' ', 'T') + 'Z');
@@ -143,7 +171,8 @@
     const cards = [
       ['总收益', fmtRatio(m.total_return)], ['年化', fmtRatio(m.annual_return)],
       ['最大回撤', fmtRatio(m.max_drawdown)], ['胜率', fmtRatio(m.win_rate)],
-      ['夏普', fmtNum(m.sharpe, 2)], ['盈亏比', fmtNum(m.profit_factor, 2)],
+      ['夏普', fmtNum(m.sharpe, 2)], ['利润因子(总盈/总亏)', fmtNum(m.profit_factor, 2)],
+      ['赔率(均盈/均亏)', fmtNum(m.payoff_ratio, 2)], ['单笔期望(元)', fmtNum(m.expectancy, 0)],
     ];
     return '<div class="hint">策略 ' + esc(job.result ? r.strategy : '-') + ' · ' +
       esc(r.start_date || '') + ' ~ ' + esc(r.end_date || '') +
@@ -151,7 +180,7 @@
       '<div class="cards">' + cards.map((c) =>
         '<div class="card num" style="min-width:110px">' + esc(c[0]) + '<b style="font-size:20px">' +
         esc(c[1]) + '</b></div>').join('') + '</div>' +
-      sparkline(r.equity) + tradesTable(r.recent_trades);
+      sparkline(r.equity) + verdictHtml(m, r.trade_count) + tradesTable(r.recent_trades);
   }
 
   function openDetailMask(title, bodyHtml) {

@@ -114,6 +114,19 @@ def run_backtest(args, progress_cb=None):
             start_date=args.start,
             end_date=args.end,
             progress_cb=progress_cb,
+            params={
+                "capital": args.capital,
+                "max_positions": args.max_positions,
+                "position_cap_pct": args.position_cap_pct,
+                "target_amount": args.target_amount,
+                "commission_rate": args.commission_rate,
+                "commission_min": args.commission_min,
+                "stamp_tax_rate": args.stamp_tax_rate,
+                "universe": args.universe,
+                "max_hold_days": args.max_hold_days,
+                "stop_loss_pct": args.stop_loss_pct,
+                "take_profit_pct": args.take_profit_pct,
+            },
         )
         result = engine.run()
 
