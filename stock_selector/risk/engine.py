@@ -38,6 +38,13 @@ class RiskConfig:
     probe_order_amount: float = 5e4   # 未折算出下单量时，滑点用的探测单额（元）
     ml_enabled: bool = True
     ml_model_dir: Path | None = DEFAULT_MODEL_DIR
+    # adx14 闸门（第 6 条）。默认关：它是研究出来的准入规则，不是开箱即用的默认项，
+    # 打开前请先读 README《结论卡：adx14 高分位闸门》——分母、撮合假设、四项达标口径
+    # 都在那里。mode=shadow 时只记录不拦截（灰度期要的正是那个对照）。
+    adx14_enabled: bool = False
+    adx14_mode: str = "shadow"          # shadow=只记录不拦 | live=低于阈值就拦
+    adx14_factor: str = "adx14"
+    adx14_min_pct: float = 90.0         # 当日全市场百分位下限
 
     @classmethod
     def from_dict(cls, raw: dict | None) -> "RiskConfig":
@@ -46,13 +53,25 @@ class RiskConfig:
 
         data = dict(raw or {})
         known = {f.name for f in fields(cls)}
-        unknown = sorted(k for k in data if k not in known and k != "ml")
+        unknown = sorted(k for k in data if k not in known and k not in ("ml", "adx14_rank"))
         if unknown:
             logger.warning("风控配置里的未知项已忽略: %s（可能拼错或已改名）", ", ".join(unknown))
         ml = data.get("ml") or {}
+        gate = data.get("adx14_rank") or {}
+        unknown_gate = sorted(k for k in gate if k not in
+                              ("enabled", "mode", "factor", "min_pct"))
+        if unknown_gate:
+            logger.warning("adx14 闸门配置里的未知项已忽略: %s", ", ".join(unknown_gate))
         cfg = cls(**{k: v for k, v in data.items() if k in known})
         cfg.ml_enabled = bool(ml.get("enabled", cfg.ml_enabled))
         cfg.ml_model_dir = ml.get("model_dir") or cfg.ml_model_dir
+        # 闸门与 ml 段同一写法：settings.yaml 里读 risk.adx14_rank.{enabled,mode,factor,min_pct}
+        cfg.adx14_enabled = bool(gate.get("enabled", cfg.adx14_enabled))
+        cfg.adx14_mode = str(gate.get("mode", cfg.adx14_mode))
+        cfg.adx14_factor = str(gate.get("factor") or cfg.adx14_factor)
+        cfg.adx14_min_pct = float(gate.get("min_pct", cfg.adx14_min_pct))
+        if cfg.adx14_mode not in ("shadow", "live"):
+            raise ValueError(f"risk.adx14_rank.mode 只能是 shadow 或 live，收到 {cfg.adx14_mode!r}")
         return cfg
 
 

@@ -28,8 +28,11 @@ mod = _load_script()
 
 
 @pytest.fixture(autouse=True)
-def _clear_rank_cache():
+def _clear_rank_cache(tmp_path, monkeypatch):
+    """缓存清干净，并把落盘目录指到 tmp——否则测试会把三只票的"全市场"分位
+    写进真的 data/factor_screen/，下一次真跑就会拿它当全市场缓存。"""
     mod._RANKS.clear()
+    monkeypatch.setattr(mod, "RANK_CACHE", tmp_path / "rankcache")
     yield
     mod._RANKS.clear()
 
@@ -55,7 +58,7 @@ def gate_dir(tmp_path, monkeypatch):
 
 def test_gate_uses_within_day_cross_section_rank(gate_dir):
     gate = mod.FactorGate("2026-09-01", "2026-09-02", ("000001", "000002", "000003"),
-                          [{"factor": "roc10", "bin": 4}])
+                          [{"factor": "roc10", "bin": 4}], scope="pool")
     assert gate("2026-09-01", "000003") is True     # 分位 100 → 落在 [80,100)
     assert gate("2026-09-01", "000002") is False    # 分位 66.7
     assert gate("2026-09-02", "000003") is True     # 换一天重算，仍是当日最高
@@ -63,7 +66,7 @@ def test_gate_uses_within_day_cross_section_rank(gate_dir):
 
 def test_gate_passes_when_rank_unavailable(gate_dir):
     gate = mod.FactorGate("2026-09-01", "2026-09-02", ("000001", "000002", "000003"),
-                          [{"factor": "roc10", "bin": 4}])
+                          [{"factor": "roc10", "bin": 4}], scope="pool")
     assert gate("2026-09-01", "000002") is False    # 先确认它平时会被剔
     assert gate("2026-09-03", "000002") is True     # 这天没数据 → 不判 → 放行
     assert gate("2026-09-01", "999999") is True     # 这只票没行 → 放行
@@ -72,9 +75,9 @@ def test_gate_passes_when_rank_unavailable(gate_dir):
 def test_gate_modes(gate_dir):
     universe = ("000001", "000002", "000003")
     rules = [{"factor": "roc10", "bin": 0}, {"factor": "roc10", "bin": 4}]
-    assert mod.FactorGate("2026-09-01", "2026-09-02", universe, rules, "union")(
+    assert mod.FactorGate("2026-09-01", "2026-09-02", universe, rules, "union", "pool")(
         "2026-09-01", "000003") is True             # 任一命中即放行
-    assert mod.FactorGate("2026-09-01", "2026-09-02", universe, rules, "all")(
+    assert mod.FactorGate("2026-09-01", "2026-09-02", universe, rules, "all", "pool")(
         "2026-09-01", "000003") is False            # 要求两条都命中（000003 只中 bin4）
 
 
@@ -135,9 +138,35 @@ def test_parse_rules_validates_format():
 def test_gate_min_pct_is_inclusive_at_the_boundary(gate_dir):
     """`>=百分位` 闭区间：分位正好等于门槛的票必须放行，否则 90 与 91 差一整个样本。"""
     gate = mod.FactorGate("2026-09-01", "2026-09-02", ("000001", "000002", "000003"),
-                          [{"factor": "roc10", "min_pct": 100.0}])
+                          [{"factor": "roc10", "min_pct": 100.0}], scope="pool")
     assert gate("2026-09-01", "000003") is True     # 分位 100.0 ≥ 100
     assert gate("2026-09-01", "000002") is False    # 分位 66.7
     gate90 = mod.FactorGate("2026-09-01", "2026-09-02", ("000001", "000002", "000003"),
-                            [{"factor": "roc10", "min_pct": 90.0}])
+                            [{"factor": "roc10", "min_pct": 90.0}], scope="pool")
     assert gate90("2026-09-01", "000003") is True
+
+
+def test_market_scope_denominator_ignores_the_backtest_universe(gate_dir):
+    """全市场分母 vs 回测池分母：同一天，池里排第几成与全市场排第几成不是一回事。
+
+    这条用例就是本次修复的根据——`>=90` 在池里是"当日第几成"，上线后分母变成全市场，
+    同一句话的严格程度会变，所以默认值必须是 market。
+    """
+    _write(gate_dir, "000004", [{"date": "2026-09-01", "roc10": 20.0},
+                                {"date": "2026-09-02", "roc10": 20.0}])
+    pool = ("000001", "000002")            # 池里最高分位也只有 50
+    gate = mod.FactorGate("2026-09-01", "2026-09-02", pool,
+                          [{"factor": "roc10", "min_pct": 90.0}], scope="market")
+    assert gate("2026-09-01", "000002") is False
+    assert gate("2026-09-01", "000004") is True    # 000004 不在回测池里，却能被闸门判
+
+
+def test_market_scope_is_cached_to_disk_and_reused(gate_dir):
+    rules = [{"factor": "roc10", "min_pct": 90.0}]
+    first = mod.FactorGate("2026-09-01", "2026-09-02", ("000001",), rules, scope="market")
+    cache = mod.RANK_CACHE / "rank_2026-09-01_2026-09-02.parquet"
+    assert cache.is_file()
+    mod._RANKS.clear()                      # 逼它从落盘缓存重建
+    second = mod.FactorGate("2026-09-01", "2026-09-02", ("000001",), rules, scope="market")
+    assert first("2026-09-01", "000003") == second("2026-09-01", "000003")
+    mod._RANKS.clear()

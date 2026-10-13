@@ -90,6 +90,19 @@ risk:
   #   且毛 α 9~12%/年 < 25bp/边下的换手成本 12%/年 → 不做排序、不做买点、不进默认策略列表。
   # 代价：parquet 源多读 ~45 列、回溯 700 根（原 6 列/120 行），全市场选股耗时上升。
   # 依赖 data/models/risk_ex10.*，缺失时引擎 preflight() 直接 RuntimeError（不静默放行）。
+  # adx14 闸门（第 6 条，分母是**当日全市场**而不是它自己）。
+  # 默认关：它是按 README《结论卡：adx14 高分位闸门》的准入测出来的，不是开箱即用项。
+  #   实测（universe 1500、分母=全市场）：九格单笔期望全为正 +128.8~+1171.3 元/笔，
+  #   相对对照的配对改进九格同号（d胜率 +3.1~+32.4pp、d期望 +27.9~+994.6 元）。
+  #   撮合仍是「信号日收盘成交」口径，没有改成次晨开盘——偏差在实盘手册与 shadow 台账里观测。
+  # mode=shadow：只把「这只会不会被剔掉」写进决策 metrics，**不改变下单**。
+  #   灰度要的就是同一批信号上「剔/不剔」的对照，所以它必须记录、但不能真的拦。
+  # mode=live：低于 min_pct 就 block。切 live 之前请确认 shadow 台账已核验通过。
+  adx14_rank:
+    enabled: false
+    mode: "shadow"
+    factor: "adx14"
+    min_pct: 90
   ml:
     enabled: true
     model_dir: "data/models"

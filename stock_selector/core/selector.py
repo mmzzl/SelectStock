@@ -150,20 +150,68 @@ def _risk_engine(risk_cfg: dict | None):
     return engine
 
 
+def _cross_section(ds, stock_list: list[dict], engine, log) -> dict[str, float]:
+    """闸门要用的**当日全市场**分位，在逐股遍历之前先扫一趟窄列算出来。
+
+    为什么必须先扫：分位是「排在那批票里的第几成」，只有把全市场当天都收齐了才算得出来；
+    在逐股循环里边取边排，排到第 500 只时的分位和第 6600 只时的分位不是同一个东西，
+    而最后落进报告的只有最后一版。
+
+    为什么要窄列：只读闸门那一列 + 日期，不读 82 列指标，所以这一趟比主循环便宜得多；
+    主循环随后会用完整列集重新 `prepare` 一次（`prepare` 是「只放宽不收紧」，可以重复调用）。
+
+    取不到（数据源没有该列、股票池太小、全部取数失败）就返回空 dict —— 上层按
+    「信息不够就不判」放行，**不猜分位**。猜一个数会让闸门在稀疏数据上变成随机开关。
+    """
+    from ..risk import cross_section as xs
+
+    factor = getattr(engine.cfg, "adx14_factor", xs.FACTOR) if engine else xs.FACTOR
+    try:
+        ds.prepare(columns=["date", factor], rows=2)
+    except Exception as exc:
+        log.info("闸门横截面跳过：数据源不提供 %s 列（%s）", factor, exc)
+        return {}
+    values: dict[str, float] = {}
+    for stock in stock_list:
+        code = str(stock.get("code", ""))
+        if not code:
+            continue
+        try:
+            df = ds.get_kline(code)
+        except Exception:
+            continue
+        if df is None or df.empty:
+            continue
+        value = xs.collect([(code, df)], factor).get(code)
+        if value is not None:
+            values[code] = value
+    if not xs.enough(values):
+        log.info("闸门横截面跳过：当日只有 %d 只票取到 %s（下限 %d），不判",
+                 len(values), factor, xs.MIN_CROSS_SECTION)
+        return {}
+    pct = xs.daily_percentile(values, factor)
+    log.info("闸门横截面：%s 当日分母 %d 只（%s）", factor, len(pct), engine.cfg.adx14_mode)
+    return pct
+
+
 def _risk_review(engine, code: str, name: str, df, hits: list[SelectResult],
-                 counters: dict) -> list[SelectResult]:
+                 counters: dict, cross: dict | None = None) -> list[SelectResult]:
     """一股票的信号先过风控再进结果：被拦下的整批剔除，放行的把决策字段写进 extra。
 
     基准日取**这只票自己最后一根日线**（停牌票的行情口径要跟着它的最后一天走），并且
     不回落实时快照（`allow_live=False`）：同一份数据跑两次必须得到同一批结果，否则选股
     不可复现，盘后批判定还会拿今天的涨跌停价去判昨天的信号。
+
+    `cross` 是全市场分位表（`_cross_section` 算的）；取不到这只就传 None，
+    闸门按「信息不够就不判」放行。
     """
     from ..risk import build as build_context
 
     day = str(df["date"].iloc[-1])[:10] if "date" in df.columns else ""
     price = round(float(df["close"].iloc[-1]), 4) if "close" in df.columns else None
+    pct = (cross or {}).get(str(code).zfill(6))
     ctx = build_context(code, "buy", name=name, day=day, kline=df,
-                        allow_live=False, signal_price=price)
+                        allow_live=False, signal_price=price, cross_pct=pct)
     decision = engine.review(ctx)
     if decision.blocked:
         counters[decision.blocked_by or "risk"] = counters.get(decision.blocked_by or "risk", 0) + 1
@@ -250,6 +298,15 @@ def run_select(
             stock_list = stock_list[:limit]
 
         tolerate = selector_cfg.get("tolerate_errors", True)
+        # 3-0 闸门横截面：adx14 那条规则的分母是全市场，必须在逐股遍历前算完（见函数注释）
+        cross: dict[str, float] = {}
+        if risk is not None and getattr(risk.cfg, "adx14_enabled", False):
+            cross = _cross_section(ds, stock_list, risk, logger)
+            columns, rows = _requirements(instances)
+            ml_columns, ml_rows = risk.data_requirements()
+            columns = list(dict.fromkeys(columns + ml_columns))
+            rows = max(rows, ml_rows)
+            ds.prepare(columns=columns, rows=rows)
         results: list[SelectResult] = []
         loaded = 0
         failed = 0
@@ -303,7 +360,8 @@ def run_select(
 
             # 3b. 风控闸门：策略只产生信号，先过风控再输出决策（被拦的整只剔除）
             if risk is not None and stock_hits:
-                stock_hits = _risk_review(risk, code, stock_name, df, stock_hits, risk_gates)
+                stock_hits = _risk_review(risk, code, stock_name, df, stock_hits,
+                                          risk_gates, cross)
             results.extend(stock_hits)
 
         asof = ds.max_date() or ""

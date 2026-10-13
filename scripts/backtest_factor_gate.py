@@ -58,30 +58,27 @@ SCREEN_DIR = ROOT / "data" / "factor_screen"
 BINS = 5
 
 _RANKS: dict[tuple, dict[str, dict]] = {}
+RANK_CACHE = ROOT / "data" / "factor_screen"
 
 
-def _load_ranks(start: str, end: str, universe: tuple[str, ...], factors: list[str]) -> dict:
-    """(日期, 代码) → 当日横截面百分位（0~100）。一次装载，六个臂共用。
+def _read_slice(codes, start: str, end: str, factors: list[str], label: str) -> pd.DataFrame:
+    """读一段 (日期区间 × 代码集合) 的特征面板，只取 `date` 与所需列。
 
-    只读 `date` 与所需特征两列（`read_parquet(columns=…)`），不把 82 列日线塞进内存：
-    9 个 (时代, 抽样) × 250 只票的整表缓存会把进程撑到 GB 级，而闸门只在命中时才查。
+    只读需要的列（`read_parquet(columns=…)`），不把 82 列日线塞进内存。
+    列不存在必须**立刻**炸出来：`liq`/`atr_pct` 这些是派生列，parquet 里并没有；
+    若在这里 continue，每只票都会静默被跳过，最后表现为「这批股票没有日线」——
+    一个与真实原因完全无关的报错。
     """
-    key = (start, end, universe, tuple(factors))
-    if key in _RANKS:
-        return _RANKS[key]
     native = [f for f in factors if f not in DERIVED_COLS]
     need = sorted({*native, *(DERIVED_INPUTS if len(native) < len(factors) else [])})
     frames = []
-    for code in universe:
+    for code in codes:
         path = KLINE_DIR / f"{code}.parquet"
         if not path.exists():
             continue
         try:
             df = pd.read_parquet(path, columns=["date", *need])
         except Exception as exc:
-            # 列不存在必须**立刻**炸出来：`liq`/`atr_pct` 这些是派生列，parquet 里
-            # 并没有；若在这里 continue，每只票都会静默被跳过，最后表现为
-            # 「这批股票没有日线」——一个与真实原因完全无关的报错。
             raise SystemExit(f"闸门取数失败 {path.name}：{exc}；可用特征见 "
                              f"{','.join(_ssf.FACTORS)}（派生列 {','.join(DERIVED_COLS)} "
                              f"由 {','.join(DERIVED_INPUTS)} 现算）") from exc
@@ -92,16 +89,74 @@ def _load_ranks(start: str, end: str, universe: tuple[str, ...], factors: list[s
         df["code"] = code
         frames.append(df)
     if not frames:
-        raise SystemExit(f"闸门取数失败：{start}~{end} 这批股票在日线目录里没有行")
+        raise SystemExit(f"闸门取数失败（{label}）：{start}~{end} 在日线目录里没有可用行")
     panel = pd.concat(frames, ignore_index=True)
     if len(native) < len(factors):
         panel = pd.concat([panel.reset_index(drop=True),
                            _ssf._add_derived(panel.reset_index(drop=True))], axis=1)
-    out: dict[str, dict] = {}
+    return panel
+
+
+def _rank_frame(panel: pd.DataFrame, factors: list[str]) -> pd.DataFrame:
+    """把每个特征换成它在**当日样本内**的百分位（0~100），其余列不动。"""
+    out = panel[["date", "code"]].reset_index(drop=True).copy()
     for f in factors:
         vals = pd.to_numeric(panel[f], errors="coerce")
-        rank = vals.groupby(panel["date"]).rank(pct=True, method="average") * 100.0
-        out[f] = dict(zip(zip(panel["date"], panel["code"]), rank))
+        out[f] = (vals.groupby(panel["date"]).rank(pct=True, method="average") * 100.0
+                  ).to_numpy()
+    return out
+
+
+def _ranks_from_panel(panel: pd.DataFrame, factors: list[str]) -> dict[str, dict]:
+    frame = _rank_frame(panel, factors)
+    return {f: dict(zip(zip(frame["date"], frame["code"]), frame[f])) for f in factors}
+
+
+def _market_ranks(start: str, end: str, factors: list[str]) -> dict[str, dict]:
+    """**全市场**分母的当日横截面百分位，落盘缓存（`rank_<起>_<止>.parquet`）。
+
+    为什么必须是全市场而不是回测股票池：分位是「排在那批票里的第几成」，
+    而实盘的分母是全市场 6600 只。回测池 1500 只时「前 10%」是当日 150 只，
+    实盘是当日 660 只——**同一句规则在两处严格程度不同，实测过的九格全正就未必是
+    实盘那一句**。这与 `HeatGate` 用判定台账的全市场横截面是同一口径
+    （台账 heat_bin 那一列就是这么算的），照抄即可。
+
+    缓存的理由：全市场 6631 个 parquet 每个时代要读一遍（约 1 分钟），
+    而 9 个 (时代 × 抽样) 格与 6 个臂共用同一张分位表——不缓存就是重复读 50 次。
+    缓存键是 (起, 止, 特征集)，落在 gitignore 的 data/ 下，可随时删了重建。
+    """
+    RANK_CACHE.mkdir(parents=True, exist_ok=True)
+    path = RANK_CACHE / f"rank_{start}_{end}.parquet"
+    if path.is_file():
+        df = pd.read_parquet(path)
+        if set(factors) <= set(df.columns):
+            return {f: dict(zip(zip(df["date"], df["code"]), pd.to_numeric(df[f])))
+                    for f in factors}
+        print(f"  缓存 {path.name} 里没有 {sorted(set(factors) - set(df.columns))}，重建",
+              flush=True)
+    codes = sorted(p.stem for p in KLINE_DIR.glob("*.parquet"))
+    print(f"  构造全市场分母：{len(codes)} 只 × {start}~{end}（约 1 分钟，缓存到 {path.name}）",
+          flush=True)
+    frame = _rank_frame(_read_slice(codes, start, end, factors, "全市场"), factors)
+    frame.to_parquet(path, index=False)
+    return {f: dict(zip(zip(frame["date"], frame["code"]), frame[f])) for f in factors}
+
+
+def _load_ranks(start: str, end: str, universe: tuple[str, ...], factors: list[str],
+                scope: str = "market") -> dict:
+    """(日期, 代码) → 当日横截面百分位（0~100）。按 (起, 止, 特征, 分母范围) 缓存。
+
+    `scope="market"` 是默认且唯一能上线的口径（见 `_market_ranks`）；
+    `"pool"` 保留是为了复现早先那批读数——它是**回测池内分位**，与实盘不同，
+    拿它汇报"实盘能怎样"就是拿一个更宽松的规则冒充同一条规则。
+    """
+    key = (start, end, scope, universe if scope == "pool" else (), tuple(factors))
+    if key in _RANKS:
+        return _RANKS[key]
+    if scope == "market":
+        out = _market_ranks(start, end, factors)
+    else:
+        out = _ranks_from_panel(_read_slice(universe, start, end, factors, "回测池"), factors)
     _RANKS[key] = out
     return out
 
@@ -117,11 +172,12 @@ class FactorGate:
     """
 
     def __init__(self, start: str, end: str, universe: tuple[str, ...],
-                 rules: list[dict], mode: str = "union") -> None:
+                 rules: list[dict], mode: str = "union", scope: str = "market") -> None:
         self.rules = rules
         self.mode = mode
+        self.scope = scope
         factors = sorted({str(r["factor"]) for r in rules})
-        self.ranks = _load_ranks(start, end, universe, factors)
+        self.ranks = _load_ranks(start, end, universe, factors, scope)
 
     def __call__(self, date: str, code: str) -> bool:
         step = 100.0 / BINS
@@ -261,7 +317,9 @@ def run(args) -> None:
 
     print(f"策略 {name}；闸门 = 当日横截面分位；时代 {len(eras)} × 抽样 {offsets}，universe {args.universe}")
     print(f"候选 {len(rules)} 条，mode={args.mode}（single=每条规则单独一臂，"
-          f"union=全部规则取并集，all=要求全部满足）", flush=True)
+          f"union=全部规则取并集，all=要求全部满足）；分位分母={args.rank_scope}"
+          + ("（实盘口径）" if args.rank_scope == "market" else "（⚠ 回测池口径，与实盘不同，"
+             "读数不能当实盘结论）"), flush=True)
     for r in rules:
         print(f"    {arm_label(r)} {r['why']}")
 
@@ -278,7 +336,7 @@ def run(args) -> None:
                 for era in eras:
                     t0 = time.time()
                     gate = (FactorGate(*era.split(":"), tuple(universes[(era, off)]), gate_rules,
-                                       args.mode) if gate_rules else None)
+                                       args.mode, args.rank_scope) if gate_rules else None)
                     r = _scan._run(provider, name, cfg, era, universes[(era, off)], args, gate)
                     r["bh"] = baselines[(era, off)]
                     cells.append((era[:4], off, r))
@@ -364,6 +422,9 @@ def main() -> None:
     ap.add_argument("--wr-target", type=float, default=0.50)
     ap.add_argument("--pf-target", type=float, default=2.0)
     ap.add_argument("--min-trades", type=int, default=30)
+    ap.add_argument("--rank-scope", choices=["market", "pool"], default="market",
+                    help="分位分母：market=全市场（实盘口径，唯一可上线的）；"
+                         "pool=回测股票池（只用于复现旧读数）")
     ap.add_argument("--audit", action="store_true")
     args = ap.parse_args()
     run(args)

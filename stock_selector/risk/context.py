@@ -48,6 +48,10 @@ class RiskContext:
     kline: pd.DataFrame | None = None
     quote: dict = field(default_factory=dict)   # 行情口径（snapshot.get 的结果）
     allow_live: bool = True              # 回测里关掉：历史日期不能拿今天的实时行情判成交
+    # 该票在**当日全市场**横截面里的百分位（0~100）。分母是全市场而不是它自己，
+    # 所以只能由内核预扫后塞进来（见 risk/cross_section.py）。None = 本次没算，
+    # 规则按「信息不够就不判」放行，不当成 0 分位。
+    cross_pct: float | None = None
 
     @property
     def price(self) -> float | None:
@@ -92,11 +96,11 @@ class RiskContext:
 def build(code: str, action: str = "buy", *, name: str = "", signal_price: float | None = None,
           shares: int | None = None, position_value: float = 0.0, day: str = "",
           kline: pd.DataFrame | None = None, quote: dict | None = None,
-          allow_live: bool = True) -> RiskContext:
+          allow_live: bool = True, cross_pct: float | None = None) -> RiskContext:
     """补齐行情口径后生成上下文；`quote` 显式传入时不再读快照（单测与盘中链路用）。"""
     if quote is None:
         quote = snap.get(code, day, allow_live=allow_live)
     return RiskContext(code=str(code).zfill(6), name=name, action=action,
                        signal_price=signal_price, shares=shares,
                        position_value=position_value, day=day, kline=kline,
-                       quote=quote, allow_live=allow_live)
+                       quote=quote, allow_live=allow_live, cross_pct=cross_pct)

@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from .context import RiskContext
@@ -176,6 +177,42 @@ def model(ctx: RiskContext, cfg, state: dict) -> Verdict:
     return Verdict("model", metrics=metrics)
 
 
+def adx14_rank(ctx: RiskContext, cfg, state: dict) -> Verdict:
+    """第 6 条：`adx14`（趋势强度）在**当日全市场**的横截面前 `cfg.adx14_min_pct`% 放行。
+
+    这是六条里唯一分母不是它自己的规则，所以分位由内核预扫后放进 `ctx.cross_pct`
+    （见 `risk/cross_section.py`）；规则层自己不拉数，和其余五条一个姿态。
+
+    两种运行模式（`cfg.adx14_mode`）：
+    - `shadow`：**永远放行**，但把「这一只会被闸门剔掉吗」写进 metrics。
+      shadow 期间要拿的正是"如果剔了会怎样"这个对照，所以它必须在同一批信号上
+      留下记录，又绝不能真的改变下单——否则就没有对照了。
+    - `live`：低于阈值就 block，理由是中文的、能直接进告警。
+
+    取不到分位（停牌、指标未成形、当日分母不足、sell 方向）一律**放行并留 metric**，
+    与其余五条一致：数据不可得时猜一个数，比放过一只票的代价大得多。
+    """
+    factor = cfg.adx14_factor
+    if not cfg.adx14_enabled:
+        return Verdict("adx14_rank", metrics={"skipped": "disabled"})
+    if ctx.action != "buy":
+        # 闸门是在买入候选池内排序，卖出侧不在它的论证范围内
+        return Verdict("adx14_rank", metrics={"skipped": "sell_side"})
+    pct = ctx.cross_pct
+    if pct is None or not np.isfinite(pct):
+        return Verdict("adx14_rank", metrics={f"{factor}_pct": None, "skipped": "no_cross_section"})
+    metrics = {f"{factor}_pct": round(float(pct), 2),
+               "adx14_min_pct": cfg.adx14_min_pct, "adx14_mode": cfg.adx14_mode}
+    passed = float(pct) >= cfg.adx14_min_pct
+    metrics["adx14_gate"] = "pass" if passed else "reject"
+    if passed or cfg.adx14_mode != "live":
+        return Verdict("adx14_rank", metrics=metrics)
+    return Verdict("adx14_rank", "block",
+                   f"{factor} 处于当日全市场前 {100 - cfg.adx14_min_pct:.0f}% 之外"
+                   f"（分位 {pct:.0f} < {cfg.adx14_min_pct:.0f}），趋势强度闸门不放行",
+                   metrics)
+
+
 def _last_bar(kline: pd.DataFrame | None) -> dict | None:
     if kline is None or kline.empty or "lu" not in kline.columns:
         return None
@@ -184,4 +221,4 @@ def _last_bar(kline: pd.DataFrame | None) -> dict | None:
     return {"lu": bool(value) if pd.notna(value) else False}
 
 
-RULES = (tradability, liquidity, position, slippage, model)
+RULES = (tradability, liquidity, position, slippage, model, adx14_rank)
