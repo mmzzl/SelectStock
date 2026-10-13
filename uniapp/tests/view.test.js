@@ -4,7 +4,7 @@ import { toHoldingRow, toTradeRow, toPnlView, toSelectionJobRow, toSelectionResu
          toMessageRow, toDiagRow, toPreviewRow, toUpgradeInfo, fmtTime,
          priceStampText, convictionText,
          riskText, riskClass, sortByRiskDesc, buyLevelText, sellTriggerText,
-         orderPlanText, riskAdjustText, posteriorText } from "../src/logic/view.js";
+         orderPlanText, riskAdjustText, posteriorText, gateText } from "../src/logic/view.js";
 
 test("时间格式化：naive UTC 转本地、压到分钟；带时区/非法值不崩", async () => {
   const { execFileSync } = await import("node:child_process");
@@ -157,7 +157,21 @@ test("选股结果行：字段映射透传", () => {
     riskFill: null, riskSlippageBp: null,
     // 判据后验：后端没给这三列时必须是空串/null（页面据此显示「未标定」）
     posteriorVerdict: "", posteriorExcess: null, posteriorN: null,
+    // adx14 闸门留痕：闸门没开时是 null/空串（页面整句不显示，不能印「分位 0」）
+    adx14Pct: null, adx14Gate: "",
   });
+});
+
+test("adx14 闸门留痕：shadow 期的放行/剔剔除都看得见", () => {
+  const row = toSelectionResultRow({ code: "000001", name: "平安银行", signal: "pattern_reversal",
+                                     reason: "低位V型反转", adx14_pct: 97.53, adx14_gate: "pass" });
+  assert.equal(row.adx14Pct, 97.53);
+  assert.equal(row.adx14Gate, "pass");
+  assert.equal(gateText(row), "adx14 闸门 · 放行（分位 98，shadow 期只记录不拦）");
+  // 分位取不到时要明说「未知」，不能落成 0（0 分位是"当日全市场最弱"这个事实）
+  assert.equal(gateText({ adx14Gate: "reject" }), "adx14 闸门 · 剔除（分位未知，shadow 期只记录不拦）");
+  assert.equal(gateText({}), "");
+  assert.equal(gateText({ adx14Gate: "  " }), "");
 });
 
 test("选股结果行：插件富化字段落到 camelCase", () => {

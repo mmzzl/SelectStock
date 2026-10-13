@@ -111,6 +111,11 @@ async def _http_run(strategies: list[str]) -> list[dict]:
         "posterior_verdict": str(_sp(it).get("verdict") or "")[:64],
         "posterior_excess_pp": _num(_sp(it).get("excess_pp")),
         "posterior_n": _num(_sp(it).get("n"), integer=True),
+        # adx14 闸门留痕：shadow 期要看到「这只当天排第几成、闸门会不会剔它」。
+        # 闸门没开或分位取不到 → 两个字段都是空。**不能把 reject 落成 0 分位**：
+        # 0 分位是「当日全市场最弱」这个事实，而 reject 可能是分位 83.4 被剔的。
+        "adx14_pct": _num((it.get("extra") or {}).get("adx14_pct")),
+        "adx14_gate": str((it.get("extra") or {}).get("adx14_gate") or "")[:8],
     } for it in items if it.get("code")]
 
 

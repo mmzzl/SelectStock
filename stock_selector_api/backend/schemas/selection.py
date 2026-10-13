@@ -39,3 +39,6 @@ class SelectResultCreate(BaseModel):
     posterior_verdict: str = Field(default="", max_length=64)
     posterior_excess_pp: float | None = None
     posterior_n: int | None = None
+    # adx14 闸门留痕：当日全市场分位（0~100）与 pass/reject。空 = 闸门没开或分位取不到。
+    adx14_pct: float | None = None
+    adx14_gate: str = Field(default="", max_length=8)

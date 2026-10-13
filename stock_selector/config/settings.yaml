@@ -99,7 +99,7 @@ risk:
   #   灰度要的就是同一批信号上「剔/不剔」的对照，所以它必须记录、但不能真的拦。
   # mode=live：低于 min_pct 就 block。切 live 之前请确认 shadow 台账已核验通过。
   adx14_rank:
-    enabled: false
+    enabled: true
     mode: "shadow"
     factor: "adx14"
     min_pct: 90

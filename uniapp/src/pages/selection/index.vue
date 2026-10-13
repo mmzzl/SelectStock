@@ -3,7 +3,7 @@
 import { computed, ref } from "vue";
 import { onShow, onUnload } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
-import { toSelectionResultRow, toStrategyOption, riskText, riskClass, sortByRiskDesc, buyLevelText, orderPlanText, riskAdjustText, posteriorText } from "../../logic/view.js";
+import { toSelectionResultRow, toStrategyOption, riskText, riskClass, sortByRiskDesc, buyLevelText, orderPlanText, riskAdjustText, posteriorText, gateText } from "../../logic/view.js";
 
 const { selection } = useClient();
 const strategies = ref([]);        // [{ name, label, desc }]
@@ -114,6 +114,7 @@ const fixed3 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) 
         <text v-if="orderPlanText(r)" class="levels">{{ orderPlanText(r) }}</text>
         <text v-if="riskAdjustText(r)" class="adjust">{{ riskAdjustText(r) }}</text>
         <text class="posterior">{{ posteriorText(r) }}</text>
+        <text v-if="gateText(r)" class="gate">{{ gateText(r) }}</text>
         <text class="reason">{{ r.reason }}</text>
       </view>
       <view v-if="job && !results.length && polling" class="empty">全市场扫描中，请稍候…</view>
@@ -130,6 +131,7 @@ const fixed3 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) 
 .levels { display: block; margin-top: 8rpx; font-size: 24rpx; color: #2b5cff; }
 .adjust { display: block; margin-top: 6rpx; font-size: 22rpx; color: #c8641e; }
 .posterior { display: block; margin-top: 6rpx; font-size: 22rpx; color: #8a919f; }
+.gate { display: block; margin-top: 4rpx; font-size: 22rpx; color: #b8821f; }
 .sortnote {
   font-size: 22rpx; color: #8a919f; line-height: 1.6;
   margin: -6rpx 4rpx 16rpx;

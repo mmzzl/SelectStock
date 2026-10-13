@@ -150,7 +150,7 @@ def _risk_engine(risk_cfg: dict | None):
     return engine
 
 
-def _cross_section(ds, stock_list: list[dict], engine, log) -> dict[str, float]:
+def _cross_section(ds, full_list: list[dict], engine, log) -> dict[str, float]:
     """闸门要用的**当日全市场**分位，在逐股遍历之前先扫一趟窄列算出来。
 
     为什么必须先扫：分位是「排在那批票里的第几成」，只有把全市场当天都收齐了才算得出来；
@@ -162,6 +162,10 @@ def _cross_section(ds, stock_list: list[dict], engine, log) -> dict[str, float]:
 
     取不到（数据源没有该列、股票池太小、全部取数失败）就返回空 dict —— 上层按
     「信息不够就不判」放行，**不猜分位**。猜一个数会让闸门在稀疏数据上变成随机开关。
+
+    分母刻意用 `full_list` 而不是被 `stock_limit` 截过的 `stock_list`：`stock_limit`
+    是给扫描提速用的（默认 0=不限制），一旦有人把它调小，闸门的"前 10%"就会跟着变小、
+    变严格，而页面上看不出任何区别——那正是回测里已经踩过的那个坑（分母依赖股票池）。
     """
     from ..risk import cross_section as xs
 
@@ -172,7 +176,7 @@ def _cross_section(ds, stock_list: list[dict], engine, log) -> dict[str, float]:
         log.info("闸门横截面跳过：数据源不提供 %s 列（%s）", factor, exc)
         return {}
     values: dict[str, float] = {}
-    for stock in stock_list:
+    for stock in full_list:
         code = str(stock.get("code", ""))
         if not code:
             continue
@@ -190,7 +194,8 @@ def _cross_section(ds, stock_list: list[dict], engine, log) -> dict[str, float]:
                  len(values), factor, xs.MIN_CROSS_SECTION)
         return {}
     pct = xs.daily_percentile(values, factor)
-    log.info("闸门横截面：%s 当日分母 %d 只（%s）", factor, len(pct), engine.cfg.adx14_mode)
+    mode = getattr(getattr(engine, "cfg", None), "adx14_mode", "?")
+    log.info("闸门横截面：%s 当日分母 %d 只（%s）", factor, len(pct), mode)
     return pct
 
 
@@ -292,7 +297,8 @@ def run_select(
             rows = max(rows, ml_rows)
         ds.prepare(columns=columns, rows=rows)
 
-        stock_list = ds.get_stock_list()
+        full_list = ds.get_stock_list()          # 闸门分母用全量，不受下面的 stock_limit 影响
+        stock_list = full_list
         limit = int(selector_cfg.get("stock_limit") or 0)
         if limit > 0:
             stock_list = stock_list[:limit]
@@ -301,7 +307,7 @@ def run_select(
         # 3-0 闸门横截面：adx14 那条规则的分母是全市场，必须在逐股遍历前算完（见函数注释）
         cross: dict[str, float] = {}
         if risk is not None and getattr(risk.cfg, "adx14_enabled", False):
-            cross = _cross_section(ds, stock_list, risk, logger)
+            cross = _cross_section(ds, full_list, risk, logger)
             columns, rows = _requirements(instances)
             ml_columns, ml_rows = risk.data_requirements()
             columns = list(dict.fromkeys(columns + ml_columns))

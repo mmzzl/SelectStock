@@ -108,6 +108,7 @@ class _StubClient:
                        "risk_reason": "[position] 单票上限 4 万元，建议改为 3800 股",
                        "risk_shares": "3800", "risk_amount": "39140.0",
                        "risk_fill_price": "10.31", "risk_slippage_bp": "12.5",
+                       "adx14_pct": "97.53", "adx14_gate": "pass",
                        "signal_posterior": {"verdict": "换时代/换抽样会翻号，未标定",
                                             "excess_pp": -0.32, "n": 166120}}},
             {"code": "", "signal": "box_oscillate"},      # 无代码脏行必须丢掉
@@ -134,6 +135,8 @@ async def test_http_run_maps_enriched_fields(monkeypatch):
     # 数字另存两列，供排序与「未标定」判定用。
     assert row["posterior_verdict"] == "换时代/换抽样会翻号，未标定"
     assert row["posterior_excess_pp"] == -0.32 and row["posterior_n"] == 166120
+    # adx14 闸门留痕同样藏在 extra 里，且分位是字符串（内核给的是 JSON 数值）
+    assert row["adx14_pct"] == 97.53 and row["adx14_gate"] == "pass"
 
 
 async def test_http_run_maps_posterior_absent_as_unlabeled(monkeypatch):
@@ -150,6 +153,24 @@ async def test_http_run_maps_posterior_absent_as_unlabeled(monkeypatch):
     assert row["posterior_excess_pp"] is None and row["posterior_n"] is None
     # 风险分照常映射，说明后验缺失不会连带打掉别的字段
     assert row["risk_ex10_pp"] == 0.10
+
+
+async def test_http_run_maps_gate_absent_as_unlabeled(monkeypatch):
+    """闸门没开（或分位取不到）时内核不挂这两个 key → 落 NULL/空串。
+
+    特别不能把 reject 落成 `adx14_pct=0`：0 分位是"当日全市场最弱"这个事实，
+    而 reject 可能只是分位 83 没到 90 门槛——两者混起来，shadow 台账的对照就废了。
+    """
+    class _NoGateClient(_StubClient):
+        async def post(self, url, json=None):
+            return _StubResponse({"code": 0, "data": [{
+                "code": "000004", "signal": "box_oscillate",
+                "extra": {"risk_verdict": "allow"}}]})
+
+    monkeypatch.setattr(selection_service.httpx, "AsyncClient", _NoGateClient)
+    row = (await selection_service._http_run([]))[0]
+    assert row["adx14_pct"] is None and row["adx14_gate"] == ""
+    assert row["risk_verdict"] == "allow"          # 别的字段照常映射
 
 
 async def test_http_run_tolerates_missing_enriched_fields(monkeypatch):

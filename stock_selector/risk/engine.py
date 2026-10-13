@@ -113,7 +113,10 @@ class Decision:
                "risk_amount": self.order_amount, "risk_fill_price": self.est_fill_price,
                "risk_slippage_bp": self.slippage_bp}
         for key in ("risk_ex10_pp", "avg_amount", "participation", "spread_bp", "impact_bp",
-                    "drift_bp", "limit_up", "limit_down"):
+                    "drift_bp", "limit_up", "limit_down",
+                    # 闸门的分位与判定：shadow 模式唯一的产出就是这两个字段，
+                    # 不落进 extra 就等于闸门在实盘侧"跑过但没留痕"，台账无从对照。
+                    "adx14_pct", "adx14_gate", "adx14_min_pct"):
             if self.metrics.get(key) is not None:
                 out[key] = self.metrics[key]
         return out

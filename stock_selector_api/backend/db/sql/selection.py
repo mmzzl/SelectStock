@@ -54,3 +54,7 @@ class SelectResult(Base, IdMixin, TimestampMixin):
     posterior_verdict: Mapped[str] = mapped_column(String(64), default="")
     posterior_excess_pp: Mapped[float | None] = mapped_column(Float, nullable=True)
     posterior_n: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # adx14 闸门（第六条风控规则）在 shadow 期的留痕：当日全市场分位 + 放行/剔除。
+    # 闸门没开或分位取不到时两列都是空——shadow 模式本来就不拦，落空是正常状态。
+    adx14_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    adx14_gate: Mapped[str] = mapped_column(String(8), default="")

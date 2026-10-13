@@ -68,7 +68,8 @@ def _ensure_select_result_columns(sync_conn) -> None:
                      ("risk_shares", "INTEGER"), ("risk_amount", "FLOAT"),
                      ("risk_fill_price", "FLOAT"), ("risk_slippage_bp", "FLOAT"),
                      ("posterior_verdict", "VARCHAR(64) DEFAULT ''"),
-                     ("posterior_excess_pp", "FLOAT"), ("posterior_n", "INTEGER")):
+                     ("posterior_excess_pp", "FLOAT"), ("posterior_n", "INTEGER"),
+                     ("adx14_pct", "FLOAT"), ("adx14_gate", "VARCHAR(8) DEFAULT ''")):
         if col not in cols:
             sync_conn.execute(text(f"ALTER TABLE select_results ADD COLUMN {col} {ddl}"))
 

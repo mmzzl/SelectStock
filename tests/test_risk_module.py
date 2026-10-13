@@ -503,3 +503,15 @@ def test_cross_section_enough_threshold():
     assert xs.enough(None) is False and xs.enough({}) is False
     assert xs.enough({str(i): 1.0 for i in range(xs.MIN_CROSS_SECTION)}) is True
     assert xs.enough({str(i): 1.0 for i in range(xs.MIN_CROSS_SECTION - 1)}) is False
+
+
+def test_gate_decision_reaches_result_extra():
+    """shadow 模式唯一的产出就是这两个字段，不落进 extra 等于闸门跑过但没留痕。"""
+    engine = RiskEngine(_gate_cfg(), rules=(R.adx14_rank,))
+    d = engine.review(_ctx(cross_pct=42.0))
+    extra = d.extra()
+    assert extra["adx14_pct"] == 42.0 and extra["adx14_gate"] == "reject"
+    assert extra["risk_verdict"] == "allow"      # shadow 不改变决策
+    # 分位取不到时不写这两个字段（而不是写 0/None 让下游误以为"判过且判低了"）
+    assert "adx14_pct" not in RiskEngine(_gate_cfg(), rules=(R.adx14_rank,)
+                                        ).review(_ctx()).extra()

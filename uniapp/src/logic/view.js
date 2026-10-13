@@ -141,6 +141,7 @@ export function toSelectionResultRow(s) {
     // 页面只显示 verdict，绝不单独显示 excess —— 那会把翻号的抽样噪声说成结论。
     posteriorVerdict: s.posterior_verdict || "",
     posteriorExcess: num(s.posterior_excess_pp), posteriorN: num(s.posterior_n),
+    adx14Pct: num(s.adx14_pct), adx14Gate: s.adx14_gate || "",
   };
 }
 
@@ -155,6 +156,15 @@ export function posteriorText(r) {
   const n = num(r?.posteriorN);
   if (n !== null) parts.push(`样本 ${n >= 10000 ? `${(n / 10000).toFixed(1)} 万` : n}点`);
   return parts.join(" · ");
+}
+
+/** adx14 闸门在 shadow 期的留痕文案：分位 + 放行/剔除。闸门没开就整句不显示。 */
+export function gateText(r) {
+  const gate = (r?.adx14Gate || "").trim();
+  const pct = num(r?.adx14Pct);
+  if (!gate) return "";
+  const where = pct === null ? "分位未知" : `分位 ${pct.toFixed(0)}`;
+  return `adx14 闸门 · ${gate === "pass" ? "放行" : "剔除"}（${where}，shadow 期只记录不拦）`;
 }
 
 /** 风控给元 → 显示用万元：只是单位换算，数字本身是内核算好的，前端不做业务计算。 */

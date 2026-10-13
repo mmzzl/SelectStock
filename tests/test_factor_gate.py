@@ -170,3 +170,49 @@ def test_market_scope_is_cached_to_disk_and_reused(gate_dir):
     second = mod.FactorGate("2026-09-01", "2026-09-02", ("000001",), rules, scope="market")
     assert first("2026-09-01", "000003") == second("2026-09-01", "000003")
     mod._RANKS.clear()
+
+
+def test_selector_cross_section_uses_the_pool_it_is_given(tmp_path, monkeypatch):
+    """分母 = 调用方传进来的那份股票池；内核必须传**全量**而不是 `stock_limit` 截过的。
+
+    回测里踩过的坑：分母跟着回测池变，同一句"前 10%"在池 1500 与实盘 6600 严格程度不同。
+    所以内核那一侧（`core/selector.py`）要传全量，这条用例钉住函数本身的语义。
+    """
+    import logging
+
+    from stock_selector.core import selector as sel
+
+    class FakeDS:
+        def prepare(self, columns=None, rows=0):
+            pass
+
+        def get_kline(self, code):
+            return pd.DataFrame({"date": ["2026-09-01"], "adx14": [float(code[2:])]})
+
+    codes = [{"code": f"{i:06d}"} for i in range(300)]
+    full = sel._cross_section(FakeDS(), codes,
+                              sel._risk_engine({"adx14_rank": {"enabled": True}}),
+                              logging.getLogger())
+    assert len(full) == 300 and full["000299"] == pytest.approx(100.0)
+    assert max(full.values()) == pytest.approx(100.0)
+
+
+def test_selector_cross_section_skips_when_pool_too_small(tmp_path, monkeypatch):
+    """分母不足 `MIN_CROSS_SECTION` 只时整层不判（返回空），而不是给出一批无意义的分位。"""
+    import logging
+
+    from stock_selector.core import selector as sel
+    from stock_selector.risk import cross_section as xs
+
+    class FakeDS:
+        def prepare(self, columns=None, rows=0):
+            pass
+
+        def get_kline(self, code):
+            return pd.DataFrame({"date": ["2026-09-01"], "adx14": [1.0]})
+
+    small = [{"code": f"{i:06d}"} for i in range(xs.MIN_CROSS_SECTION - 1)]
+    got = sel._cross_section(FakeDS(), small,
+                             sel._risk_engine({"adx14_rank": {"enabled": True}}),
+                             logging.getLogger())
+    assert got == {}
