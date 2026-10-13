@@ -228,3 +228,80 @@ async def test_failed_batch_reruns_on_next_trigger(monkeypatch):
     assert calls["n"] == 1
     results = await portfolio_results.list_by_run(out2["run_id"])
     assert len(results) == 2
+
+
+async def _stale_run(day: str, status: str, *, age_min: float | None, updated_at=None):
+    """直接铺一条「停在 in-flight 状态」的批次，模拟进程在落库前就没了。"""
+    run = await portfolio_runs.create({
+        "batch_id": diag_service._batch_id("u1", day), "user_id": "u1",
+        "natural_day": day, "status": status, "held_code_count": 2})
+    ts = (datetime.now(timezone.utc) - timedelta(minutes=age_min)) if age_min is not None else updated_at
+    await portfolio_runs._update_where_one("portfolio_diag_runs", {"run_id": run["run_id"]},
+                                          {"updated_at": ts, "created_at": ts})
+    return run
+
+
+async def test_stale_running_batch_releases_instead_of_409(monkeypatch):
+    """僵尸批次锁死的是「立即诊断」按钮本身：DB 里的 running 是进程写的，进程死了它不会自己变回去。"""
+    old = await _stale_run("2026-09-20", "running", age_min=20)
+    monkeypatch.setattr("services.portfolio_plugin.call_plugin_analyze", _fake_results)
+    out = await diag_service.trigger_diag("u1", "2026-09-20")
+    assert out["run_id"] == old["run_id"] and out["status"] == "queued"
+
+
+async def test_fresh_running_batch_still_rejected():
+    """真的在跑（没到超时阈值）时照旧拒，别把并发触发变成第二次插件调用。"""
+    await _stale_run("2026-09-21", "running", age_min=2)
+    with pytest.raises(BizError):
+        await diag_service.trigger_diag("u1", "2026-09-21")
+
+
+async def test_batch_without_timestamp_is_treated_as_stale(monkeypatch):
+    """时间戳坏掉按「很旧」处理：宁可多跑一次诊断，也不能让按钮永远点不动。
+
+    两个时间戳列都是 NOT NULL，所以「算不出年龄」只能来自类型坏掉的值，直接从判定这一层验：
+    把这行 dispatch 换成打点，判定成重放的话 count 就是 0。
+    """
+    old = await _stale_run("2026-09-22", "queued", age_min=2)      # 2 分钟：正常处在冷却期内
+    reruns = []
+
+    async def spy_dispatch(run_id, user_id, natural_day):
+        reruns.append(run_id)
+        return {"run_id": run_id, "status": "queued"}
+
+    monkeypatch.setattr(diag_service, "_dispatch", spy_dispatch)
+    bad = dict(old)
+    bad["updated_at"] = "2026-09-22 10:00"      # 不是 datetime：_minutes_since 只能当没有
+    out = await diag_service._guard_or_replay(bad, "u1", "2026-09-22")
+    assert out["run_id"] == old["run_id"] and reruns == [old["run_id"]]
+
+
+async def test_failed_rerun_keeps_previous_details(monkeypatch):
+    """重跑失败不能让那一天变成空白：明细只在插件结果到手后才清。"""
+    monkeypatch.setattr("services.portfolio_plugin.call_plugin_analyze", _fake_results)
+    out1 = await diag_service.trigger_diag("u1", "2026-09-23")
+    key = ("u1", "2026-09-23")
+    for _ in range(200):
+        r = await portfolio_runs.get(out1["run_id"])
+        if r["status"] == "completed" and key not in diag_service._RUNNING:
+            break
+        await asyncio.sleep(0.02)
+    assert len(await portfolio_results.list_by_run(out1["run_id"])) == 2
+
+    await portfolio_runs._update_where_one(
+        "portfolio_diag_runs", {"run_id": out1["run_id"]},
+        {"updated_at": datetime.now(timezone.utc) - timedelta(minutes=11)})
+
+    async def failing(payload):
+        raise RuntimeError("plugin down")
+
+    monkeypatch.setattr("services.portfolio_plugin.call_plugin_analyze", failing)
+    monkeypatch.setattr(diag_service, "_BACKOFF_BASE", 0.0)
+    out2 = await diag_service.trigger_diag("u1", "2026-09-23")
+    for _ in range(200):
+        r2 = await portfolio_runs.get(out2["run_id"])
+        if r2["status"] == "failed" and key not in diag_service._RUNNING:
+            break
+        await asyncio.sleep(0.02)
+    assert r2["status"] == "failed"
+    assert len(await portfolio_results.list_by_run(out1["run_id"])) == 2, "失败的重跑不该把上一次的明细清掉"

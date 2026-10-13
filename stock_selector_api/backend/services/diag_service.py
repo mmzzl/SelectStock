@@ -23,6 +23,10 @@ _BACKOFF_BASE = 1.0        # 秒；重试间隔 2^n * base + 抖动
 _MAX_ATTEMPTS = 3
 _RUNNING = set()           # 运行中（user_id, natural_day）
 _REFRESH_COOLDOWN_MINUTES = 10.0   # 同一天两次「刷新诊断」的最小间隔，防止连点把插件打爆
+# 进程死在结果落库之前时，queued/running 是**进程写的状态**，不会自己变回去。阈值取 15 分钟：
+# 最坏一次插件耗时是 30s×3 次 + 退避 ≈ 2 分钟，15 分钟没有进展只能是没有进程在跑了。
+_STALE_MINUTES = 15.0
+_STALE_MSG = "批次已中断：{min:.0f} 分钟无进展（进程在结果落库前退出），已自动释放"
 
 # pytest-asyncio 默认 function 级事件循环：跨用例复用同一把锁会绑定到已销毁的 loop。
 # reset_runtime() 每次重建，保证每个测试循环拿到全新的、归属于当前 loop 的锁。
@@ -72,16 +76,30 @@ async def _replay(existing: dict) -> dict:
 
 
 async def _rerun(existing: dict, user_id: str, natural_day: str) -> dict:
-    """原地重跑：清掉上一批明细，复用同一个 run（(user_id, natural_day) 唯一约束）。"""
-    await portfolio_results.delete_by_run(existing["run_id"])
+    """原地重跑：复用同一个 run（(user_id, natural_day) 唯一约束），明细留给 `_run_diag` 拿到结果后再清。
+
+    这里**不能**提前 `delete_by_run`：清明细和落新明细之间隔着一次插件调用，进程在这中间没
+    （重启、被 OOM 杀、脚本里手动触发后退出）的话，DB 就剩一个 0 明细的 queued run——那一天
+    的持仓页于是什么都没有。留到结果到手再清，最坏情况是旧明细多活一次刷新。
+    """
     await portfolio_runs.update(existing["run_id"], {"status": "queued", "error": ""})
     return await _dispatch(existing["run_id"], user_id, natural_day)
 
 
 async def _guard_or_replay(existing: dict, user_id: str, natural_day: str) -> dict:
-    """命中既有批次：running → 拒；failed 或已过刷新冷却 → 原地重跑；否则幂等重放。"""
+    """命中既有批次：僵尸先释放、running → 拒；failed 或已过刷新冷却 → 原地重跑；否则幂等重放。"""
     key = (user_id, natural_day)
-    if existing["status"] == "running" or key in _RUNNING:
+    in_flight_here = key in _RUNNING
+    if not in_flight_here and existing["status"] in ("queued", "running"):
+        age = _minutes_since(existing)
+        if age is None or age >= _STALE_MINUTES:
+            await portfolio_runs.update(existing["run_id"], {
+                "status": "failed", "error": _STALE_MSG.format(min=_STALE_MINUTES)})
+            logger.warning("清理僵尸诊断批次 %s（状态 %s，距上次落定 %s）",
+                           existing["run_id"], existing["status"],
+                           "无时间戳" if age is None else f"{age:.0f} 分钟")
+            return await _rerun(existing, user_id, natural_day)
+    if existing["status"] == "running" or in_flight_here:
         raise BizError("诊断运行中，勿重复触发", code=409, status_code=409)
     if existing["status"] == "failed":
         return await _rerun(existing, user_id, natural_day)
@@ -153,6 +171,8 @@ async def _run_diag(run_id: str, user_id: str, natural_day: str, key: tuple) -> 
             "holdings": holdings,
         })
         plugin_ms = int((time.time() - t0) * 1000)
+        # 结果到手才清旧明细（见 _rerun 的注释）：这行往上任何一步崩了，那一天读到的还是上一次的真数
+        await portfolio_results.delete_by_run(run_id)
         for r in plugin_out["results"]:
             await portfolio_results.create({"run_id": run_id, **r})
         summary = plugin_out.get("summary", {})
