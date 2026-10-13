@@ -204,3 +204,81 @@ async def test_mock_run_failure_notifies(monkeypatch):
     mid = await _wait_inbox(uid)
     assert mid is not None
     assert (await inbox_repo.get(mid))["event_code"] == "selection_failed"
+
+
+# ── 僵尸任务：单飞位不能被一个已经死掉的作业永久锁死 ────────────────────────────
+# 2026-10-13 实测踩到：手动验证时进程在 `_run_job` 真正跑起来之前退出，那条作业永远停在
+# queued，于是 App 上每点一次「开始选股」都是「已有选股任务运行中」，而那条任务早就不存在了。
+
+def _async_return(value):
+    """造一个「await 一下就返回 value」的协程函数，给 monkeypatch 用。"""
+    async def _f(*a, **k):
+        return value
+    return _f
+
+
+def _job_row(status="queued", minutes_old=0):
+    from datetime import datetime, timedelta, timezone
+    when = datetime.now(timezone.utc) - timedelta(minutes=minutes_old)
+    return {"job_id": "j-stale", "status": status, "created_at": when.isoformat(),
+            "updated_at": when.isoformat(), "error": ""}
+
+
+async def test_start_run_blocks_on_a_live_job(monkeypatch):
+    monkeypatch.setattr(selection_service, "_inflight", {})
+    monkeypatch.setattr(selection_service.select_jobs_repo, "find_running",
+                        _async_return(_job_row(minutes_old=1)))
+    with pytest.raises(BizError, match="已有选股任务运行中"):
+        await selection_service.start_run("u1", ["pattern_reversal"])
+
+
+async def test_start_run_releases_stale_job_instead_of_blocking(monkeypatch):
+    """超过 30 分钟没进展的 in-flight 作业先判失败，再放行新任务。"""
+    monkeypatch.setattr(selection_service, "_inflight", {})
+    monkeypatch.setattr(selection_service.select_jobs_repo, "find_running",
+                        _async_return(_job_row(minutes_old=90)))
+    patched: dict = {}
+
+    async def _update(job_id, patch):
+        patched.update(patch)
+        return {}
+
+    monkeypatch.setattr(selection_service.select_jobs_repo, "update", _update)
+    created: dict = {}
+
+    async def _create(row):
+        created.update(row)
+        return {"job_id": "j-new"}
+
+    monkeypatch.setattr(selection_service.select_jobs_repo, "create", _create)
+    monkeypatch.setattr(selection_service.asyncio, "create_task", lambda *a, **k: None)
+    out = await selection_service.start_run("u1", ["pattern_reversal"])
+    assert out["job_id"] == "j-new"
+    assert patched["status"] == "failed" and "已自动释放" in patched["error"]
+    assert created["status"] == "queued"          # 僵尸已清，新任务正常建
+
+
+async def test_stale_release_handles_unparsable_timestamp(monkeypatch):
+    """时间戳坏掉时按"很旧"处理：宁可多跑一次扫描，也不能把功能锁死。"""
+    monkeypatch.setattr(selection_service, "_inflight", {})
+    bad = {"job_id": "j-bad", "status": "running", "created_at": "not-a-date",
+           "updated_at": None, "error": ""}
+    monkeypatch.setattr(selection_service.select_jobs_repo, "find_running", _async_return(bad))
+    seen: dict = {}
+
+    async def _update(job_id, patch):
+        seen.update(patch)
+        return {}
+
+    monkeypatch.setattr(selection_service.select_jobs_repo, "update", _update)
+    assert await selection_service._release_stale("u1") is None
+    assert seen["status"] == "failed"
+
+
+def test_age_minutes_treats_naive_timestamps_as_utc():
+    """老库里的时间戳没有 tzinfo（SQLite 存的 UTC）；按本地时区算会让"僵尸"看起来是未来。"""
+    from datetime import datetime, timezone
+    naive = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+    job = {"created_at": naive.isoformat(), "updated_at": naive.isoformat()}
+    assert -1 <= selection_service._age_minutes(job) <= 1
+    assert selection_service._age_minutes({}) == float("inf")

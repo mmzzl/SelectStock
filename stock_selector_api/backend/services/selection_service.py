@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 
 import httpx
 
@@ -125,13 +126,53 @@ def _sp(it: dict) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+# 单飞位的僵尸任务清理阈值（分钟）。选股实测 1~3 分钟（17:30 那次 356 条），
+# 30 分钟还没写回结果就说明跑它的协程已经不在了（进程重启/被杀/异常没兜住）。
+STALE_MINUTES = 30
+_STALE_MSG = "任务已中断：超过 {min} 分钟没有任何进展（跑它的协程已不在），已自动释放"
+
+
+def _age_minutes(job: dict) -> float:
+    """作业建于多久（分钟）。时间戳缺失按"很旧"处理，宁可释放也不能永久挡路。"""
+    raw = job.get("updated_at") or job.get("created_at")
+    if not raw:
+        return float("inf")
+    try:
+        when = raw if isinstance(raw, datetime) else datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return float("inf")
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - when).total_seconds() / 60
+
+
+async def _release_stale(user_id: str) -> dict | None:
+    """把僵尸的 queued/running 作业判失败并返回它；没有僵尸返回 None。
+
+    为什么必须有这一步：单飞位是靠 DB 里的 in-flight 状态挡的，而那个状态是**进程写的**。
+    进程在写完结果之前退出（重启、被 OOM 杀、脚本里手动触发）时，状态永远停在 queued，
+    用户从此每点一次都是「已有选股任务运行中」，而那条任务其实早就不存在了。
+    宁可放行一次重复扫描，也不要把功能永久锁死——扫描是只读的，重跑没有副作用。
+    """
+    job = await select_jobs_repo.find_running(user_id)
+    if not job:
+        return None
+    if _age_minutes(job) < STALE_MINUTES:
+        return job
+    await select_jobs_repo.update(job["job_id"],
+                                 {"status": "failed", "error": _STALE_MSG.format(min=STALE_MINUTES)})
+    logger.warning("清理僵尸选股任务 %s（建于 %.0f 分钟前，状态 %s）", job["job_id"],
+                   _age_minutes(job), job.get("status"))
+    return None
+
+
 async def start_run(user_id: str, strategies: list[str] | None,
                     source: str = "manual") -> dict:
     if not user_id:
         raise BizError("user_id 不能为空", code=400, status_code=400)
     if user_id in _inflight:
         raise BizError(f"已有选股任务运行中: {_inflight[user_id]}", code=409, status_code=409)
-    running = await select_jobs_repo.find_running(user_id)
+    running = await _release_stale(user_id)
     if running:
         raise BizError(f"已有选股任务运行中: {running['job_id']}", code=409, status_code=409)
     strategies = strategies or ["trend_rebound", "box_oscillate"]
