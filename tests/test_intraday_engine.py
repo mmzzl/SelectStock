@@ -244,7 +244,7 @@ def test_ma_and_macd_crosses_come_from_snapshot():
 
 
 def test_dead_cross_and_rsi_bands():
-    v = View(code="600000", quote=quote(), snap=snap(
+    v = View(code="600000", quote=quote(), held=True, snap=snap(
         {"close": 9.8, "ma5": 9.8, "ma10": 9.9, "ma20": 10.0, "macd_dif": -0.01,
          "macd_dea": 0.0, "rsi14": 72.0, "vol_ma5": 100.0, "volume": 100.0},
         {"close": 10.0, "ma5": 10.0, "ma10": 9.95, "ma20": 10.1, "macd_dif": 0.01,
@@ -256,7 +256,7 @@ def test_dead_cross_and_rsi_bands():
 
 def test_volume_surge_drop_needs_both_blast_and_fall():
     def view(volume, bar_pct):
-        return View(code="600000", quote=quote(), snap=snap(
+        return View(code="600000", quote=quote(), held=True, snap=snap(
             {"close": 10.0, "volume": volume, "vol_ma5": 100.0, "bar_pct": bar_pct},
             {"close": 10.1, "volume": 100.0, "vol_ma5": 100.0, "bar_pct": 0.0}))
 
@@ -267,7 +267,7 @@ def test_volume_surge_drop_needs_both_blast_and_fall():
 
 
 def test_day_capitulation_and_vol_ratio_and_turnover():
-    v = View(code="600000", quote=quote(pct=-6.0, vol_ratio=2.5, turnover_pct=12.0))
+    v = View(code="600000", quote=quote(pct=-6.0, vol_ratio=2.5, turnover_pct=12.0), held=True)
     got = {s.kind: s for s in evaluate(v, SignalConfig())}
     assert got["volume_surge_drop"].action == "sell"
     assert "turnover_hot" in got and got["turnover_hot"].action == "sell"
@@ -280,7 +280,7 @@ def test_breakout_needs_previous_price_below_the_level():
     assert {s.kind for s in evaluate(up, SignalConfig())} == {"breakout_resistance"}
     hovering = View(code="600000", quote=quote(price=10.51), day=day, last_price=10.50)
     assert evaluate(hovering, SignalConfig()) == []                # 确认幅度不够
-    dn = View(code="600000", quote=quote(price=9.40), day=day, last_price=9.55)
+    dn = View(code="600000", quote=quote(price=9.40), day=day, last_price=9.55, held=True)
     assert {s.kind for s in evaluate(dn, SignalConfig())} == {"support_break"}
 
 
@@ -289,7 +289,7 @@ def test_order_flow_inflow_and_outflow():
     v = View(code="600000", quote=quote(pct=1.0),
              flow={"inflow_amount": 8e6, "window_min": 5})
     assert {s.kind for s in evaluate(v, cfg)} == {"order_flow_inflow"}
-    v = View(code="600000", quote=quote(pct=-1.0),
+    v = View(code="600000", quote=quote(pct=-1.0), held=True,
              flow={"inflow_amount": -8e6, "window_min": 5})
     assert {s.kind for s in evaluate(v, cfg)} == {"order_flow_outflow"}
 
@@ -302,13 +302,13 @@ def test_book_stack_fires_only_on_crossing():
     already = View(code="600000", quote=quote(),
                    flow={"bid_ratio": 3.0, "prev_bid_ratio": 3.0})
     assert evaluate(already, cfg) == []                            # 一直在高位不重复报
-    pressure = View(code="600000", quote=quote(),
+    pressure = View(code="600000", quote=quote(), held=True,
                     flow={"bid_ratio": 0.3, "prev_bid_ratio": 0.8})
     assert {s.kind for s in evaluate(pressure, cfg)} == {"ask_stack"}
 
 
 def test_events_are_signals_with_the_category_and_reason():
-    v = View(code="600000", quote=quote(), events=[
+    v = View(code="600000", quote=quote(), held=True, events=[
         {"direction": "bullish", "category": "业绩", "reason": "预告净利润同比+80%",
          "score": 8},
         {"direction": "bearish", "category": "减持", "reason": "大股东拟减持不超 2%",
@@ -320,6 +320,29 @@ def test_events_are_signals_with_the_category_and_reason():
     assert got["event_bullish"].action == "buy"
     assert "业绩" in got["event_bullish"].reason and "+80%" in got["event_bullish"].reason
     assert got["event_bearish"].metrics["event_category"] == "减持"
+
+
+def test_sell_side_needs_a_position_in_the_signal_layer():
+    """「卖」的宾语必须是自己的持仓：没仓位的票放量急跌也不产信号，而不是产了再被风控拦。
+
+    盘中池 320 只里绝大多数是当天选出来的票，实测 320 条卖出决策有 308 条属于这种
+    「建议卖一只手里没有的股票」——不删掉它，15 分钟攒批也只是把刷屏打包。
+    """
+    v = View(code="600000", quote=quote(pct=-6.0, vol_ratio=2.5, turnover_pct=12.0))
+    assert evaluate(v, SignalConfig()) == []
+    got = {s.kind for s in evaluate(View(code="600000", held=True,
+                                         quote=quote(pct=-6.0, vol_ratio=2.5,
+                                                    turnover_pct=12.0)), SignalConfig())}
+    assert {"volume_surge_drop", "turnover_hot"} <= got
+
+
+def test_buy_side_is_not_gated_by_positions():
+    """买入方向不受持仓影响：利多看多照样报，能不能买是风控的事。"""
+    events = [{"direction": "bullish", "category": "业绩", "reason": "预增 80%", "score": 8},
+              {"direction": "bearish", "category": "减持", "reason": "拟减持 2%", "score": 6}]
+    got = {s.kind for s in evaluate(View(code="600000", quote=quote(), events=events),
+                                    SignalConfig())}
+    assert got == {"event_bullish"}
 
 
 def test_kinds_whitelist_filters():
@@ -664,7 +687,8 @@ def test_t_plus_1_blocks_sells_of_codes_bought_today(client, out_dir):
     """今天买进去的今天卖不掉：卖出信号一律拦下，不给一个执行不了的建议。"""
     feed(client, pct=-6.0, vol_ratio=2.5)
     engine = make_engine(client, out_dir=out_dir,
-                         cfg=EngineConfig(bought_today=frozenset({"600000"})))
+                         cfg=EngineConfig(held={"600000": 10000.0},
+                                         bought_today=frozenset({"600000"})))
     engine.drain()
     rows = [dict(f) for _, f in client.xrange(bus.KEY_DECISIONS)]
     assert [r for r in rows if r["action"] == "sell"], "用例得先让卖出信号响起来"
@@ -675,10 +699,22 @@ def test_t_plus_1_blocks_sells_of_codes_bought_today(client, out_dir):
 def test_t_plus_1_still_sells_positions_bought_earlier(client, out_dir):
     feed(client, pct=-6.0, vol_ratio=2.5)
     engine = make_engine(client, out_dir=out_dir,
-                         cfg=EngineConfig(bought_today=frozenset({"000001"})))
+                         cfg=EngineConfig(held={"600000": 10000.0},
+                                         bought_today=frozenset({"000001"})))
     engine.drain()
     rows = [dict(f) for _, f in client.xrange(bus.KEY_DECISIONS)]
     assert {r["blocked_by"] for r in rows if r["action"] == "sell"} == {""}
+
+
+def test_sell_decisions_need_a_position(client, out_dir):
+    """引擎口径：held 里没有的票不产卖出决策，既不落盘也不进决策流。"""
+    feed(client, pct=-6.0, vol_ratio=2.5)
+    assert make_engine(client, out_dir=out_dir).drain()["decisions"] == 0
+    engine = make_engine(client, out_dir=out_dir,
+                         cfg=EngineConfig(held={"600000": 20000.0}))
+    assert engine.drain()["decisions"] > 0
+    rows = [dict(f) for _, f in client.xrange(bus.KEY_DECISIONS)]
+    assert {r["action"] for r in rows} == {"sell"}
 
 
 def test_cash_budget_shrinks_the_buy_order(client, out_dir):

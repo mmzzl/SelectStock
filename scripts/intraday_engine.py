@@ -168,14 +168,15 @@ def main(argv: list[str] | None = None) -> int:
                             out_dir=args.out_dir, to_mongo=args.mongo,
                             pool_loader=plan_loader)
     logger.info("盘中引擎启动：%d 只（池口径=%s），间隔 %.1f 秒，去重=%s，风控 %s"
-                "（买入前 %d 只、今日买入 %d 只锁 T+1、可用资金 %s）",
+                "（买入前 %d 只、今日买入 %d 只锁 T+1、可用资金 %s、卖出只报持仓 %d 只）",
                 len(pool), "选股命中+持仓" if plan_loader else ("全市场" if args.all else "手工清单"),
                 engine_cfg.interval,
                 "当天每票每信号只报一次" if engine_cfg.once_per_day
                 else f"冷却 {engine_cfg.cooldown} 秒",
                 "开" if risk.cfg.enabled else "关",
                 risk.cfg.max_buy_codes, len(engine_cfg.bought_today),
-                f"{engine_cfg.cash_left:.0f} 元" if engine_cfg.cash_left is not None else "未给")
+                f"{engine_cfg.cash_left:.0f} 元" if engine_cfg.cash_left is not None else "未给",
+                len(engine_cfg.held))
     engine.run(rounds=args.rounds or None)
     return 0
 

@@ -5,6 +5,8 @@
 1. **每条信号都必须表态**（buy 或 sell），信息类也不例外：高换手统一按「持仓者该警惕」给 sell，
    触涨停按「想买」给 buy——后者会被风控的成交性规则明确拦住，这正是「策略只产生信号，
    决策必须独立风控」要在盘中最直白的演示。
+   但**卖出方向只对持仓判定**（见 `View.held`）：池子里绝大多数是当天选出来的票，给没持有的
+   票推卖出既执行不了也只是刷屏。
 2. 均线/MACD/RSI/BOLL/单分钟量能一律在**收口的分钟条**上判（`indicators.Snapshot`），和日线
    收盘确认同一个逻辑：未收口那根的量价还在变，拿它判交叉会来回翻脸、一分钟报三次。
 3. 价格类（涨停、量比、换手、突破日线压力位、打单、盘口挂单）用**最新快照**判，这类本来就是
@@ -96,6 +98,7 @@ class View:
     events: list = field(default_factory=list)  # 当日 watch_target 记录
     last_price: float | None = None             # 上一拍价格：判「上穿/跌破」需要它
     minute: int = 0
+    held: bool = False                          # 当前是否在持仓里；False = 不判卖出方向
 
     @property
     def price(self) -> float | None:
@@ -118,6 +121,9 @@ def evaluate(v: View, cfg: SignalConfig | None = None) -> list[Signal]:
     for rule in (_trend, _rsi, _boll, _bars, _snapshot, _breakout, _flow, _book, _limit,
                  _events):
         out.extend(rule(v, cfg))
+    if not v.held:
+        # 「卖」的宾语必须是自己的持仓：选股池里的票没有可卖的仓位，这类信号一律不成立。
+        out = [s for s in out if s.action != "sell"]
     return out
 
 

@@ -287,7 +287,9 @@ class IntradayEngine:
                                   "window_min": self.cfg.flow_window,
                                   "bid_ratio": ratio, "prev_bid_ratio": prev_ratio},
                             events=self._events_by_code.get(code, []),
-                            last_price=self._last_price.get(code), minute=minute)
+                            last_price=self._last_price.get(code), minute=minute,
+                            # 卖出方向只对持仓判定：池子里绝大多数是选股命中，没有仓位就没什么可卖
+                            held=code in self.cfg.held)
         self._last_price[code] = quote.get("price")
         return view
 
