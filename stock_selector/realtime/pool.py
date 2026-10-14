@@ -46,6 +46,22 @@ class MonitorPool:
     selected_at: dt.datetime | None = None                 # 批次时间，本地
     job_id: str | None = None
     generated_at: dt.datetime = field(default_factory=dt.datetime.now)
+    # 买入名额与 T+1 要的两项「今天」的事实。都在 app.db 里，读不到就留空/留 None，
+    # 由风控那两条规则自己按「判不了就放行」处理——池不能因为查不到成交就拒绝开工。
+    ranks: dict[str, int] = field(default_factory=dict)    # {代码: 批次名次（0 起）}
+    bought_today: frozenset = field(default_factory=frozenset)   # 今日有买入成交的代码
+
+    def cash_left(self, capital: float) -> float | None:
+        """账户当日还能动多少钱（元）：总资金 − 现有持仓成本。
+
+        用成本口径而不是市值口径，和 `positions()` 同一个理由：额度不该随行情自己涨跌。
+        当天卖出的钱理论上当日就能用来买（T+1 只限股票不限资金），但持仓是否已经反映这笔
+        卖出取决于交割单导没导——没导就按「钱还压在那只票上」估，宁可少推买入，也不给出
+        一个账户里根本拿不出来的下单量。`capital` 没配（0）时返回 None = 没有资金口径。
+        """
+        if not capital:
+            return None
+        return max(0.0, float(capital) - sum(self.held.values()))
 
     @property
     def age_hours(self) -> float | None:
@@ -135,6 +151,22 @@ def positions(conn: sqlite3.Connection) -> dict[str, float]:
     return out
 
 
+def _bought_today(conn: sqlite3.Connection, day: str) -> frozenset:
+    """今日有买入成交的代码（T+1 用）。查不到就当没有——判不了由风控放行，不在这儿炸。
+
+    真源只有交割单：`holdings` 里同一只票可能拿的是上个月的成本，`created_at` 是建行时间
+    而不是成交日，都不够回答「今天买过没买过」。所以当天没导对账单时这里必然是空的，
+    风控会照给卖出建议并留一条「no_trade_date」指标。
+    """
+    try:
+        rows = _query(conn, "SELECT DISTINCT stock_code FROM trade_records "
+                            "WHERE trade_date=? AND direction IN ('buy', '买入')", (day,))
+    except PoolError as exc:
+        logger.warning("读不到今日买入成交（%s）：T+1 判定跳过", exc)
+        return frozenset()
+    return frozenset(str(r["stock_code"]).zfill(6) for r in rows if str(r["stock_code"]).strip())
+
+
 def load(db_path: Path | str = DEFAULT_DB, *, limit: int = 0, extra: list[str] = (),
          now: dt.datetime | None = None) -> MonitorPool:
     """取池：手工代码在前，然后选股命中（按 rank），持仓补齐。
@@ -146,12 +178,16 @@ def load(db_path: Path | str = DEFAULT_DB, *, limit: int = 0, extra: list[str] =
     try:
         job_id, selected_at, hits = latest_batch(conn)
         held = positions(conn)
+        moment = now or dt.datetime.now()
+        bought = _bought_today(conn, moment.strftime("%Y-%m-%d"))
     finally:
         conn.close()
 
     hits = [c.zfill(6) for c in hits]
     if limit:
         hits = hits[:limit]
+    # 名次按批次原序（App 展示序=预期超额降序）记，手工代码与纯持仓票没有名次 → 不占买入名额
+    ranks = {code: i for i, code in enumerate(hits)}
     codes: list[str] = []
     seen: set[str] = set()
     for code in [str(c).zfill(6) for c in extra if str(c).strip()] + hits + sorted(held):
@@ -162,7 +198,7 @@ def load(db_path: Path | str = DEFAULT_DB, *, limit: int = 0, extra: list[str] =
     if not codes:
         raise PoolError(f"app.db 里既没有成功的选股批次也没有启用中的持仓：{db_path}")
     plan = MonitorPool(codes=codes, held=held, selected_at=selected_at, job_id=job_id,
-                       generated_at=now or dt.datetime.now())
+                       generated_at=moment, ranks=ranks, bought_today=bought)
     if plan.stale:
         logger.warning("选股批次已超过 %.0f 小时（%s），盘中盯的可能是过期名单——检查调度器",
                        STALE_HOURS, plan.selected_at)

@@ -52,6 +52,11 @@ class RiskContext:
     # 所以只能由内核预扫后塞进来（见 risk/cross_section.py）。None = 本次没算，
     # 规则按「信息不够就不判」放行，不当成 0 分位。
     cross_pct: float | None = None
+    # 下面三项都是「今天这一天账户的处境」，只有盘中链路给得出来（盘后内核留 None = 不判）。
+    # 全部按「数据不可得就放行并留指标」处理：判不了不等于不准买，硬拦会把好信号静默吃掉。
+    pool_rank: int | None = None         # 该票在当日盯的名单里的名次（0 起），买入名额用它
+    bought_today: bool | None = None     # 今日已成交买入（T+1：今天买的今天卖不掉）
+    cash_left: float | None = None       # 账户当日还剩下可用资金（元）
 
     @property
     def price(self) -> float | None:
@@ -96,11 +101,15 @@ class RiskContext:
 def build(code: str, action: str = "buy", *, name: str = "", signal_price: float | None = None,
           shares: int | None = None, position_value: float = 0.0, day: str = "",
           kline: pd.DataFrame | None = None, quote: dict | None = None,
-          allow_live: bool = True, cross_pct: float | None = None) -> RiskContext:
+          allow_live: bool = True, cross_pct: float | None = None,
+          pool_rank: int | None = None, bought_today: bool | None = None,
+          cash_left: float | None = None) -> RiskContext:
     """补齐行情口径后生成上下文；`quote` 显式传入时不再读快照（单测与盘中链路用）。"""
     if quote is None:
         quote = snap.get(code, day, allow_live=allow_live)
     return RiskContext(code=str(code).zfill(6), name=name, action=action,
                        signal_price=signal_price, shares=shares,
                        position_value=position_value, day=day, kline=kline,
-                       quote=quote, allow_live=allow_live, cross_pct=cross_pct)
+                       quote=quote, allow_live=allow_live, cross_pct=cross_pct,
+                       pool_rank=pool_rank, bought_today=bought_today,
+                       cash_left=cash_left)

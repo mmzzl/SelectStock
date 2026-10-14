@@ -639,6 +639,88 @@ def test_pool_refresh_empty_keeps_previous_batch(client, out_dir, caplog):
     assert engine.pool == ["600000"] and "刷新为空" in caplog.text
 
 
+# —— 账户的「今天」：名次 / T+1 / 可用资金 ——
+
+def test_buy_quota_blocks_codes_outside_the_daily_front(client, out_dir):
+    """一天只盯名单前 3 只买入：第 8 名的买点照样落盘，但消息里说的是「为什么不推」。"""
+    feed(client, vol_ratio=4.0, pct=2.0)
+    engine = make_engine(client, out_dir=out_dir,
+                         risk=RiskEngine({**RISK, "max_buy_codes": 3}),
+                         cfg=EngineConfig(ranks={"600000": 7}))
+    assert engine.drain()["blocked"] >= 1
+    fields = dict(client.xrange(bus.KEY_DECISIONS)[-1][1])
+    assert fields["blocked_by"] == "buy_quota" and "排第 8" in fields["risk_reason"]
+
+
+def test_buy_quota_leaves_the_front_of_the_list_alone(client, out_dir):
+    feed(client, vol_ratio=4.0, pct=2.0)
+    engine = make_engine(client, out_dir=out_dir,
+                         risk=RiskEngine({**RISK, "max_buy_codes": 3}),
+                         cfg=EngineConfig(ranks={"600000": 0}))
+    assert engine.drain()["blocked"] == 0
+
+
+def test_t_plus_1_blocks_sells_of_codes_bought_today(client, out_dir):
+    """今天买进去的今天卖不掉：卖出信号一律拦下，不给一个执行不了的建议。"""
+    feed(client, pct=-6.0, vol_ratio=2.5)
+    engine = make_engine(client, out_dir=out_dir,
+                         cfg=EngineConfig(bought_today=frozenset({"600000"})))
+    engine.drain()
+    rows = [dict(f) for _, f in client.xrange(bus.KEY_DECISIONS)]
+    assert [r for r in rows if r["action"] == "sell"], "用例得先让卖出信号响起来"
+    assert {r["blocked_by"] for r in rows if r["action"] == "sell"} == {"t_plus_1"}
+    assert "T+1" in rows[0]["risk_reason"]
+
+
+def test_t_plus_1_still_sells_positions_bought_earlier(client, out_dir):
+    feed(client, pct=-6.0, vol_ratio=2.5)
+    engine = make_engine(client, out_dir=out_dir,
+                         cfg=EngineConfig(bought_today=frozenset({"000001"})))
+    engine.drain()
+    rows = [dict(f) for _, f in client.xrange(bus.KEY_DECISIONS)]
+    assert {r["blocked_by"] for r in rows if r["action"] == "sell"} == {""}
+
+
+def test_cash_budget_shrinks_the_buy_order(client, out_dir):
+    """账户只剩 1 万就按 1 万下单：单票额度 4 万是「最多能拿多少」，不是「现在拿得出来」。"""
+    feed(client, vol_ratio=4.0, pct=2.0)
+    engine = make_engine(client, out_dir=out_dir, cfg=EngineConfig(cash_left=10000.0))
+    engine.drain()
+    buys = [dict(f) for _, f in client.xrange(bus.KEY_DECISIONS) if f["action"] == "buy"]
+    assert buys
+    for row in buys:
+        assert int(row["shares"]) == 1000 and float(row["order_amount"]) == 10000.0
+        assert row["verdict"] == "adjust"
+
+
+def test_pool_refresh_carries_the_account_facts(client, out_dir):
+    """换日重取池时三项事实要一起换：留着昨天的名次和持仓，等于按过期名单放行买入。"""
+    clock = {"value": NOW}
+    plan = MonitorPool(codes=["600000"], held={"600000": 30000.0}, ranks={"600000": 2},
+                       bought_today=frozenset({"600000"}), generated_at=clock["value"])
+    engine = make_engine(client, out_dir=out_dir, now=lambda: clock["value"],
+                         pool_loader=lambda: plan)
+    clock["value"] = datetime(2026, 10, 13, 10, 0, 0)
+    engine.drain()
+    assert engine.cfg.ranks == {"600000": 2}
+    assert engine.cfg.bought_today == frozenset({"600000"})
+    assert engine.cfg.cash_left == pytest.approx(170000.0)      # 总资金 20 万 − 成本 3 万
+
+
+def test_cash_left_falls_back_when_the_plan_has_no_cash_method(client, out_dir):
+    """假池/旧池对象没有 cash_left 时退回「总资金 − 本地持仓」，不是算不出来就不判。"""
+    class Legacy:
+        codes, held = ["600000"], {"600000": 50000.0}
+        ranks, bought_today = {}, frozenset()
+
+    clock = {"value": NOW}
+    engine = make_engine(client, out_dir=out_dir, now=lambda: clock["value"],
+                         pool_loader=lambda: Legacy())
+    clock["value"] = datetime(2026, 10, 13, 10, 0, 0)
+    engine.drain()
+    assert engine.cfg.cash_left == pytest.approx(150000.0)
+
+
 # —— book_ratio / normalize ——
 
 def test_book_ratio_uses_all_five_levels_and_caps_one_sided_book():
@@ -884,8 +966,10 @@ def test_render_caps_each_section_but_titles_the_full_count(pusher):
 
 def test_pusher_applies_its_cap(client, pusher):
     sent = []
+    # 三只不同的票：同票同方向会被当天归并掉，归并后凑不满 cap，这里要的是「没归并也被截断」
     bus.emit_stream(client, bus.KEY_DECISIONS,
-                    [decision_item(verdict="allow", pushed=1, kind=f"k{i}") for i in range(3)])
+                    [decision_item(code=f"60000{i}", verdict="allow", pushed=1,
+                                   kind=f"k{i}") for i in range(3)])
     p = pusher.AlertPusher(client, url="https://x", flush=0.0, cap=2,
                            sender=lambda *a: sent.append(a) or True,
                            now=lambda: TS, clock=lambda: 0.0, sleeper=lambda s: None,
@@ -893,6 +977,107 @@ def test_pusher_applies_its_cap(client, pusher):
     p.pump()
     p.flush_batch()
     assert "其余 1 条见" in sent[0][4]
+
+
+# —— 当日归并 + 攒批窗口 + 灾难即时 ——
+
+def test_pusher_merges_same_code_and_direction_within_the_day(client, pusher):
+    """同票同方向当天只报第一次：引擎的去重键是「票+种类」，一只票命中四种信号就是四条消息。"""
+    sent = []
+    bus.emit_stream(client, bus.KEY_DECISIONS,
+                    [decision_item(verdict="allow", pushed=1, kind=k)
+                     for k in ("ma_dead_cross", "vol_ratio_surge", "bid_stack")])
+    p = pusher.AlertPusher(client, url="https://x", flush=0.0,
+                           sender=lambda *a: sent.append(a) or True, now=lambda: TS,
+                           clock=lambda: 0.0, sleeper=lambda s: None, replay=True)
+    assert p.pump() == 1 and p.merged == 2
+    p.flush_batch()
+    assert sent[0][3] == f"[{DAY}] 盘中信号 1 条"           # 标题按进消息的条数，不吹全量
+    assert "另有 2 条同票同方向的重复信号" in sent[0][4]
+    assert "当天累计已推 1 只" in sent[0][4]
+
+
+def test_pusher_merges_per_direction_not_per_stock(client, pusher):
+    """买入和卖出是两个动作，不互相归并：手里这只票既能给买点也能给止损。"""
+    bus.emit_stream(client, bus.KEY_DECISIONS,
+                    [decision_item(verdict="allow", pushed=1, kind="ma_dead_cross"),
+                     decision_item(verdict="allow", pushed=1, action="sell",
+                                   kind="volume_surge_drop")])
+    p = pusher.AlertPusher(client, url="https://x", flush=0.0, sender=lambda *a: True,
+                           now=lambda: TS, clock=lambda: 0.0, sleeper=lambda s: None,
+                           replay=True)
+    assert p.pump() == 2 and p.merged == 0
+
+
+def test_pusher_merges_repeated_block_reasons(client, pusher):
+    """被拦的也一样：同票被同一条规则拦两次只说一次，换规则拦的要分开说。"""
+    sent = []
+    bus.emit_stream(client, bus.KEY_DECISIONS,
+                    [decision_item(kind="ma_dead_cross"),
+                     decision_item(kind="vol_ratio_surge"),
+                     decision_item(kind="bid_stack", blocked_by="cash_budget",
+                                   risk_reason="[cash_budget] 超出可用资金")])
+    p = pusher.AlertPusher(client, url="https://x", flush=0.0,
+                           sender=lambda *a: sent.append(a) or True, now=lambda: TS,
+                           clock=lambda: 0.0, sleeper=lambda s: None, replay=True)
+    assert p.pump() == 2 and p.merged_block == 1
+    p.flush_batch()
+    text = sent[0][4]
+    assert text.count("已涨停，买不进") == 1 and "超出可用资金" in text
+
+
+def test_pusher_forgets_yesterday_when_the_day_rolls(client, pusher):
+    """换日必须清空归并表：昨天报过的今天照样报，否则降噪会变成永久静音。"""
+    bus.emit_stream(client, bus.KEY_DECISIONS,
+                    [decision_item(day=DAY, verdict="allow", pushed=1),
+                     decision_item(day=DAY, verdict="allow", pushed=1, kind="bid_stack"),
+                     decision_item(day="2026-10-13", verdict="allow", pushed=1,
+                                   kind="vol_ratio_surge")])
+    p = pusher.AlertPusher(client, url="https://x", flush=0.0, sender=lambda *a: True,
+                           now=lambda: TS, clock=lambda: 0.0, sleeper=lambda s: None,
+                           replay=True)
+    assert p.pump() == 2                       # 今天第一条 + 换日后的那条
+    assert p.day == "2026-10-13" and len(p.batch) == 2
+    assert p.pushed_today == 1                 # 累计只数跟着换日清零，那条被归并的不算进来
+
+
+def test_pusher_window_starts_at_the_first_decision_of_the_batch(client, pusher):
+    """窗口从本批第一条起算：常驻空闲不能提前把 15 分钟耗光，来一条就发一条。"""
+    clock = [0.0]
+    p = pusher.AlertPusher(client, url="https://x", flush=900.0, sender=lambda *a: True,
+                           now=lambda: TS, clock=lambda: clock[0], sleeper=lambda s: None,
+                           replay=True)
+    assert p.due() is False                    # 空批没有窗口，更谈不上到期
+    bus.emit_stream(client, bus.KEY_DECISIONS, [decision_item(verdict="allow", pushed=1)])
+    p.pump()
+    assert p.due() is False
+    clock[0] = 899.9
+    assert p.due() is False
+    clock[0] = 900.0
+    assert p.due() is True
+
+
+def test_pusher_disaster_kind_does_not_wait_for_the_window(client, pusher):
+    """跌停/利空一到就发，也不跟着下一批普通信号一起走：这类晚一分钟就出不了。"""
+    sent = []
+
+    def sender(channel, url, secret, title, text):
+        sent.append(text)
+        # 发完这条才补一条普通信号：它属于下一批，不该混进刚发出去的那条
+        bus.emit_stream(client, bus.KEY_DECISIONS,
+                        [decision_item(code="000001", verdict="allow", pushed=1,
+                                       kind="ma_dead_cross")])
+        return True
+
+    bus.emit_stream(client, bus.KEY_DECISIONS,
+                    [decision_item(verdict="allow", pushed=1, kind="limit_down_touch")])
+    p = pusher.AlertPusher(client, url="https://x", flush=900.0, sender=sender,
+                           now=lambda: TS, clock=lambda: 0.0, sleeper=lambda s: None,
+                           replay=True)
+    p.run(rounds=2)
+    assert len(sent) == 2                      # 即时那条自己一条，普通那条另起一批
+    assert "触及跌停" in sent[0] and "均线死叉" not in sent[0]
+    assert "均线死叉" in sent[1]
 
 
 def test_pusher_parses_stream_types(client, pusher):
@@ -903,6 +1088,15 @@ def test_pusher_parses_stream_types(client, pusher):
     assert item["shares"] == 3800 and item["slippage_bp"] == 9.4
     assert item["metrics"] == {"avg_amount": 1.0}
     assert item["pushed"] == 0
+
+
+def test_pusher_keeps_the_leading_zeros_of_shenzhen_codes(pusher):
+    """代码转成 int 会把前导零吃掉，消息里就成了「平安银行 1」：那串数字是要给人下单用的。"""
+    assert pusher.parse_item({"code": "000001", "day": "2026-10-14"})["code"] == "000001"
+    assert pusher.parse_item({"code": "600000"})["code"] == "600000"
+    title, text = pusher.render([decision_item(code="000001", verdict="allow", pushed=1)],
+                                [], DAY, datetime(2026, 10, 14, 10, 0))
+    assert "000001" in text and " 1｜" not in text
 
 
 def test_pusher_dingtalk_sign_and_payload_shape(pusher):

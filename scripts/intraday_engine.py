@@ -86,6 +86,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int, default=0, help="股票池上限，0=不限")
     p.add_argument("--interval", type=float, help="读流间隔秒数（默认取配置的 intraday.interval）")
     p.add_argument("--rounds", type=int, default=0, help="跑多少轮后退出，0=常驻")
+    p.add_argument("--max-buy-codes", type=int, default=3,
+                   help="一天最多给几只买入下单建议（按盯盘名单名次取前 N，0=不限）。"
+                        "A 股 T+1 且资金有限，几百只一起推等于没推")
     p.add_argument("--cooldown", type=int, help="重复抑制窗口（秒），只在 --no-daily-dedupe 或去重表写不进时生效")
     p.add_argument("--no-daily-dedupe", action="store_true",
                    help="关掉「同票同信号当天只报一次」，退回 --cooldown 窗口")
@@ -114,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
         codes += read_watchlist(args.watchlist)
     plan_loader = None
     auto_held: dict[str, float] = {}
+    plan = None
     if args.from_app:
         if args.held:
             raise SystemExit("--from-app 的持仓市值自动按 app.db 的成本口径取，"
@@ -153,16 +157,25 @@ def main(argv: list[str] | None = None) -> int:
         risk.cfg.ml_enabled = False
     else:
         risk.preflight()        # 模型缺失要在启动时就炸，不能装着风控跑成摆设
+    # 买入名额由盘中定，不由风控默认值定：盘后内核不限只数（它产的是名单，不是订单）。
+    risk.cfg.max_buy_codes = args.max_buy_codes
+    if plan is not None:
+        engine_cfg.ranks = dict(plan.ranks)
+        engine_cfg.bought_today = frozenset(plan.bought_today)
+        engine_cfg.cash_left = plan.cash_left(risk.cfg.capital)
 
     engine = IntradayEngine(client, pool, risk, cfg=engine_cfg, signal_cfg=signal_cfg,
                             out_dir=args.out_dir, to_mongo=args.mongo,
                             pool_loader=plan_loader)
-    logger.info("盘中引擎启动：%d 只（池口径=%s），间隔 %.1f 秒，去重=%s，风控 %s",
+    logger.info("盘中引擎启动：%d 只（池口径=%s），间隔 %.1f 秒，去重=%s，风控 %s"
+                "（买入前 %d 只、今日买入 %d 只锁 T+1、可用资金 %s）",
                 len(pool), "选股命中+持仓" if plan_loader else ("全市场" if args.all else "手工清单"),
                 engine_cfg.interval,
                 "当天每票每信号只报一次" if engine_cfg.once_per_day
                 else f"冷却 {engine_cfg.cooldown} 秒",
-                "开" if risk.cfg.enabled else "关")
+                "开" if risk.cfg.enabled else "关",
+                risk.cfg.max_buy_codes, len(engine_cfg.bought_today),
+                f"{engine_cfg.cash_left:.0f} 元" if engine_cfg.cash_left is not None else "未给")
     engine.run(rounds=args.rounds or None)
     return 0
 

@@ -53,6 +53,12 @@ class EngineConfig:
     kline_cache: int = 32             # 日线宽表 LRU 只数
     max_len: int = bus.DECISION_MAXLEN
     held: dict = field(default_factory=dict)   # {代码: 已持有市值(元)}，单票额度要扣它
+    # 「今天能不能做这笔」的三项账户事实，由池从 app.db 一起带进来（--from-app）。
+    # 全空 = 手工指定池的调试跑法：风控那三条新规则一律按「判不了就放行」走，
+    # 不会把冒烟测试拦成零决策。
+    ranks: dict = field(default_factory=dict)      # {代码: 批次名次（0 起）}
+    bought_today: frozenset = field(default_factory=frozenset)
+    cash_left: float | None = None                 # 当日可用资金（元）
 
     @classmethod
     def from_dict(cls, raw: dict | None) -> "EngineConfig":
@@ -130,8 +136,24 @@ class IntradayEngine:
         self.pool = codes
         self._pool_set = set(codes)
         self.cfg.held = dict(getattr(plan, "held", None) or {})
-        logger.info("盘中引擎池刷新 → %d 只，%d 只按持仓市值占用额度",
-                    len(codes), len(self.cfg.held))
+        self.cfg.ranks = dict(getattr(plan, "ranks", None) or {})
+        self.cfg.bought_today = frozenset(getattr(plan, "bought_today", None) or ())
+        self.cfg.cash_left = self._cash_left(plan)
+        logger.info("盘中引擎池刷新 → %d 只，%d 只按持仓市值占用额度，今日买入 %d 只（T+1 锁卖出）",
+                    len(codes), len(self.cfg.held), len(self.cfg.bought_today))
+
+    def _cash_left(self, plan) -> float | None:
+        """当日可用资金：优先用池算好的（它知道持仓成本），没有就按总资金扣本地 held。
+
+        `plan` 可能是测试注入的假对象（没有 `cash_left`），所以两条路都要能走。
+        """
+        capital = getattr(self.risk.cfg, "capital", 0.0) if self.risk else 0.0
+        calc = getattr(plan, "cash_left", None)
+        if callable(calc):
+            return calc(capital)
+        if not capital:
+            return None
+        return max(0.0, float(capital) - sum(self.cfg.held.values()))
 
     def _kline(self, code: str):
         """读日线宽表（LRU）。风控的流动性/冲击/风险分与突破压力位共用这一份。"""
@@ -345,7 +367,10 @@ class IntradayEngine:
         ctx = build_context(signal.code, signal.action, name=signal.name,
                             signal_price=signal.price, day=self.day,
                             kline=self._kline(signal.code), quote=quote or None,
-                            position_value=float(self.cfg.held.get(signal.code, 0.0)))
+                            position_value=float(self.cfg.held.get(signal.code, 0.0)),
+                            pool_rank=self.cfg.ranks.get(signal.code),
+                            bought_today=signal.code in self.cfg.bought_today,
+                            cash_left=self.cfg.cash_left)
         decision = self.risk.review(ctx)
         row = store.row(signal, decision, ts=moment.timestamp(), day=self.day,
                         pushed=not decision.blocked,

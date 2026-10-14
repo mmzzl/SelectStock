@@ -2,9 +2,13 @@
 
 链路里「告警/交易模块」那一格，按需求**只推送消息，不接券商下单**。
 
-两条设计约束：
-- **一批一条消息**：盘中决策是持续流，一条发一条会把群刷爆、也很容易撞到机器人的 20 条/分钟
-  限流。攒 `--flush` 秒合成一条 markdown，读的人一眼看完这一波。
+四条设计约束：
+- **一批一条消息 + 同票同方向当天只报第一次**：盘中决策是持续流，一条发一条会把群刷爆、也很
+  容易撞到机器人的 20 条/分钟限流。攒 `--flush` 秒（默认 15 分钟）合成一条 markdown；同一只
+  票同一方向当天只进第一条消息，后面的重复只计数。理由是 A 股 T+1 且资金有限——一天里对着
+  同一只票喊八次「卖出」并不能多卖出一次，只会让人关掉群通知。决策本身一条没丢，全量在
+  `data/intraday_decisions/<日期>.parquet`。
+- **跌停/利空不等窗口**：`--instant` 里的种类一到就发，这类晚一分钟就出不了。
 - **被风控拦下的也要说**：拦下的信号照样进决策流（`verdict=block`），摘要里单列一段写清
   「哪只票的什么信号、被哪条规则拦了、为什么」。不然是「静默不推」，用户无法区分
   「没有机会」和「有机会但下不了单」——这两种情况的后续动作完全不同。
@@ -178,14 +182,18 @@ def fmt_line(item: dict, *, blocked: bool = False) -> str:
 
 
 def render(items: list[dict], blocked: list[dict], day: str, moment: datetime,
-           cap: int = 40) -> tuple[str, str]:
+           cap: int = 40, merged: int = 0, today: int = 0) -> tuple[str, str]:
     """一批决策 → (标题, markdown 正文)。放行与拦截分列，拦截必须带原因。
 
     `cap` 是每段最多列几条：全市场盘中一批可能上百条，而机器人对消息长度有上限——宁可截断
     并指回当日决策文件，也不要发出一条被平台拒收的长消息（标题里的条数仍是全量，不掩饰）。
+    `merged`/`today` 是「同票同方向当天只报一次」归并掉的条数与当天累计只数：归并 must 可见，
+    否则读的人会以为今天这只票就只动过一次。
     """
     title = f"[{day}] 盘中信号 {len(items)} 条"
     lines = [f"**{moment:%H:%M:%S}** 更新"]
+    if today:
+        lines.append(f"当天累计已推 {today} 只（同票同方向只报第一次，重复的已归并）")
     if items:
         lines += ["", "### 可执行", *[fmt_line(item) for item in items[:cap]]]
         if len(items) > cap:
@@ -198,11 +206,17 @@ def render(items: list[dict], blocked: list[dict], day: str, moment: datetime,
                   *[fmt_line(item, blocked=True) for item in blocked[:cap]]]
         if len(blocked) > cap:
             lines.append(f"- 另有 {len(blocked) - cap} 条同样被拦下，明细在当日决策文件")
+    if merged:
+        lines += ["", f"（另有 {merged} 条同票同方向的重复信号，今天这只票已报过，不再刷屏）"]
     return title, "\n".join(lines)
 
 
 def parse_item(fields: dict) -> dict:
-    """stream 里全是字符串：数值列转回来，`metrics` 还原成字典。"""
+    """stream 里全是字符串：数值列转回来，`metrics` 还原成字典。
+
+    `code` 例外，必须留字符串并补齐 6 位：`int("000001")` 会把深市代码的前导零吃掉，
+    消息里就成了「平安银行 1」，用户按这个数字去下单是要出事的。
+    """
     out = {}
     for key, value in fields.items():
         if key == "metrics":
@@ -210,6 +224,9 @@ def parse_item(fields: dict) -> dict:
                 out[key] = json.loads(value)
             except ValueError:
                 out[key] = {}
+            continue
+        if key == "code":
+            out[key] = str(value).zfill(6)
             continue
         try:
             out[key] = int(value)
@@ -229,16 +246,27 @@ class AlertPusher:
 
     默认从**流尾**开始（`bus.last_id`）：进程重启不能把上一交易日的决策当新信号重推。
     要把存量重发一次（补消息、或调试排版）显式给 `replay=True`。
+
+    两层降噪（都是「同一件事只说一次」，不是把信号藏起来）：
+    - **当日归并**：同一只票同一方向当天只进第一条消息，后面重复的只计数。引擎那侧的去重
+      键是「票+信号种类」，而一只票可以同时命中死叉、跌破支撑、托单好几种，票级看就是刷屏；
+      决策照样全量落 parquet，一条没丢。
+    - **攒批窗口**：`flush` 秒内的一批合成一条。窗口从**本批第一条**到达时起算，否则常驻
+      空闲会让「窗口」永远在早上就已到期、下一条一来立刻发。
+    - **即时通道**：`instant` 里的种类（默认跌停、利空事件）一到就发，不等窗口——这类恰恰
+      是「晚一分钟就出不了」的那种，攒批对它们没有意义。
     """
 
-    def __init__(self, client, *, channel=DINGTALK, url="", secret="", flush=30.0,
+    def __init__(self, client, *, channel=DINGTALK, url="", secret="", flush=900.0,
                  include_blocked=True, sender=send, now=time.time, clock=time.monotonic,
-                 sleeper=time.sleep, replay=False, cap=40):
+                 sleeper=time.sleep, replay=False, cap=40,
+                 instant=("limit_down_touch", "event_bearish")):
         self.client = client
         self.channel, self.url, self.secret = channel, url, secret
         self.flush = flush
         self.include_blocked = include_blocked
         self.cap = cap
+        self.instant = set(instant or ())
         self.sender = sender
         self.now = now
         self.clock = clock
@@ -246,24 +274,59 @@ class AlertPusher:
         self.cursor = "0-0" if replay else bus.last_id(client, bus.KEY_DECISIONS)
         self.batch: list[dict] = []
         self.blocked: list[dict] = []
-        self.started = self.clock()
+        self.window: float | None = None        # 本批第一条到达的时刻；None = 批是空的
+        self.day = ""
+        self._seen: set[tuple] = set()          # 当日已进过消息的 (代码, 方向)
+        self._seen_block: set[tuple] = set()     # 当日已说过的 (代码, 拦截规则)
+        self.merged = 0                         # 本批被归并掉的条数
+        self.merged_block = 0
+        self.pushed_today = 0                   # 当日已推的可执行只数（标题外的累计口径）
+        self.urgent = False
         self.sent = 0
         self.failed = 0
 
+    def _roll(self, day: str) -> None:
+        """换日就把当日归并表清空：昨天的「报过一次」管不到今天。"""
+        if day and day != self.day:
+            self.day = day
+            self._seen, self._seen_block = set(), set()
+            self.merged = self.merged_block = self.pushed_today = 0
+
     def pump(self) -> int:
-        """读一批决策进缓冲区，返回读到的条数。"""
+        """读一批决策进缓冲区，返回**新进缓冲**的条数（当日重复的已归并，不计）。"""
         entries = bus.read_decisions(self.client, self.cursor)
+        kept = 0
         for entry_id, fields in entries:
             self.cursor = entry_id
             item = parse_item(fields)
-            if item.get("pushed") in (1, True, "1", "true"):
-                self.batch.append(item)
-            elif self.include_blocked:
-                self.blocked.append(item)
-        return len(entries)
+            self._roll(str(item.get("day") or ""))
+            allowed = item.get("pushed") in (1, True, "1", "true")
+            key = ((item.get("code"), item.get("action")) if allowed
+                   else (item.get("code"), item.get("blocked_by")))
+            if allowed:
+                if key in self._seen:
+                    self.merged += 1
+                    continue
+                self._seen.add(key)
+                self.pushed_today += 1
+                if item.get("kind") in self.instant:
+                    self.urgent = True
+            else:
+                if not self.include_blocked:
+                    continue
+                if key in self._seen_block:
+                    self.merged_block += 1
+                    continue
+                self._seen_block.add(key)
+            if self.window is None:
+                self.window = self.clock()
+            (self.batch if allowed else self.blocked).append(item)
+            kept += 1
+        return kept
 
     def due(self) -> bool:
-        return bool(self.batch) and self.clock() - self.started >= self.flush
+        return (self.window is not None
+                and self.clock() - self.window >= self.flush)
 
     def flush_batch(self) -> bool:
         """发一条摘要消息并清空缓冲；没内容就不发（空消息比不发更吵）。"""
@@ -272,23 +335,27 @@ class AlertPusher:
         moment = datetime.fromtimestamp(self.now())
         # 日期在发的那一刻算，不在启动时算：隔夜常驻的进程不能把新的一天标成昨天。
         title, text = render(self.batch, self.blocked,
-                             moment.strftime("%Y-%m-%d"), moment, cap=self.cap)
+                             moment.strftime("%Y-%m-%d"), moment, cap=self.cap,
+                             merged=self.merged + self.merged_block,
+                             today=self.pushed_today)
         ok = self.sender(self.channel, self.url, self.secret, title, text)
-        logger.info("告警批次%s：可执行 %d 条、拦截 %d 条", "成功" if ok else "失败",
-                    len(self.batch), len(self.blocked))
+        logger.info("告警批次%s：可执行 %d 条、拦截 %d 条、归并 %d 条", "成功" if ok else "失败",
+                    len(self.batch), len(self.blocked), self.merged + self.merged_block)
         if ok:
             self.sent += 1
         else:
             self.failed += 1
         self.batch, self.blocked = [], []
-        self.started = self.clock()
+        self.window, self.urgent = None, False
+        self.merged = self.merged_block = 0
         return ok
 
     def run(self, rounds: int | None = None) -> None:
         done = 0
         while rounds is None or done < rounds:
             self.pump()
-            if self.due() or (rounds is not None and done == rounds - 1):
+            # 即时通道优先：跌停/利空这类等到窗口末期才发就等于没发。
+            if self.urgent or self.due() or (rounds is not None and done == rounds - 1):
                 self.flush_batch()
             else:
                 self.sleeper(min(1.0, max(0.05, self.flush / 4)))
@@ -303,7 +370,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--secret", default=os.environ.get("ALERT_WEBHOOK_SECRET", ""))
     p.add_argument("--channel-key", default=os.environ.get("ALERT_CHANNEL_KEY", ""),
                    help="管理页面里配的渠道 key；不填就用该类型第一条启用的渠道")
-    p.add_argument("--flush", type=float, default=30.0, help="攒批秒数，0=每条立即发")
+    p.add_argument("--flush", type=float, default=900.0,
+                   help="攒批秒数（默认 15 分钟；0=每条立即发）")
+    p.add_argument("--instant", default="limit_down_touch,event_bearish",
+                   help="这些种类的决策一到就立即发送，不等攒批窗口（空串=全部按窗口攒）")
     p.add_argument("--no-blocked", action="store_true", help="摘要里不带被风控拦下的信号")
     p.add_argument("--replay", action="store_true",
                    help="启动就把流里的存量决策发一遍（默认只发本进程启动之后的）")
@@ -336,9 +406,10 @@ def main(argv: list[str] | None = None) -> int:
     client = bus.connect(args.host, args.port, args.db)
     pusher = AlertPusher(client, channel=args.channel, url=args.url, secret=args.secret,
                          flush=args.flush, include_blocked=not args.no_blocked, sender=sender,
-                         replay=args.replay, cap=args.max_lines)
-    logger.info("告警进程启动：渠道=%s 攒批=%.0f 秒 带拦截说明=%s", args.channel, args.flush,
-                not args.no_blocked)
+                         replay=args.replay, cap=args.max_lines,
+                         instant=[k.strip() for k in args.instant.split(",") if k.strip()])
+    logger.info("告警进程启动：渠道=%s 攒批=%.0f 秒 带拦截说明=%s 即时种类=%s", args.channel,
+                args.flush, not args.no_blocked, args.instant or "无")
     pusher.run(rounds=args.rounds or None)
     logger.info("退出：已发 %d 批，失败 %d 批", pusher.sent, pusher.failed)
     return 0

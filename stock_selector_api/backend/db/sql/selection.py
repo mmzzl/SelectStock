@@ -38,7 +38,7 @@ class SelectResult(Base, IdMixin, TimestampMixin):
     # 买点参考位/失效位：来自策略 signal_at 里已经算出的均线、箱体上沿、6 日低点
     buy_ref_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     buy_invalid_price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    # 风控后的最终决策（信号 ≠ 下单）：内核逐条过五条规则，被拦下的票根本不会落库，
+    # 风控后的最终决策（信号 ≠ 下单）：内核逐条过风控规则，被拦下的票根本不会落库，
     # 所以这里的 verdict 只有 allow（原样放行）与 adjust（放行但改了下单量）两种。
     # 数值口径全部由风控层算好，后端只搬运、App 只展示。
     risk_verdict: Mapped[str] = mapped_column(String(8), default="")     # allow|adjust，空=这批结果没开风控

@@ -13,7 +13,7 @@
         ...                                            # decision.shares / est_fill_price / reason
 
 模块划分：`snapshot` 取行情口径（涨跌停价/成交额），`context` 汇成一次判定所需的全部输入，
-`sizing` 做额度与滑点的算术，`rules` 是五条规则，`engine` 按序执行并给出最终决策。
+`sizing` 做额度与滑点的算术，`rules` 是九条规则，`engine` 按序执行并给出最终决策。
 """
 
 from .context import RiskContext, build

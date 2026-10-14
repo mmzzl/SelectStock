@@ -1,4 +1,4 @@
-"""风控层测试：行情口径读取 → 上下文换算 → 五条规则 → 引擎出决策。
+"""风控层测试：行情口径读取 → 上下文换算 → 九条规则 → 引擎出决策。
 
 规则里凡是「数据不可得」的分支都单独钉住：风控的失败姿态是**跳过判定并留痕**，
 不是拿 0 或 NaN 去比较（那会把复牌股、新股、缺快照的历史日期整批误杀）。
@@ -272,6 +272,112 @@ def test_position_blocks_without_capital_config():
     assert v.blocked and "risk.capital" in v.reason
 
 
+# ── 三条「今天这一笔做不做得成」：T+1 / 买入名额 / 当日可用资金 ──────────────────
+
+def test_t_plus_1_blocks_sell_of_a_name_bought_today():
+    v = R.t_plus_1(_ctx(action="sell", bought_today=True), _cfg(), {})
+    assert v.blocked and "T+1" in v.reason
+
+
+def test_t_plus_1_allows_sells_of_older_positions_and_all_buys():
+    assert R.t_plus_1(_ctx(action="sell", bought_today=False), _cfg(), {}).status == "allow"
+    assert R.t_plus_1(_ctx(action="buy", bought_today=True), _cfg(), {}).metrics["skipped"] == "buy_side"
+
+
+def test_t_plus_1_skips_when_the_trade_date_is_unknown():
+    """交割单当天没导就没法判：放行留痕，静默不推比推错更难查。"""
+    assert R.t_plus_1(_ctx(action="sell", bought_today=None), _cfg(), {}) \
+        .metrics["skipped"] == "no_trade_date"
+    assert R.t_plus_1(_ctx(action="sell", bought_today=True), _cfg(t_plus_1=False), {}) \
+        .metrics["skipped"] == "disabled"
+
+
+def test_buy_quota_blocks_beyond_the_day_limit_but_not_the_front_rows():
+    cfg = _cfg(max_buy_codes=3)
+    assert R.buy_quota(_ctx(pool_rank=2), cfg, {}).status == "allow"
+    v = R.buy_quota(_ctx(pool_rank=3), cfg, {})
+    assert v.blocked and "前 3 只" in v.reason and "排第 4" in v.reason
+    assert v.metrics == {"pool_rank": 3, "max_buy_codes": 3}
+
+
+def test_buy_quota_skips_sell_side_unranked_codes_and_no_limit():
+    """卖出/加仓不占买入名额；手工指定代码没有名次；0 是不限（盘后内核的默认）。"""
+    cfg = _cfg(max_buy_codes=3)
+    assert R.buy_quota(_ctx(action="sell", pool_rank=9), cfg, {}).metrics["skipped"] == "sell_side"
+    assert R.buy_quota(_ctx(pool_rank=None), cfg, {}).metrics["skipped"] == "no_rank"
+    assert R.buy_quota(_ctx(pool_rank=99), _cfg(), {}).metrics["skipped"] == "no_limit"
+
+
+def _state_with_plan(ctx, cfg) -> dict:
+    """先跑 `position` 把下单量定下来：`cash_budget` 判的就是这个量超没超账户的钱。"""
+    state: dict = {}
+    R.position(ctx, cfg, state)
+    return state
+
+
+def test_cash_budget_shrinks_the_order_to_what_is_left():
+    """单票额度 4 万但账户只剩 1 万：压到 1 万而不是拦掉——剩下的钱是真买得动的。"""
+    cfg = _cfg()
+    ctx = _ctx(quote={"price": 10.0}, cash_left=10000.0)
+    state = _state_with_plan(ctx, cfg)
+    assert state["plan"].shares == 4000
+    v = R.cash_budget(ctx, cfg, state)
+    assert v.status == "adjust" and state["plan"].shares == 1000
+    assert "超出可用资金" in v.reason and "按 1000 股下单" in v.reason
+
+
+def test_cash_budget_blocks_when_nothing_is_left_but_keeps_the_plan_otherwise():
+    cfg = _cfg()
+    rich = _ctx(quote={"price": 10.0}, cash_left=40000.0)
+    state = _state_with_plan(rich, cfg)
+    assert R.cash_budget(rich, cfg, state).status == "allow"
+    assert state["plan"].shares == 4000                     # 没超就一个数都不改
+
+    broke = _ctx(quote={"price": 10.0}, cash_left=500.0)    # 不足一手
+    state = _state_with_plan(broke, cfg)
+    v = R.cash_budget(broke, cfg, state)
+    assert v.blocked and "不足一手" in v.reason
+
+
+def test_cash_budget_skips_sell_side_and_unknown_cash():
+    cfg = _cfg()
+    assert R.cash_budget(_ctx(action="sell", cash_left=0.0), cfg, {}) \
+        .metrics["skipped"] == "sell_side"
+    assert R.cash_budget(_ctx(cash_left=None), cfg, {}).metrics["skipped"] == "no_cash"
+    assert R.cash_budget(_ctx(cash_left=1.0), _cfg(cash_check=False), {}) \
+        .metrics["skipped"] == "disabled"
+
+
+def test_engine_cash_budget_reaches_the_decision_and_slippage():
+    """决策里的股数必须是压小后的那个：只报个数不改计划，等于照原样下单。"""
+    d = RiskEngine(_cfg(ml_enabled=False)).review(
+        _ctx(quote={"price": 10.0}, cash_left=10000.0, kline=_kline(days=20, volume=1000000.0)))
+    assert d.verdict == "adjust" and d.shares == 1000 and d.order_amount == 10000.0
+    assert "cash_budget" in d.reason
+
+
+def test_engine_t_plus_1_short_circuits_the_sell_suggestion():
+    d = RiskEngine(_cfg(ml_enabled=False)).review(
+        _ctx(action="sell", quote={"price": 10.0}, bought_today=True))
+    assert d.blocked and d.blocked_by == "t_plus_1"
+    assert [v.name for v in d.checks] == ["tradability", "t_plus_1"]   # 命中即短路
+
+
+def test_engine_buy_quota_short_circuits_after_the_first_three_codes():
+    d = RiskEngine(_cfg(max_buy_codes=3, ml_enabled=False)).review(
+        _ctx(pool_rank=7, quote={"price": 10.0}))
+    assert d.blocked and d.blocked_by == "buy_quota"
+
+
+def test_rules_are_inert_for_the_daily_kernel():
+    """盘后内核不掌握「今天」的账户处境：三条新规则必须全部放行留痕，不能凭空拦票。"""
+    d = RiskEngine(_cfg(ml_enabled=False)).review(_ctx(quote={"price": 10.0}, kline=_kline(days=20)))
+    assert not d.blocked
+    skipped = {v.name: v.metrics.get("skipped") for v in d.checks}
+    assert skipped["t_plus_1"] == "buy_side" and skipped["buy_quota"] == "no_limit"
+    assert skipped["cash_budget"] == "no_cash"
+
+
 def test_slippage_blocks_when_order_eats_the_day():
     state = {"plan": S.PositionPlan(100000, 1e6, 1e6, 0.0, False, "")}
     v = R.slippage(_ctx(quote={"price": 10.0}, kline=_kline(days=20, volume=1000.0)), _cfg(), state)
@@ -360,9 +466,10 @@ def test_engine_allows_and_fills_decision_fields():
     assert d.shares == 4000 and d.order_amount == 40000
     assert d.est_fill_price and d.est_fill_price > 10.0
     assert d.slippage_bp is not None and d.slippage_bp < 100
-    # 六条规则按序各留一个 check；闸门默认关，所以它也出现在 check 里但标 skipped
-    assert [v.name for v in d.checks] == ["tradability", "liquidity", "position", "slippage",
-                                          "model", "adx14_rank"]
+    # 九条规则按序各留一个 check；闸门默认关，所以它也出现在 check 里但标 skipped
+    assert [v.name for v in d.checks] == ["tradability", "t_plus_1", "buy_quota", "liquidity",
+                                          "position", "cash_budget", "slippage", "model",
+                                          "adx14_rank"]
     assert d.checks[-1].metrics["skipped"] == "disabled"
 
 
@@ -450,8 +557,8 @@ def test_adx14_skips_sell_side():
     assert v.status == "allow" and v.metrics["skipped"] == "sell_side"
 
 
-def test_adx14_is_registered_as_sixth_rule():
-    assert R.RULES[-1] is R.adx14_rank and len(R.RULES) == 6
+def test_adx14_is_registered_as_last_rule():
+    assert R.RULES[-1] is R.adx14_rank and len(R.RULES) == 9
 
 
 def test_engine_runs_gate_through_pipeline_and_records_metric():

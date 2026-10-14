@@ -1,4 +1,4 @@
-"""risk/rules.py — 五条风控规则：每条只回答「这个方向这一单能不能成交、值不值得成交」。
+"""risk/rules.py — 九条风控规则：每条只回答「这个方向这一单能不能成交、值不值得成交」。
 
 约定（引擎依赖它，别在规则里各写各的）：
 - 返回 `Verdict`，`status` 取 allow / block / adjust；**block 必须给出人能看懂的中文理由**，
@@ -70,6 +70,46 @@ def tradability(ctx: RiskContext, cfg, state: dict) -> Verdict:
                                            "limit_down_unknown": ctx.action == "sell"})
 
 
+def t_plus_1(ctx: RiskContext, cfg, state: dict) -> Verdict:
+    """T+1：今天买入的股票，最快明天才卖得掉。
+
+    持仓成本市值只说明「拿着」，说明不了「什么时候拿到的」，所以买入日由调用方从交割成交
+    （`trade_records` 的 `trade_date`）里查好塞进上下文。交割单当天没导就判不了——**判不了
+    就放行并留指标**，静默不推比推早一条更难查。
+    """
+    if not cfg.t_plus_1:
+        return Verdict("t_plus_1", metrics={"skipped": "disabled"})
+    if ctx.action != "sell":
+        return Verdict("t_plus_1", metrics={"skipped": "buy_side"})
+    if ctx.bought_today is None:
+        return Verdict("t_plus_1", metrics={"skipped": "no_trade_date"})
+    if ctx.bought_today:
+        return Verdict("t_plus_1", "block",
+                       "T+1：该股今日有买入成交，明天才是可卖日", {"bought_today": True})
+    return Verdict("t_plus_1", metrics={"bought_today": False})
+
+
+def buy_quota(ctx: RiskContext, cfg, state: dict) -> Verdict:
+    """买入名额：资金有限，一天只盯名单里排最前的那几只。
+
+    名次来自调用方给的盯盘名单顺序（盘中=选股批次按 App 展示序，即预期超额降序），
+    所以这条不是「又加了一个筛选因子」，而是把「买得下几只」这件事说清楚。持仓加仓、
+    手工指定代码没有名次（`pool_rank=None`）→ 放行。
+    """
+    if not cfg.max_buy_codes:
+        return Verdict("buy_quota", metrics={"skipped": "no_limit"})
+    if ctx.action != "buy":
+        return Verdict("buy_quota", metrics={"skipped": "sell_side"})
+    if ctx.pool_rank is None:
+        return Verdict("buy_quota", metrics={"skipped": "no_rank"})
+    if ctx.pool_rank >= cfg.max_buy_codes:
+        return Verdict("buy_quota", "block",
+                       f"买入只看当日名单前 {cfg.max_buy_codes} 只，本票排第 {ctx.pool_rank + 1}；"
+                       "资金就这些，不铺开",
+                       {"pool_rank": ctx.pool_rank, "max_buy_codes": cfg.max_buy_codes})
+    return Verdict("buy_quota", metrics={"pool_rank": ctx.pool_rank})
+
+
 def liquidity(ctx: RiskContext, cfg, state: dict) -> Verdict:
     """流动性：日均成交额太低的票直接过滤——成交稀，滑点和冲击成本会把信号吃掉。"""
     if not cfg.min_avg_amount:
@@ -115,6 +155,43 @@ def position(ctx: RiskContext, cfg, state: dict) -> Verdict:
     if plan.over_cap:
         return Verdict("position", "adjust", plan.reason, metrics)
     return Verdict("position", metrics=metrics)
+
+
+def cash_budget(ctx: RiskContext, cfg, state: dict) -> Verdict:
+    """当日可用资金：买入金额不能超出现在还剩的钱，超了就按剩下的钱折算股数（adjust）。
+
+    和 `position` 的分工：那条管**单票**上限（这只票最多拿多少），这条管**账户**总钱
+    （今天一共还出得出多少钱）。单票 20% 的额度如果不管别的持仓，五只票一起放行就等于
+    买了 100% 还多——盘中一次推 30 只买入时就是这个结果。
+    现金口径由调用方给（盘中 = 总资金 − 现有持仓成本 + 当日卖出回款）；没给就放行留指标。
+    """
+    from . import sizing
+
+    if not cfg.cash_check:
+        return Verdict("cash_budget", metrics={"skipped": "disabled"})
+    if ctx.action != "buy":
+        return Verdict("cash_budget", metrics={"skipped": "sell_side"})
+    if ctx.cash_left is None:
+        return Verdict("cash_budget", metrics={"skipped": "no_cash"})
+    plan = state.get("plan")
+    amount = float(plan.amount) if plan else 0.0
+    cash = max(0.0, float(ctx.cash_left))
+    metrics = {"cash_left": round(cash, 2), "order_amount": round(amount, 2)}
+    if amount <= cash:
+        return Verdict("cash_budget", metrics=metrics)
+    if not ctx.price:
+        return Verdict("cash_budget", "block",
+                       f"可用资金只剩 {_wan(cash)}，且没有成交价可折算股数", metrics)
+    shrunk = sizing.plan_position(ctx.price, cash, 1.0, 0.0, None)
+    # 改写计划而不是只报个数：后面的滑点规则与引擎取的都是 state["plan"]，
+    # 不改就变成「拦了但下单量还是原来那个」。
+    state["plan"] = shrunk
+    if not shrunk.shares:
+        return Verdict("cash_budget", "block",
+                       f"可用资金 {_wan(cash)} 不足一手（现价 {ctx.price}）", metrics)
+    return Verdict("cash_budget", "adjust",
+                   f"建议 {plan.shares} 股要 {_wan(amount)}，超出可用资金 {_wan(cash)}，"
+                   f"按 {shrunk.shares} 股下单", metrics)
 
 
 def slippage(ctx: RiskContext, cfg, state: dict) -> Verdict:
@@ -221,4 +298,7 @@ def _last_bar(kline: pd.DataFrame | None) -> dict | None:
     return {"lu": bool(value) if pd.notna(value) else False}
 
 
-RULES = (tradability, liquidity, position, slippage, model, adx14_rank)
+# 顺序：便宜的、硬约束的在前（成交性 → T+1 → 买入名额 → 流动性），仓位相关的两条必须相邻
+# 且 cash_budget 在 position 之后（要用它算出的下单金额）、slippage 之前（滑点按压小后的量估）。
+RULES = (tradability, t_plus_1, buy_quota, liquidity, position, cash_budget,
+         slippage, model, adx14_rank)
