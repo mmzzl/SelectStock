@@ -43,7 +43,8 @@ METRIC_PREFIX = "rt:metric:"
 QUOTE_TTL = 4 * 3600          # 一个交易日 + 余量：隔天必读不到，也不会当天误过期
 METRIC_TTL = 6 * 3600
 EMIT_TTL = 18 * 3600          # 去重表键名已带日期，TTL 只是别让历史键堆在库里
-DEFAULT_MAXLEN = 20000        # tick 流保留长度：约 2 万条变化，够复盘半个交易日
+DEFAULT_MAXLEN = 20000        # tick 流保留长度：按「只数×每只变化数」摊，320 只池实测只剩
+                              # 最近约 10 分钟（2026-10-14 量过），所以它撑不起半天回放
 DECISION_MAXLEN = 5000        # 决策流短得多：一条决策背后是几十上百个 tick
 
 
