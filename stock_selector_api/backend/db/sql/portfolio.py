@@ -43,3 +43,13 @@ class PortfolioDiagResult(Base, IdMixin):
     suggestion: Mapped[str] = mapped_column(String(512), default="")
     # 卖出价格线：插件按同一条 sell 表达式反算出的翻转价；规则不含价格项时为 NULL
     sell_trigger_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # 信念度：插件透传的把握度（0-100 分位 + 离散档位 + 原文）
+    conviction_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    conviction_level: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    conviction_text: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # 止盈价：插件按 take-profit 表达式反算出的目标价；规则不含价格项时为 NULL
+    take_profit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # 博弈量价：插件输出的 V/S 两轴取值与原文
+    game_v: Mapped[float | None] = mapped_column(Float, nullable=True)
+    game_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    game_text: Mapped[str | None] = mapped_column(String(512), nullable=True)

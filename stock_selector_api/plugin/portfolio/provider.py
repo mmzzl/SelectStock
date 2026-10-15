@@ -12,6 +12,10 @@ _INDICATOR_COLUMNS = {
     "kdj_k", "kdj_d", "kdj_j", "wr14", "atr14",
     "boll_upper", "boll_mid", "boll_lower", "obv", "roc10",
     "vol_ma5", "last_close", "adx14",
+    # 可信度（剧本成功率）读的列：lu 与 vol_z 是模型特征（见 conviction/features.py），
+    # res20/sup20 只喂 game_v/game_s 的定性代理（见 portfolio/conviction.py）。
+    # pos60/vol_ratio/bias20(close,ma20) 是核心特征，缺一样插件就不给分。
+    "pos60", "vol_ratio", "vol_z", "res20", "sup20", "lu",
 }
 
 

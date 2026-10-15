@@ -75,13 +75,24 @@ def _ensure_select_result_columns(sync_conn) -> None:
 
 
 def _ensure_diag_result_columns(sync_conn) -> None:
-    """老库补列：portfolio_diag_results 承接插件反算的卖出价格线（幂等）。"""
+    """老库补列：portfolio_diag_results 承接插件反算的价格线 + 信念/博弈字段（幂等）。
+
+    Mongo 无表结构（schemaless），新增字段由 schemas.PortfolioDiagResultCreate 白名单放行即可，
+    本条 ALTER 仅作用于 sqlite。
+    """
     from sqlalchemy import inspect, text
 
     cols = {c["name"] for c in inspect(sync_conn).get_columns("portfolio_diag_results")}
-    if "sell_trigger_price" not in cols:
-        sync_conn.execute(text("ALTER TABLE portfolio_diag_results "
-                               "ADD COLUMN sell_trigger_price FLOAT"))
+    for col, ddl in (("sell_trigger_price", "FLOAT"),
+                     ("conviction_pct", "FLOAT"),
+                     ("conviction_level", "VARCHAR(8)"),
+                     ("conviction_text", "VARCHAR(512)"),
+                     ("take_profit_price", "FLOAT"),
+                     ("game_v", "FLOAT"),
+                     ("game_s", "FLOAT"),
+                     ("game_text", "VARCHAR(512)")):
+        if col not in cols:
+            sync_conn.execute(text(f"ALTER TABLE portfolio_diag_results ADD COLUMN {col} {ddl}"))
 
 
 async def init_database() -> None:

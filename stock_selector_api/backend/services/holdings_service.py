@@ -67,7 +67,8 @@ async def _attach_diag_snapshot(user_id: str, rows: list[dict]) -> list[dict]:
     for h in rows:
         snap = by_code.get(h["code"])
         for key in ("latest_price", "holding_pnl", "pnl_pct", "action", "action_reason",
-                    "suggestion", "sell_trigger_price"):
+                    "suggestion", "sell_trigger_price", "conviction_pct", "conviction_level",
+                    "conviction_text", "take_profit_price", "game_v", "game_s", "game_text"):
             h[key] = snap.get(key) if snap else None
         h["diag_run_id"] = latest["run_id"]
         # 快照里的价是那次诊断（通常是前一天 18:00 之后）取的，不标出来就会被当成最新价读

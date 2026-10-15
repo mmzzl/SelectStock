@@ -25,6 +25,14 @@ def snapshot(holding: dict, latest_price: float) -> dict:
         "suggestion": "",
         # 卖出价格线：行情缺失时保持 None（有行情由 analyzer 覆盖）
         "sell_trigger_price": None,
+        # 可信度（剧本成功率）+ 博弈代理：默认 None，analyzer 有指标行时覆盖（见 portfolio/conviction.py）
+        "conviction_pct": None,
+        "conviction_level": None,
+        "conviction_text": None,
+        "take_profit_price": None,
+        "game_v": None,
+        "game_s": None,
+        "game_text": None,
     }
 
 

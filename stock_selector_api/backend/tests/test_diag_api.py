@@ -69,6 +69,28 @@ async def test_manual_run_completes_and_is_listed(client, admin_headers):
     assert run_id in [i["run_id"] for i in lr.json()["data"]["items"]]
 
 
+DIAG_EXTRA_FIELDS = ("conviction_pct", "conviction_level", "conviction_text",
+                     "take_profit_price", "game_v", "game_s", "game_text")
+
+
+async def test_detail_exposes_new_diagnosis_fields(client, admin_headers):
+    """诊断明细出参必须带上信念/止盈/博弈 7 字段（mock 插件已同款透出）。"""
+    await _add_holding(client, admin_headers)
+    r = await client.post("/api/v1/diag/run", headers=admin_headers)
+    assert r.status_code == 200, r.text
+    run_id = r.json()["data"]["run_id"]
+
+    detail = await _wait_done(run_id)
+    assert detail["status"] == "completed", detail["error"]
+
+    resp = await client.get(f"/api/v1/diag/runs/{run_id}", headers=admin_headers)
+    assert resp.status_code == 200, resp.text
+    row = resp.json()["data"]["results"][0]
+    for key in DIAG_EXTRA_FIELDS:
+        assert key in row, (key, row)
+        assert row[key] is not None, key
+
+
 async def test_refresh_message_distinguishes_start_and_replay(client, admin_headers):
     """刷新入口的文案得说实话：真跑了一次才叫「已启动」，冷却期内重放要告诉用户多久能刷新。"""
     await _add_holding(client, admin_headers)

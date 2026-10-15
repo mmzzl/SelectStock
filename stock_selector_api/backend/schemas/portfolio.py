@@ -46,6 +46,13 @@ class PortfolioDiagResultCreate(BaseModel):
     pnl_pct: float = 0.0
     suggestion: str = ""
     sell_trigger_price: float | None = None
+    conviction_pct: float | None = None
+    conviction_level: str | None = None
+    conviction_text: str | None = None
+    take_profit_price: float | None = None
+    game_v: float | None = None
+    game_s: float | None = None
+    game_text: str | None = None
 
 
 class PortfolioRunOut(ORMModel):
@@ -74,3 +81,10 @@ class PortfolioResultOut(ORMModel):
     pnl_pct: float = 0.0
     suggestion: str = ""
     sell_trigger_price: float | None = None
+    conviction_pct: float | None = None
+    conviction_level: str | None = None
+    conviction_text: str | None = None
+    take_profit_price: float | None = None
+    game_v: float | None = None
+    game_s: float | None = None
+    game_text: str | None = None

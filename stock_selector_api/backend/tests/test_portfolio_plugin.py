@@ -58,6 +58,12 @@ async def test_mock_plugin_returns_results_and_summary():
         assert r["action"] in portfolio_plugin.ACTIONS
         assert r["latest_price"] > 0
         assert "holding_pnl" in r and "pnl_pct" in r
+        # 新增透传字段（冻结契约）：mock 必须同款透出，否则后端链路无据可测
+        for key in ("conviction_pct", "conviction_level", "conviction_text",
+                    "take_profit_price", "game_v", "game_s", "game_text"):
+            assert key in r, key
+        assert r["conviction_level"] in {"高", "中", "低"}
+        assert 0 <= r["conviction_pct"] <= 100
     s = out["summary"]
     assert s["holding_count"] == 3
     assert sum(s["action_counts"].values()) == 3

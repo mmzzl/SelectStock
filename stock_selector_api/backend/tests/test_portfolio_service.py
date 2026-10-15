@@ -77,3 +77,36 @@ async def test_sell_trigger_price_roundtrip(monkeypatch):
     again = await portfolio_service.analyze("svc-u5", "2026-09-16", HOLDINGS[:1])
     assert again["results"][0]["sell_trigger_price"] == 1603.6
     await _clean()
+
+
+async def test_conviction_and_game_fields_roundtrip(monkeypatch):
+    """插件新透传的信念/止盈/博弈字段必须落库再出参：漏一个就会静默丢字段。"""
+    await _clean()
+
+    extra = {
+        "conviction_pct": 72.5, "conviction_level": "高", "conviction_text": "趋势确认",
+        "take_profit_price": 1800.0, "game_v": 0.1, "game_s": 0.2, "game_text": "放量上攻",
+    }
+
+    async def fake_plugin(payload):
+        return {"results": [{
+            "code": "600519", "name": "贵州茅台", "action": "hold", "action_reason": "x",
+            "latest_price": 1688.0, "quantity": 100, "holding_pnl": 0.0, "pnl_pct": 0.0,
+            "suggestion": "", "sell_trigger_price": 1603.6, **extra,
+        }], "summary": {"action_counts": {"hold": 1}, "total_market_value": 168800.0,
+                        "total_pnl": 0.0, "holding_count": 1}}
+
+    monkeypatch.setattr("services.portfolio_plugin.call_plugin_analyze", fake_plugin)
+    out = await portfolio_service.analyze("svc-u6", "2026-09-16", HOLDINGS[:1])
+    for key, val in extra.items():
+        assert out["results"][0][key] == val, key
+
+    row = (await portfolio_results.list_by_run(out["run_id"]))[0]
+    for key, val in extra.items():
+        assert row[key] == val, key
+
+    # 幂等重放走库里读回来的那条路径，同样要带得上
+    again = await portfolio_service.analyze("svc-u6", "2026-09-16", HOLDINGS[:1])
+    for key, val in extra.items():
+        assert again["results"][0][key] == val, key
+    await _clean()

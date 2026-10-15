@@ -24,6 +24,11 @@ def _mock_analyze(holdings: list[dict]) -> dict:
         action = ACTIONS[i % len(ACTIONS)]
         latest = round(h["cost_price"] * (1 + 0.005 * (i + 1)), 2)
         pnl = round((latest - h["cost_price"]) * h["quantity"], 2)
+        # 信念/博弈为插件侧判定产物，mock 用确定性档位造数，测试只锁「字段被透传」而非取值语义
+        level = ("高", "中", "低")[i % 3]
+        conviction_pct = round(90.0 - 30.0 * (i % 3), 2)
+        game_v = round(0.1 * (i + 1), 4)
+        game_s = round(0.2 * (i + 1), 4)
         results.append({
             "code": h["code"],
             "name": h.get("name", ""),
@@ -34,6 +39,13 @@ def _mock_analyze(holdings: list[dict]) -> dict:
             "holding_pnl": pnl,
             "pnl_pct": round((latest / h["cost_price"]) * 100 - 100, 2),
             "suggestion": "",
+            "conviction_pct": conviction_pct,
+            "conviction_level": level,
+            "conviction_text": f"mock conviction: {level}",
+            "take_profit_price": round(latest * 1.05, 2),
+            "game_v": game_v,
+            "game_s": game_s,
+            "game_text": f"mock game: v={game_v} s={game_s}",
         })
         total_mv += latest * h["quantity"]
         total_pnl += pnl

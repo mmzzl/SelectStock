@@ -95,3 +95,30 @@ async def test_apply_import_skip_skips(_clean):
     res = await holdings_service.apply_import("u1", text, "skip")
     assert res["skipped"] == 1 and res["updated"] == 0
     assert (await holdings_service.find_by_user_code("u1", "600519"))["quantity"] == 200
+
+
+async def test_list_holdings_snapshot_carries_diag_extra_fields():
+    """持仓列表快照要带上诊断新增的信念/止盈/博弈字段（页面直接读这些键）。"""
+    from repositories import portfolio_results, portfolio_runs
+
+    extra = {
+        "conviction_pct": 72.5, "conviction_level": "高", "conviction_text": "趋势确认",
+        "take_profit_price": 1800.0, "game_v": 0.1, "game_s": 0.2, "game_text": "放量上攻",
+    }
+    await holdings_service.create_holding("u9", {"code": "600519", "name": "茅台",
+                                                 "quantity": 100, "cost_price": 1688.0})
+    run = await portfolio_runs.create({"batch_id": "b-extra", "user_id": "u9",
+                                       "natural_day": "2026-09-16", "status": "completed",
+                                       "held_code_count": 1})
+    await portfolio_results.create({
+        "run_id": run["run_id"], "code": "600519", "name": "茅台", "action": "hold",
+        "latest_price": 1688.0, "quantity": 100, "holding_pnl": 0.0, "pnl_pct": 0.0,
+        "suggestion": "", "sell_trigger_price": 1603.6, **extra})
+    try:
+        rows = await holdings_service.list_holdings("u9")
+        assert len(rows) == 1
+        for key, val in extra.items():
+            assert rows[0].get(key) == val, key
+    finally:
+        await portfolio_results._delete_from("portfolio_diag_results", {})
+        await portfolio_runs._delete_from("portfolio_diag_runs", {})

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 
-from portfolio import posterior
+from portfolio import conviction, posterior
 from portfolio.judge import (HOLD_FLIP_PCT, HOLD_TAIL_P5_PCT, judge_holding,
                             sell_trigger_price)
 from portfolio.revenue import snapshot, summarize
@@ -35,6 +35,8 @@ def analyze_holdings(holdings: list[dict], provider, quotes: dict | None = None)
         base["action"], base["action_reason"] = judge_holding(
             row, rules["sell"], rules["add"], cost_price=cost, price=price,
             disaster_stop_pct=rules["disaster_stop_pct"])
+        # 可信度（剧本成功率）+ 博弈代理：模型缺失/核心特征不齐/ST 时自动回 None，不进 suggestion
+        base.update(conviction.evaluate(row))
         # 价格线由同一条 sell 表达式反算（见 stock_selector/backtest/rule_trigger.py），
         # 和上面的判定同内核，不会出现「理由是跌破均线、给出的价却对不上」
         base["sell_trigger_price"] = sell_trigger_price(row, rules["sell"])
