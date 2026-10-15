@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { toHoldingRow, toTradeRow, toPnlView, toSelectionJobRow, toSelectionResultRow,
          toMessageRow, toDiagRow, toPreviewRow, toUpgradeInfo, fmtTime,
-         priceStampText, convictionText,
+         priceStampText, convictionText, convictionHead, convictionLevelText, convictionLevelClass,
+         convictionNote, hasConviction, takeProfitText, gameText,
          riskText, riskClass, sortByRiskDesc, buyLevelText, sellTriggerText,
          orderPlanText, riskAdjustText, posteriorText, gateText } from "../src/logic/view.js";
 
@@ -47,6 +48,93 @@ test("可信度行：列表页剥掉卖点线（那是诊断当时的价算的�
   assert.equal(convictionText({ suggestion: "均线卖点在下方 0.6%" }), "");
   assert.equal(convictionText({ suggestion: "" }), "");
   assert.equal(convictionText({}), "");
+});
+
+test("持仓行：结构化可信度/止盈/博弈字段透传；字段整段缺失时退化为 null/空串", () => {
+  const row = toHoldingRow({
+    code: "600519", name: "贵州茅台", quantity: 100, cost_price: 1680.5,
+    latest_price: 1500, sell_trigger_price: 1512.3,
+    suggestion: "已跌破均线卖点 2.5%｜回本需 +12.0%",
+    conviction_pct: "62.5", conviction_level: "高",
+    conviction_text: "同类 hold 20 日内 45% 转为卖出",
+    take_profit_price: "1720", game_v: 0.62, game_s: "0.38", game_text: "对手盘偏多",
+  });
+  assert.equal(row.convictionPct, 62.5);   // 字符串也要转成数值
+  assert.equal(row.convictionLevel, "高");
+  assert.equal(row.convictionText, "同类 hold 20 日内 45% 转为卖出");
+  assert.equal(row.takeProfit, 1720);
+  assert.equal(row.gameV, 0.62);
+  assert.equal(row.gameS, 0.38);
+  assert.equal(row.gameText, "对手盘偏多");
+
+  // 老接口没有这批字段：全部退化成 null/空串，页面据此走 suggestion 兜底
+  const legacy = toHoldingRow({ code: "1", quantity: 1, cost_price: 1 });
+  assert.equal(legacy.convictionPct, null);
+  assert.equal(legacy.convictionLevel, "");
+  assert.equal(legacy.convictionText, "");
+  assert.equal(legacy.takeProfit, null);
+  assert.equal(legacy.gameV, null);
+  assert.equal(legacy.gameS, null);
+  assert.equal(legacy.gameText, "");
+});
+
+test("可信度结构化：百分比取整 + 等级徽章 + 短说明；没有百分比就退回老 suggestion 文案", () => {
+  const r = { convictionPct: 62.5, convictionLevel: "高",
+              convictionText: "同类 hold 20 日内 45% 转为卖出" };
+  assert.equal(convictionHead(r), "可信度 63%");   // 压到整数
+  assert.equal(convictionLevelText(r), "高");
+  assert.equal(convictionLevelClass(r), "high");
+  assert.equal(convictionNote(r), "同类 hold 20 日内 45% 转为卖出");
+  assert.equal(convictionText(r), "可信度 63% · 同类 hold 20 日内 45% 转为卖出");
+
+  // 只有百分比、没有说明时不留尾巴
+  assert.equal(convictionText({ convictionPct: 30 }), "可信度 30%");
+  assert.equal(convictionNote({ convictionPct: 30 }), "");
+
+  // 等级三档各自映射到样式类；给了不认识的等级就不出徽章
+  assert.equal(convictionLevelClass({ convictionLevel: "中" }), "mid");
+  assert.equal(convictionLevelClass({ convictionLevel: "低" }), "low");
+  assert.equal(convictionLevelText({ convictionLevel: "极高" }), "");
+  assert.equal(convictionLevelClass({ convictionLevel: "极高" }), "");
+
+  // 百分比缺失（缺失工件）→ 主行退回老文案，说明不单独冒出来免得重复
+  const legacy = { suggestion: "均线卖点在下方 0.6%｜同类 hold 20 日内 45% 转为卖出" };
+  assert.equal(convictionHead(legacy), "可信度 · 同类 hold 20 日内 45% 转为卖出");
+  assert.equal(convictionNote(legacy), "");
+  assert.equal(convictionText(legacy), "可信度 · 同类 hold 20 日内 45% 转为卖出");
+  // 详情页 withLine 保留首段（价格是那一次诊断的快照，口径自洽）
+  assert.equal(convictionHead(legacy, true),
+               "可信度 · 均线卖点在下方 0.6%｜同类 hold 20 日内 45% 转为卖出");
+  // 百分比是坏数（NaN）也当没有，不能印「可信度 NaN%」
+  assert.equal(convictionHead({ convictionPct: "abc", suggestion: "x｜y" }), "可信度 · y");
+});
+
+test("止盈价格线：跟止损同口径，目标或现价缺一个就整行不显示", () => {
+  assert.equal(takeProfitText({ latestPrice: 10, takeProfit: 12.8 }), "涨到 12.80");
+  assert.equal(takeProfitText({ latestPrice: 13, takeProfit: 12.8 }), "回落到 12.80");
+  assert.equal(takeProfitText({ latestPrice: 12.8, takeProfit: 12.8 }), "12.80（价格已到位）");
+  assert.equal(takeProfitText({ latestPrice: 10, takeProfit: null }), "");
+  assert.equal(takeProfitText({ latestPrice: null, takeProfit: 12.8 }), "");
+  assert.equal(takeProfitText({}), "");
+});
+
+test("博弈参考行：V/S 标参考值、game_text 标定性，全缺就整行不显示", () => {
+  assert.equal(gameText({ gameV: 0.62, gameS: 0.38, gameText: "对手盘偏多" }),
+               "博弈参考 · V 0.62 · S 0.38（参考值） · 定性：对手盘偏多");
+  assert.equal(gameText({ gameV: 0.62 }), "博弈参考 · V 0.62（参考值）");
+  assert.equal(gameText({ gameText: "多空胶着" }), "博弈参考 · 定性：多空胶着");
+  assert.equal(gameText({}), "");
+  assert.equal(gameText({ gameV: null, gameS: null, gameText: "" }), "");
+});
+
+test("可信度块存在性：任一子行有内容才出块，全空不出", () => {
+  assert.equal(hasConviction({ convictionPct: 50 }), true);
+  assert.equal(hasConviction({ convictionLevel: "中" }), true);
+  assert.equal(hasConviction({ action: "hold", latestPrice: 10, sellTrigger: 9.5 }), true);
+  assert.equal(hasConviction({ latestPrice: 10, takeProfit: 12 }), true);
+  assert.equal(hasConviction({ gameText: "x" }), true);
+  assert.equal(hasConviction({}), false);
+  assert.equal(hasConviction({ suggestion: "" }), false);
 });
 
 test("持仓行：现价来源透传（老接口没有这两个字段时为空串）", () => {

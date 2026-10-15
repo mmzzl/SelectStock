@@ -267,6 +267,25 @@ button[disabled] {
 .trow .amt { font-size: 30rpx; font-weight: 700; }
 .trow .sub { font-size: 22rpx; color: #8a919f; margin-top: 6rpx; }
 
+/* ---------- 结构化可信度块（持仓行 / 诊断明细共用） ---------- */
+/* 一条细分割线把它和上面的名称/理由分开；可信度数字最重，止盈止损次之，博弈参考压到最后 */
+.conv { margin-top: 12rpx; padding-top: 12rpx; border-top: 2rpx solid #f0f2f7; }
+.conv .conv-top { display: flex; align-items: center; gap: 12rpx; }
+.conv .conv-head { font-size: 22rpx; color: #8a919f; }
+.conv .conv-head.strong { font-size: 28rpx; font-weight: 700; color: #1f2329; }
+.conv .conv-lv {
+  font-size: 20rpx; line-height: 1.5; padding: 0 16rpx; border-radius: 999rpx;
+  font-weight: 600; flex-shrink: 0;
+}
+.conv .conv-lv.high { color: #1fa35f; background: #e8f7ee; }
+.conv .conv-lv.mid  { color: #c47d16; background: #fff4e3; }
+.conv .conv-lv.low  { color: #8a919f; background: #f0f2f7; }
+.conv .conv-note { display: block; font-size: 22rpx; color: #8a919f; margin-top: 6rpx; }
+.conv .conv-line { display: block; font-size: 22rpx; margin-top: 6rpx; }
+.conv .conv-line.trig { color: #e64545; }
+.conv .conv-line.tp { color: #1fa35f; }
+.conv .conv-line.game { font-size: 20rpx; color: #a2a9b5; }
+
 /* 分组标题 */
 .grp {
   display: flex; align-items: center; justify-content: space-between;

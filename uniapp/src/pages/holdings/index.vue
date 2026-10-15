@@ -3,7 +3,9 @@
 import { ref, computed } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
-import { convictionText, priceStampText, sellTriggerText, toHoldingRow, toPnlView } from "../../logic/view.js";
+import { convictionHead, convictionLevelClass, convictionLevelText, convictionNote,
+         gameText, hasConviction, priceStampText, sellTriggerText, takeProfitText,
+         toHoldingRow, toPnlView } from "../../logic/view.js";
 
 const rows = ref([]); const loading = ref(false); const err = ref("");
 const summary = ref(null);           // 来自 /holdings/pnl 的 summary，前端不做加总
@@ -95,8 +97,16 @@ const goTrades = () => uni.navigateTo({ url: "/pages/trades/index" });
             <text class="n">{{ r.name }}（{{ r.code }}）</text>
             <text v-if="r.actionReason" class="sub">{{ r.actionReason }}</text>
             <text v-if="r.agg && r.agg.realizedPnl" class="sub acc">已实现 {{ signed(r.agg.realizedPnl) }} · 含已实现合计 {{ signed(r.agg.totalPnl) }}</text>
-            <text v-if="sellTriggerText(r)" class="sub trig">{{ sellTriggerText(r) }}</text>
-            <text v-if="convictionText(r)" class="sub">{{ convictionText(r) }}</text>
+            <view v-if="hasConviction(r)" class="conv">
+              <view class="conv-top">
+                <text class="conv-head" :class="{ strong: r.convictionPct !== null }">{{ convictionHead(r) }}</text>
+                <text v-if="convictionLevelText(r)" class="conv-lv" :class="convictionLevelClass(r)">{{ convictionLevelText(r) }}</text>
+              </view>
+              <text v-if="convictionNote(r)" class="conv-note">{{ convictionNote(r) }}</text>
+              <text v-if="sellTriggerText(r)" class="conv-line trig">止损 · {{ sellTriggerText(r) }}</text>
+              <text v-if="takeProfitText(r)" class="conv-line tp">止盈 · {{ takeProfitText(r) }}</text>
+              <text v-if="gameText(r)" class="conv-line game">{{ gameText(r) }}</text>
+            </view>
           </view>
           <view class="r">
             <text class="badge" :class="r.action || 'none'">{{ r.actionText }}</text>
@@ -116,6 +126,6 @@ const goTrades = () => uni.navigateTo({ url: "/pages/trades/index" });
 <style scoped>
 .hero { padding: 10rpx 0 18rpx; }
 .hero .kv3 { margin-top: 6rpx; }
-.trow .trig { color: #e64545; }
 .trow .acc { color: #2b5cff; }
+/* 止损/止盈/可信度块样式见 styles/common.css 的 .conv（两页共用） */
 </style>

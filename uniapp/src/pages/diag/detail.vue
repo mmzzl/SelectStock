@@ -3,7 +3,9 @@
 import { ref } from "vue";
 import { onLoad } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
-import { convictionText, sellTriggerText, toHoldingRow } from "../../logic/view.js";
+import { convictionHead, convictionLevelClass, convictionLevelText, convictionNote,
+         gameText, hasConviction, sellTriggerText, takeProfitText,
+         toHoldingRow } from "../../logic/view.js";
 
 const run = ref(null); const results = ref([]); const err = ref("");
 const { diag } = useClient();
@@ -42,8 +44,16 @@ const pnlCls = (v) => (v === null || v === undefined || v === 0 ? "" : v > 0 ? "
         <text class="d">现价 {{ money(r.latestPrice) }} · {{ r.shares ?? "—" }} 股</text>
         <text class="n">{{ r.name }}（{{ r.code }}）</text>
         <text v-if="r.actionReason" class="sub">{{ r.actionReason }}</text>
-        <text v-if="convictionText(r, true)" class="sub">{{ convictionText(r, true) }}</text>
-        <text v-if="sellTriggerText(r)" class="sub trig">{{ sellTriggerText(r) }}</text>
+        <view v-if="hasConviction(r, true)" class="conv">
+          <view class="conv-top">
+            <text class="conv-head" :class="{ strong: r.convictionPct !== null }">{{ convictionHead(r, true) }}</text>
+            <text v-if="convictionLevelText(r)" class="conv-lv" :class="convictionLevelClass(r)">{{ convictionLevelText(r) }}</text>
+          </view>
+          <text v-if="convictionNote(r)" class="conv-note">{{ convictionNote(r) }}</text>
+          <text v-if="sellTriggerText(r)" class="conv-line trig">止损 · {{ sellTriggerText(r) }}</text>
+          <text v-if="takeProfitText(r)" class="conv-line tp">止盈 · {{ takeProfitText(r) }}</text>
+          <text v-if="gameText(r)" class="conv-line game">{{ gameText(r) }}</text>
+        </view>
       </view>
       <view class="r">
         <text class="badge" :class="r.action || 'none'">{{ r.actionText }}</text>
@@ -61,6 +71,5 @@ const pnlCls = (v) => (v === null || v === undefined || v === 0 ? "" : v > 0 ? "
 .hero { padding: 10rpx 0 18rpx; }
 .hero .rt { font-size: 30rpx; font-weight: 600; }
 .hero .kv3 { margin-top: 6rpx; }
-/* 触发价是给操作用的，压过 .trow .sub 的灰字（选择器要带上 .trow 才压得住权重） */
-.trow .trig { color: #e64545; }
+/* 止损/止盈/可信度块样式见 styles/common.css 的 .conv（两页共用） */
 </style>

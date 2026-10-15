@@ -34,6 +34,14 @@ export function toHoldingRow(s) {
     priceTime: s.price_time || "", priceSource: s.price_source || "",
     pnl: num(s.holding_pnl), pnlPct: num(s.pnl_pct),
     sellTrigger: num(s.sell_trigger_price),
+    // 结构化可信度（新接口）：整段缺失时全为 null/空串，页面退回下面的 suggestion 文案
+    convictionPct: num(s.conviction_pct),
+    convictionLevel: s.conviction_level || "",
+    convictionText: s.conviction_text || "",
+    // 价格线：止损沿用 sell_trigger_price，止盈是新字段
+    takeProfit: num(s.take_profit_price),
+    // 博弈参考：V/S 是参考数值、game_text 是定性描述，页面压到次要一行
+    gameV: num(s.game_v), gameS: num(s.game_s), gameText: s.game_text || "",
     diagRunId: s.diag_run_id || null,
   };
 }
@@ -66,15 +74,84 @@ export function sellTriggerText(r) {
   return `${down ? "跌破" : "涨破"} ${p} 触发卖出`;
 }
 
-/** 判定可信度：插件给的是「处在同一状态的持仓点整体后来怎么样」的同类频率，不是这只票的预测。
- *  串的第一段永远是卖点线差价，而它是拿**诊断当时**的价算的；持仓页的现价已经换成实时价，
- *  留着会出现「说在下方、其实已跌破」的反话，所以列表页剥掉第一段（触发价另有 sellTriggerText 现算）。
- *  诊断详情页整行都在讲那一次快照，价格口径自洽，传 withLine=true 原样给。 */
-export function convictionText(r, withLine = false) {
+// 可信度等级徽章：接口只给「高/中/低」三档，颜色沿用现有语义（绿=高、琥珀=中、灰=低）
+const CONVICTION_LEVELS = { "高": "high", "中": "mid", "低": "low" };
+
+/** 结构化可信度百分比：接口给 0-100 的浮点，页面压到整数；NaN/缺值都当作没有。 */
+function convictionPct(r) {
+  const pct = num(r?.convictionPct);
+  return pct !== null && Number.isFinite(pct) ? pct : null;
+}
+
+/** 旧口径（结构化字段缺失时的兜底）：suggestion 用「｜」分段，插件给的是「处在同一状态的
+ *  持仓点整体后来怎么样」的同类频率，不是这只票的预测。串的第一段永远是卖点线差价，而它是拿
+ *  **诊断当时**的价算的；持仓页现价已换成实时价，留着会出现「说在下方、其实已跌破」的反话，
+ *  所以列表页剥掉第一段（触发价另有 sellTriggerText 现算）。诊断详情页口径自洽，传 withLine=true 原样给。 */
+function legacyConviction(r, withLine) {
   const bits = String(r?.suggestion || "").split("｜").map((s) => s.trim()).filter(Boolean);
   if (!bits.length) return "";
   if (!withLine) bits.shift();
   return bits.length ? `可信度 · ${bits.join("｜")}` : "";
+}
+
+/** 可信度主行：接口给了结构化百分比就是「可信度 62%」，否则退回老的 suggestion 文案（不回归）。
+ *  详情页需要卖点线段时传 withLine=true。 */
+export function convictionHead(r, withLine = false) {
+  const pct = convictionPct(r);
+  return pct === null ? legacyConviction(r, withLine) : `可信度 ${Math.round(pct)}%`;
+}
+
+/** 等级徽章文案（高/中/低）；给了不认识的等级就不出徽章。 */
+export function convictionLevelText(r) {
+  const lv = String(r?.convictionLevel || "").trim();
+  return CONVICTION_LEVELS[lv] ? lv : "";
+}
+
+/** 等级徽章的样式类（high/mid/low），与 convictionLevelText 成对使用。 */
+export function convictionLevelClass(r) {
+  const lv = convictionLevelText(r);
+  return lv ? CONVICTION_LEVELS[lv] : "";
+}
+
+/** 短说明：结构化模式下是接口给的一句话；退回老文案时它已并入主行，这里返回空以免重复。 */
+export function convictionNote(r) {
+  return convictionPct(r) === null ? "" : String(r?.convictionText || "").trim();
+}
+
+/** 可信度整行（主行 + 说明）：详情页 withLine=true 时保留卖点线段。 */
+export function convictionText(r, withLine = false) {
+  return [convictionHead(r, withLine), convictionNote(r)].filter(Boolean).join(" · ");
+}
+
+/** 可信度块是否有内容：任一子行有东西才渲染整块，全空时不出，免得留一段空边距。 */
+export function hasConviction(r, withLine = false) {
+  return Boolean(convictionText(r, withLine) || convictionLevelText(r)
+    || sellTriggerText(r) || takeProfitText(r) || gameText(r));
+}
+
+/** 止盈价格线：跟 sellTriggerText 一个口径——目标或现价缺一个就整行不显示，有数时按目标在
+ *  现价上方/下方选词。页面再冠上「止盈 · 」。 */
+export function takeProfitText(r) {
+  const tp = num(r?.takeProfit);
+  const latest = num(r?.latestPrice);
+  if (tp === null || latest === null || latest <= 0) return "";
+  const p = tp.toFixed(2);
+  if (Math.abs(tp - latest) < 0.005) return `${p}（价格已到位）`;
+  return `${tp > latest ? "涨到" : "回落到"} ${p}`;
+}
+
+/** 博弈参考行：V/S 是接口给的参考数值、game_text 是定性描述，整体定位比可信度次一级。
+ *  全缺就返回空串（整行不显示）。 */
+export function gameText(r) {
+  const v = num(r?.gameV), s = num(r?.gameS);
+  const vs = [];
+  if (v !== null) vs.push(`V ${v.toFixed(2)}`);
+  if (s !== null) vs.push(`S ${s.toFixed(2)}`);
+  const parts = [];
+  if (vs.length) parts.push(`${vs.join(" · ")}（参考值）`);
+  const txt = String(r?.gameText || "").trim();
+  if (txt) parts.push(`定性：${txt}`);
+  return parts.length ? `博弈参考 · ${parts.join(" · ")}` : "";
 }
 
 export function toPnlRow(s) {
