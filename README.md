@@ -31,7 +31,8 @@
 ## 插件化量化选股系统 stock_selector/
 
 策略插件化的选股内核，三种运行形态复用同一个 `run_select()`，结果完全一致。需求与架构见
-`docs/spec/插件化量化选股系统 - 需求与架构设计文档.md`，技术因子手册见 `stock_selector/docs/READ.me`。
+`docs/spec/插件化量化选股系统 - 需求与架构设计文档.md`，技术因子手册见 `stock_selector/docs/READ.me`，
+主力剧本的定性自洽性检查（流动性/承接约束，非概率）见 `stock_selector/docs/主力博弈约束模型.md`。
 
 ### 分层架构
 
@@ -161,14 +162,32 @@ decision.verdict, decision.shares, decision.est_fill_price      # allow | adjust
 decision.reason                                # 中文理由，告警链路要原样说给用户
 ```
 
-**行情口径为什么不能只读日线**：本地日线只有涨停标记 `lu`、**没有跌停列**，成交额自
-2026-05-21 起断供（全是 0，流动性退到 `volume × close × 100` 估算），涨跌停阈值还得分
+**行情口径为什么不能只读日线**：本地日线只有涨停标记 `lu`、**没有跌停列**，涨跌停阈值还得分
 主板/创业/科创/北交所/ST/基金。所以涨跌停价、换手率、精确成交额取
 `data/market_snapshot/{日}.parquet` —— 交易所下发的原值，由 `scripts/fetch_market_snapshot.py`
 每个交易日 15:30 落盘（整轮 12 秒；命中率不足 60% 直接拒绝写出残缺文件）。缺文件时的降级
 顺序写死在 `risk/snapshot.py`，规则层不再各判各的：①当日落盘快照 → ②实时快照（腾讯，只给
 当天；回测/盘后用 `allow_live=False` 关掉）→ ③都没有则字段为 `None`，规则**跳过判定**而不是
 猜一个价。盘后内核按每只票自己的基准日取数，所以历史日期的信号不会混进今天的行情。
+
+**日线 `amount` 从哪来**：日线爬虫的两个源（腾讯 `ifzq`、新浪 `getKLineData`）**都不给成交额**，
+所以 `scripts/kline_spider.py` 干脆不写这个字段（留 `null`，绝不写 0——0 会被下游当成真·零成交）。
+精确值另有两条路进来：① `scripts/merge_snapshot_amount.py` 每天 15:45 把刚落的快照成交额并回当天
+那根日线（`--days 5` 往回自愈，因为爬虫只写"比库里最新更靠后"的 K 线，哪天少抓一批，补进来的行
+当时还没有成交额）；② `scripts/backfill_kline_amount.py` 从腾讯的兄弟接口 `newfqkline` 回补空窗
+——它比爬虫用的 `ifzq/fqkline`（只有 6 列）多两列，第 8 下标是成交额、单位**万元**，和东财/快照
+逐只对得上（差几十元 = 取整）。东财 `push2his` 也能给，但本机打它会被随机 RST（并发一高整批挂），
+所以回补走腾讯。两条都只写 `amount`、`upsert=False`，绝不凭空造 K 线；写完要
+`build_kline_features.py --full` 重建才会进 parquet（增量路径只追加新交易日）。即便如此，停牌/
+退市行仍然没有成交额，所以 `risk/context.py` 的 `volume × close × 100` 兜底要留着——实测两者比值
+p5=0.98 / p95=1.03，兜底只丢精度、不会误导流动性判据。
+
+**成交量的单位按板块不同**：拿盘后快照做基准（`成交额/(volume×price)`，手≈100、股≈1），
+主板/创业板/场内基金都是**手**，唯独**科创板 688/689 是股**——腾讯的两个接口对科创板都给股。
+爬虫自 2026-10-15 起按号段折成手入库（`kline_spider._tencent_volume`）；库里 2026-05-22~10-13 那段
+（49,624 行，一半还没打 `source` 标记，所以只能按比值判）已由 `scripts/fix_star_volume_unit.py`
+一次性折算完，原值留在 `volume_raw`、统一打 `vol_unit:"lot"`，重跑天然幂等。盘后快照
+`data/market_snapshot/*.parquet` 的 `volume` 列对科创板**仍是股**（没动，改了会和已落盘的历史文件打架）。
 
 本系统只做建议，不接券商下单：风控的输出是「建议股数 + 预估成交价 + 中文理由」，落库列
 `risk_verdict/risk_reason/risk_shares/risk_amount/risk_fill_price/risk_slippage_bp` 由后端
