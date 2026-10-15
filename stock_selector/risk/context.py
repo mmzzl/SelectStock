@@ -28,7 +28,16 @@ MIN_ADV_ROWS = 5            # 少于 5 根不估（新股/长期停牌估出来�
 
 
 def _daily_amounts(df: pd.DataFrame) -> pd.Series:
-    """日线单日成交额（元）。amount 自 2026-05-21 起断供为 0，退回 volume(手)×close×100。"""
+    """日线单日成交额（元）。amount 现在由盘后快照逐日回写 + 腾讯历史 K 线回补（见
+    scripts/merge_snapshot_amount.py / backfill_kline_amount.py），但停牌、退市、
+    爬虫当天失败仍会留下 0/空，所以保留 volume(手)×close×100 兜底——实测两者比值
+    稳定贴着 1.00（p5=0.98 / p95=1.03），兜底只是少了点精度，不会误导流动性判据。
+
+    科创板（688/689）曾经是个例外：腾讯给它的 volume 是「股」而不是「手」，乘 100 会把
+    成交额凭空放大一个数量级。库里那段历史已由 scripts/fix_star_volume_unit.py 在
+    2026-10-15 折算成手，所以这里的兜底现在对所有板块都成立。要当心的是盘后快照文件
+    （data/market_snapshot/*.parquet）的 volume 列对 68x 仍然是股，别拿它当手用。
+    """
     close = df["close"].astype(float)
     volume = df["volume"].astype(float)
     amount = df["amount"].astype(float) if "amount" in df.columns else None

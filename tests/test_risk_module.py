@@ -95,7 +95,7 @@ def test_limit_hit_uses_half_tick():
 # ── context：单位与缺数据 ───────────────────────────────────────────────────────
 
 def test_avg_amount_falls_back_to_volume_when_amount_broken():
-    """amount 自 2026-05-21 起断供为 0，流动性必须退回 volume(手)×close×100。"""
+    """amount 为 0/空（停牌行、爬虫当天没抓到）时，流动性必须退回 volume(手)×close×100。"""
     c = _ctx(kline=_kline(days=10, close=10.0, volume=100000.0, amount=0.0))
     assert c.avg_amount == pytest.approx(100000 * 10.0 * 100)
 

@@ -10,8 +10,8 @@
 - 两套板块都算：sector_stocks（证监会行业）+ bk_stocks（东财概念 BK）。成分数落在
   [min-members, max-members] 之外的伪板块不进热力图（「昨日打二板以上表现」只有 4 只、
   沪深300 那类 3788 只不是「板块」）；
-- 成交额：amount 自 2026-05-21 起爬虫不再回填、全是 0，统一按 volume(手)×close×100 估算，
-  当期与前期同口径才可比，不要混用 amount。
+- 成交额：有精确 amount 就用（盘后快照逐日回写 + 东财回补历史空窗），停牌/退市的 0/空行
+  退回 volume(手)×close×100 估算，比值≈1.00 所以当期与前期同口径可比；
 
 用法:
     python scripts/build_sector_heat.py
@@ -131,7 +131,8 @@ def read_stock_frame(path: Path) -> pd.DataFrame | None:
     df["code"] = path.stem
     df["name"] = df["name"].fillna("").astype(str)
     df["lu"] = df["lu"].fillna(False).astype(bool)
-    # amount 断供后是 0，用 volume(手)×close×100 兜底；历史行里两者同量级（比值≈100）
+    # 成交额优先用库里精确 amount（快照逐日回写 + 东财回补历史），停牌/退市行仍是 0/空，
+    # 用 volume(手)×close×100 兜底；实测两者比值贴着 1.00，当期与前期同口径才可比
     est = df["volume"].astype(float) * df["close"].astype(float) * 100.0
     df["turnover"] = df["amount"].astype(float).where(df["amount"].astype(float) > 0, est)
     return df[["code", "name", "date", "close", "pct", "lu", "turnover"]]

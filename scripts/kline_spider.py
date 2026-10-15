@@ -42,8 +42,19 @@ def in_universe(market: str, pure: str) -> bool:
     return market in ("sh", "sz") and pure[:2] in FUND_TWO
 
 
-SINA_VOLUME_DIVISOR = 100.0     # sina 的 volume 是「股/份」，其余来源与库内历史都是「手」
+SHARES_PER_LOT = 100.0          # 一手的股数：sina 全按「股」给，腾讯只有科创板按「股」给
 VOLUME_UNIT = "lot"             # 入库口径标记，让单位折算的补数脚本可以被反复执行
+STAR_PREFIXES = ("688", "689")  # 689 是 CDR（九号公司），腾讯和 688 一样给「股」
+
+
+def _tencent_volume(code: str, raw: float) -> int:
+    """腾讯日线的成交量单位按板块变：688/689 科创板是「股」，其余是「手」。
+
+    2026-10-15 用盘后快照对过：`成交额/(volume×price)` 主板/创业/ETF 都是 100（手），
+    68x 字头是 1.01（股）。不按号段折算的话，同一根 K 线换个源就差 100 倍，
+    量能指标（vol_ratio）会全是锯齿。
+    """
+    return int(round(raw / SHARES_PER_LOT)) if code.startswith(STAR_PREFIXES) else int(raw)
 
 
 def _parse_api_response(code: str, bars: List, source: str = "tencent") -> List[Dict[str, Any]]:
@@ -56,7 +67,7 @@ def _parse_api_response(code: str, bars: List, source: str = "tencent") -> List[
             continue
         try:
             o, c, h, l = float(bar[1]), float(bar[2]), float(bar[3]), float(bar[4])
-            v = int(float(bar[5])) if bar[5] else 0
+            v = _tencent_volume(code, float(bar[5])) if bar[5] else 0
         except (ValueError, TypeError):
             continue
         records.append({
@@ -67,7 +78,12 @@ def _parse_api_response(code: str, bars: List, source: str = "tencent") -> List[
             "low": l,
             "close": c,
             "volume": v,
-            "amount": 0.0,
+            # 这个 K 线接口只给 6 列（开收高低量），没有成交额，只能留 null。
+            # 写 0.0 会被下游当成「真·零成交」，让 risk/context.py 的 amount>0 判断失去意义；
+            # null 会落成 NaN，那里会正常退回 volume×close 估算。当日精确值由
+            # scripts/merge_snapshot_amount.py 从交易所盘后快照回写（兄弟接口
+            # newfqkline 的第 9 列有成交额，但只到万元两位小数，见 backfill_kline_amount.py）。
+            "amount": None,
             "frequency": 9,
             "adjust": "qfq",
             "source": source,
@@ -126,7 +142,7 @@ def _sina_kline(code: str, count: int = 200) -> Optional[List[Dict]]:
                     continue
                 o, c, h, l = float(bar["open"]), float(bar["close"]), float(bar["high"]), float(bar["low"])
                 # 折算成手再入库：备源和主源单位不一致时，同一根 K 线的量能会凭空差两个数量级
-                v = int(round(float(bar["volume"]) / SINA_VOLUME_DIVISOR)) if bar.get("volume") and bar["volume"] != "0" else 0
+                v = int(round(float(bar["volume"]) / SHARES_PER_LOT)) if bar.get("volume") and bar["volume"] != "0" else 0
             except (ValueError, TypeError, KeyError):
                 continue
             records.append({
@@ -137,7 +153,7 @@ def _sina_kline(code: str, count: int = 200) -> Optional[List[Dict]]:
                 "low": l,
                 "close": c,
                 "volume": v,
-                "amount": 0.0,
+                "amount": None,      # sina 日线接口无成交额，同 _parse_api_response
                 "frequency": 9,
                 "adjust": "qfq",
                 "source": "sina",

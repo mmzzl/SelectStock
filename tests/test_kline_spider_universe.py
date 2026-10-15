@@ -63,3 +63,37 @@ def test_sina_volume_is_converted_to_lots(monkeypatch):
     bar = mod._parse_api_response("600519", [["2026-09-30", "10", "10.5", "11", "9", "28218"]])[0]
     assert bar["volume"] == 28218
     assert bar["vol_unit"] == "lot"
+
+
+def test_tencent_star_volume_is_converted_to_lots():
+    """腾讯给科创板（688/689）的成交量是「股」，给其他板块是「手」——不折算同一根 K 线换个源就差 100 倍。"""
+    mod = _load_script()
+    star = mod._parse_api_response("688001", [["2026-09-30", "10", "10.5", "11", "9", "12388324"]])[0]
+    assert star["volume"] == 123883
+    assert star["vol_unit"] == "lot"
+    cdr = mod._parse_api_response("689009", [["2026-09-30", "10", "10.5", "11", "9", "6806587"]])[0]
+    assert cdr["volume"] == 68066        # 689 是 CDR，腾讯同样给股
+    assert mod._parse_api_response("300750", [["2026-09-30", "10", "10.5", "11", "9", "334591"]])[0]["volume"] == 334591
+
+
+def test_both_sources_leave_amount_unknown(monkeypatch):
+    """腾讯/新浪的日线接口都不给成交额，必须留 null。
+
+    写成 0 会被下游当成「真·零成交」：`risk/context.py` 的 `amount.where(amount > 0, 估算)`
+    就此失效，流动性判据会跟着错。精确值由 merge_snapshot_amount / backfill_kline_amount 回写。
+    """
+    mod = _load_script()
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [{"day": "2026-09-30", "open": "10", "high": "11", "low": "9",
+                     "close": "10.5", "volume": "2501689"}]
+
+    monkeypatch.setattr(mod.requests, "get", lambda url, params=None, timeout=None, **kw: _Resp())
+    assert mod._sina_kline("600519")[0]["amount"] is None
+
+    bar = mod._parse_api_response("600519", [["2026-09-30", "10", "10.5", "11", "9", "28218"]])[0]
+    assert bar["amount"] is None
