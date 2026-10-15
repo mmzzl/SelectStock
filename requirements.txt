@@ -23,5 +23,8 @@ zai-sdk>=0.2.3
 scikit-learn>=1.4
 joblib>=1.3
 
+# 可信度模型训练 scripts/train_conviction_model.py（8002 插件打分也要 import lightgbm）
+lightgbm>=4.3
+
 # 盘中实时链路 scripts/quote_service.py（redis 作消息队列与行情缓存）
 redis>=5.0
