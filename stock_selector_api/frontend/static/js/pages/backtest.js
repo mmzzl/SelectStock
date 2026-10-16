@@ -237,7 +237,12 @@
       // 规则集回测和裸规则回测必须看得出区别，否则「用这套规则跑出来的结果」没法对账
       return p.rule_set_id ? esc('规则集 ' + String(p.rule_set_id).slice(0, 8)) : '规则回测';
     } },
-    { label: '区间', width: '170px', render: (r) => esc((r.params || {}).start + ' ~ ' + (r.params || {}).end) },
+    { label: '区间', width: '170px', render: (r) => {
+      // 直连接口提交时 params 可能缺 start/end，回退到内核实际跑的窗口，别渲染成 undefined ~ undefined
+      const p = r.params || {};
+      const res = r.result || {};
+      return esc((p.start || res.start_date || '-') + ' ~ ' + (p.end || res.end_date || '-'));
+    } },
     { label: '状态', width: '90px', render: statusTag },
     { label: '进度', width: '200px', render: bar },
     { label: '总收益', width: '90px', render: (r) => (r.result ? esc(fmtRatio(r.result.metrics && r.result.metrics.total_return)) : '-') },
