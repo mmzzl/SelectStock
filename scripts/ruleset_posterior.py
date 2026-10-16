@@ -128,8 +128,16 @@ class States:
 
     def __init__(self, n_days: int):
         self.n_days = n_days
+        # 实际参与统计的轴区间：--from/--to 会掐掉两端，报告里的窗口要按这个而不是整条轴写
+        self.day_from, self.day_hi = 0, n_days
         self._d: dict[str, dict[str, np.ndarray]] = {}
         self._hist: dict[str, np.ndarray] = {}
+
+    def window(self, date_list: list[str]) -> tuple[str, str, int]:
+        hi = min(self.day_hi or len(date_list), len(date_list))
+        lo = min(self.day_from, max(hi - 1, 0))
+        hi = max(hi, lo + 1)
+        return date_list[lo], date_list[hi - 1], hi - lo
 
     def add(self, name: str, di: np.ndarray, f10: np.ndarray, f20: np.ndarray,
             flat: np.ndarray, fly: np.ndarray, t8: np.ndarray, t12: np.ndarray,
@@ -284,6 +292,7 @@ def replay(files: list[Path], rs: dict, date_list: list[str], day_from: int,
     """progress_cb(已完成块数, 总块数)：Celery 侧要按块更新进度，命令行跑就不传。"""
     axis = np.array(date_list, dtype="datetime64[ns]")
     st = States(len(date_list))
+    st.day_from, st.day_hi = day_from, day_to or len(date_list)
     names = [f"rule{i}" for i in range(len(rs["sell"]))] \
         + [f"add{i}" for i in range(len(rs["add"]))] + ["any_sell", "joint_hold", "all"]
     t0 = time.time()
@@ -391,8 +400,9 @@ def build_payload(st: States, rs: dict, date_list: list[str], n_files: int) -> d
                         "后 20 个交易日收盘价未跌破 −3% 的占比（日等权）。"
                         "这是状态频率，不是个股预测；lift≈1 就等于说「和随机挑一只没差别」。"),
         },
-        "universe": {"days": len(date_list), "files": n_files, "st_excluded": True,
-                     "range": [date_list[0], date_list[-1]]},
+        "universe": {"days": st.window(date_list)[2], "files": n_files,
+                     "st_excluded": True,
+                     "range": list(st.window(date_list)[:2])},
         "base": base, "any_sell": any_sell, "joint_hold": joint,
         "sell_rules": rules, "add_rules": adds,
         "hold_confidence_pct": joint["flat_pct"] if joint.get("enough") else None,
@@ -433,9 +443,10 @@ def build_screen_payload(st: States, cands: list[dict],
                         "20日超额为负）；add 候选相反。六道门槛全过才给「过」，"
                         "任一不过就保留基线并记下差在哪一道。"),
         },
-        "universe": {"days": len(date_list), "files": n_files, "st_excluded": True,
+        "universe": {"days": st.window(date_list)[2], "files": n_files, "st_excluded": True,
                      "judged_points": judged_points,
-                     "range": [date_list[0], date_list[-1]]},
+                     "range": list(st.window(date_list)[:2]),
+                     "axis_range": [date_list[0], date_list[-1]]},
         "base": summarize(st, "all", "all", date_list),
         "candidates": rows, "passed_ids": [r["id"] for r in passed],
     }
@@ -450,7 +461,8 @@ def _fmt(v, spec: str) -> str:
 def render_screen(p: dict) -> str:
     g, u = p["gates"], p["universe"]
     lines = [f"候选筛查：{len(p['candidates'])} 条判据、同一趟回放，"
-             f"{u['range'][0]}→{u['range'][1]}（{u['days']} 个交易日、{u['judged_points']:,} 个可判时点），"
+             f"只用 {u['range'][0]}→{u['range'][1]}（{u['days']} 个交易日、{u['judged_points']:,} 个可判时点；"
+             f"数据轴到 {u['axis_range'][1]}，留出段不参与），"
              f"剔 ST、观测窗 T+{g['horizon_days']} 交易日、日等权同日配对、不含成本",
              f"门槛：n≥{g['min_points']:,} 且日≥{g['min_days']} · |t|≥{g['min_abs_t']} · "
              f"三段时代同号 · 20日超额同号且 ≥{g['round_trip_pp']}pp · "
