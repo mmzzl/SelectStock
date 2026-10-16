@@ -381,7 +381,7 @@
 
   async function applyNow(row) {
     const tip = '应用「' + row.name + '」后：持仓判定与盘中告警立即改用这套卖出/加仓规则，' +
-      '并投递一次全市场回放（约 1 小时）来算持有可信度。确认应用？';
+      '并投递一次全市场回放（实测约半分钟）来算持有可信度。确认应用？';
     if (!AppUI.confirmBox(tip)) return;
     try {
       const out = await API.applyRuleSet(row.id);

@@ -34,7 +34,9 @@ MAX_CONDITIONS_PER_RULE = 6
 TERMINAL = ("done", "failed")
 
 # 排队/运行中的回放长时间拿不到任何 Celery 状态（worker 掉线）就判失败，
-# 否则这条规则集永远显示「回放中」，页面既不能重跑也看不出为什么没数
+# 否则这条规则集永远显示「回放中」，页面既不能重跑也看不出为什么没数。
+# 阈值不能按回放本身多快（2026-10-16 全量实测约 29 秒）来收：worker 是单并发，
+# 排在长回测后面的 PENDING 和 worker 掉线的 PENDING 在 Celery 里同一个状态。
 STALE_SECONDS = 3 * 3600
 
 

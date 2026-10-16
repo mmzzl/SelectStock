@@ -123,7 +123,8 @@ class Settings(BaseSettings):
     ruleset_task_name: str = "ruleset.replay"  # worker 侧全市场回放任务名
     active_rules_file: str = f"{RULES_DIR}/active.json"
     ruleset_posterior_file: str = f"{RULES_DIR}/active_posterior.json"
-    # 回放分块票数：250 票 ≈ 120MB float64，机器上同时跑着线上服务（可用内存 ~2.7GB）
+    # 回放分块票数：250 票 ≈ 120MB float64，机器上同时跑着线上服务，别放大分块
+    # （2026-10-16 全量 27 块实测约 29 秒，不是小时级任务）
     ruleset_replay_block: int = 250
 
     # ---------- 版本升级中心（自托管）----------
