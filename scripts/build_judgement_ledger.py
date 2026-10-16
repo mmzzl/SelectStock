@@ -43,6 +43,9 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "stock_selector_api" / "plugin"))
 
 from portfolio.rules import load_rules  # noqa: E402
+# 成本口径和候选筛查（scripts/ruleset_posterior.py --candidates）必须同一把尺子，否则
+# 两道筛对「这条规则划得来」会给出互相矛盾的结论，改这里要同时改两边的判据。
+from stock_selector.backtest.rule_gates import ROUND_TRIP_PP as AB_ROUND_TRIP_PP  # noqa: E402
 
 KLINE_DIR = ROOT / "data" / "stock_kline"
 MEMBER_FILE = ROOT / "data" / "sector_heat" / "member.parquet"
@@ -237,9 +240,8 @@ def labels(action: np.ndarray, sell: np.ndarray, close: np.ndarray) -> tuple[np.
 
 AB_TAIL_WINDOW = 20     # 灾难点往前找预警的交易日数
 AB_MIN_CELL = 3000      # 一个切分里触发点少于这么多就不判同号，宁可不给结论
-# 一轮卖出+买回的成本（佣金万 2.5 双边 + 印花税 0.05% 卖出 + 过户费 + 预估滑点），单位 pp。
-# 用来把「触发率差」换算成钱：只比 avoided 不看换手，等于允许一条天天报警的规则白赢。
-AB_ROUND_TRIP_PP = 0.35
+# 一轮卖出+买回的成本（见文件头 rule_gates 的导入注释），用来把「触发率差」换算成钱——
+# 只比 avoided 不看换手，等于允许一条天天报警的规则白赢。
 
 
 def _rolling_max_prev(close: np.ndarray, win: int) -> np.ndarray:
