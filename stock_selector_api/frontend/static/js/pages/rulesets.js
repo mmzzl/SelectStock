@@ -119,7 +119,7 @@
 
   function sideBlock(title, side, list) {
     const addBtn = list.length >= opts.max_rules ? '' :
-      '<button class="btn mini" data-add-rule="' + side + '">＋添加' + title + '规则</button>';
+      '<button class="btn mini" data-add-rule="' + side + '">＋添加' + title + '</button>';
     return '<div data-side-block="' + side + '">' +
       '<div class="card-head"><h3>' + esc(title) + '</h3><span class="hint">一条规则内是「且」，' +
       '多条规则之间是「或」：任一触发就执行。最多 ' + opts.max_rules + ' 条。</span></div>' +

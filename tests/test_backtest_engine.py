@@ -154,3 +154,36 @@ class TestPause:
         last_equity = result.equity[-1]
         assert last_equity["date"] == "d3"
         assert last_equity["positions_value"] == pytest.approx(2000 * 11.0)
+
+
+class TestAddInstruction:
+    """加仓指令只带代码，成交记录的名称取买入时记下的那份。"""
+
+    class _Strategy:
+        def __init__(self):
+            from stock_selector.backtest.models import Instruction, Order
+
+            self.Order = Order
+            self.Instruction = Instruction
+
+        def propose_buys(self, date, cash, prices):
+            if date == "d1":
+                return [self.Order(code="600000", amount=20000, name="浦发银行")]
+            return []
+
+        def evaluate_holdings(self, date, holdings, prices):
+            if date == "d2" and "600000" in holdings:
+                return [self.Instruction(side="add", code="600000", amount=10000)]
+            return []
+
+    def test_add_trade_keeps_name_from_buy(self):
+        from stock_selector.backtest.engine import BacktestEngine
+
+        daily = {"d1": {"600000": {"close": 10.0}}, "d2": {"600000": {"close": 11.0}}}
+        engine = BacktestEngine(strategy=self._Strategy(), data=FakeData(daily),
+                                capital=100000, max_positions=1, position_cap_pct=1.0)
+        result = engine.run()
+        adds = [t for t in result.trades if t["side"] == "add"]
+        assert len(adds) == 1
+        assert adds[0]["name"] == "浦发银行"
+        assert adds[0]["shares"] == 900

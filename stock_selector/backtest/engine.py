@@ -47,6 +47,8 @@ class BacktestEngine:
         self.progress_cb = progress_cb
         self._initial_capital = float(capital)
         self.last_close: dict[str, float] = {}
+        # 加仓指令只带代码，成交记录要名称，就在买入时把代码→名称记下来
+        self._names: dict[str, str] = {}
 
     def _known_price(self, date: str, code: str) -> float | None:
         px = self.data.price(date, code)
@@ -103,7 +105,8 @@ class BacktestEngine:
                         if px is not None:
                             self.last_close[inst.code] = px
                             try:
-                                broker.add(inst.code, inst.name, date, px, amount)
+                                broker.add(inst.code, self._names.get(inst.code) or inst.code,
+                                           date, px, amount)
                             except ValueError:
                                 pass
 
@@ -119,6 +122,7 @@ class BacktestEngine:
                     if px is None:
                         continue
                     self.last_close[o.code] = px
+                    self._names[o.code] = o.name
                     try:
                         broker.buy(o.code, o.name, date, px, o.amount)
                     except ValueError:
