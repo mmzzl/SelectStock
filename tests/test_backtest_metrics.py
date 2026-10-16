@@ -18,14 +18,24 @@ class TestReturns:
         assert m.total_return == pytest.approx(0.20)
 
     def test_annual_return_uses_245_trading_days(self):
-        # 2 points, 1 trading interval; annual = (end/start)^(245/1)-1
-        m = make_metrics([100000, 110000], 100000)
-        expected = (110000 / 100000) ** (245 / 1) - 1
+        # 21 points, 20 trading intervals（跨过最小样本线才外推）
+        curve = [100000] * 20 + [110000]
+        m = make_metrics(curve, 100000)
+        expected = (110000 / 100000) ** (245 / 20) - 1
         assert m.annual_return == pytest.approx(expected, rel=1e-6)
 
-    def test_annual_return_single_point_is_zero(self):
-        m = make_metrics([100000], 100000)
-        assert m.annual_return == 0.0
+    def test_annual_return_none_when_sample_too_short(self):
+        # 两个交易日 −0.5% 外推成「年化 −72%」是噪声：样本不足就不给数字，交前端显示
+        m = make_metrics([100000, 99500], 100000)
+        assert m.annual_return is None
+        assert m.to_dict()["annual_return"] is None
+        assert m.to_dict()["total_return"] == pytest.approx(-0.005)
+
+    def test_annual_return_none_at_boundary(self):
+        m = make_metrics([100000] * 21, 100000)  # 20 个间隔 = 下限，可外推
+        assert m.annual_return == pytest.approx(0.0)
+        m2 = make_metrics([100000] * 20, 100000)  # 19 个间隔 = 不足
+        assert m2.annual_return is None
 
 
 class TestDrawdown:

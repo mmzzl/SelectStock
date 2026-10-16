@@ -187,7 +187,10 @@
     const p = job.params || {};
     const m = r.metrics || {};
     const cards = [
-      ['总收益', fmtRatio(m.total_return)], ['年化', fmtRatio(m.annual_return)],
+      ['总收益', fmtRatio(m.total_return)],
+      // 内核在不足 20 个交易日时把年化置空：两个交易日外推出来的「年化 −72%」是噪声，不是结论
+      ['年化', (m.annual_return === null || m.annual_return === undefined)
+        ? '样本不足' : fmtRatio(m.annual_return)],
       ['最大回撤', fmtRatio(m.max_drawdown)], ['胜率', fmtRatio(m.win_rate)],
       ['夏普', fmtNum(m.sharpe, 2)], ['利润因子(总盈/总亏)', fmtNum(m.profit_factor, 2)],
       ['赔率(均盈/均亏)', fmtNum(m.payoff_ratio, 2)], ['单笔期望(元)', fmtNum(m.expectancy, 0)],

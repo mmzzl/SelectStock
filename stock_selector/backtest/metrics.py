@@ -6,6 +6,12 @@ import math
 from dataclasses import dataclass, field
 
 
+TRADING_DAYS_PER_YEAR = 245
+# 年化只是把区间收益按 245 日幂外推：观测太少时外推出来的数完全是噪声
+# （两个交易日 −0.5% 会外推成「年化 −72%」），不足这个间隔数就不给数字。
+MIN_ANNUAL_INTERVALS = 20
+
+
 @dataclass
 class Metrics:
     equity_curve: list[float] = field(default_factory=list)
@@ -20,13 +26,13 @@ class Metrics:
         return self.equity_curve[-1] / self.initial_capital - 1
 
     @property
-    def annual_return(self) -> float:
-        n = len(self.equity_curve)
-        if n < 2:
-            return 0.0
-        intervals = n - 1
+    def annual_return(self) -> float | None:
+        """区间收益外推成年化；样本不足返回 None，交给前端显示「样本不足」。"""
+        intervals = len(self.equity_curve) - 1
+        if intervals < MIN_ANNUAL_INTERVALS:
+            return None
         ratio = self.equity_curve[-1] / self.initial_capital
-        return ratio ** (245 / intervals) - 1
+        return ratio ** (TRADING_DAYS_PER_YEAR / intervals) - 1
 
     @property
     def max_drawdown(self) -> float:
@@ -53,7 +59,7 @@ class Metrics:
         std = math.sqrt(var)
         if std == 0:
             return 0.0
-        return mean / std * math.sqrt(245)
+        return mean / std * math.sqrt(TRADING_DAYS_PER_YEAR)
 
     @property
     def win_rate(self) -> float:
@@ -101,9 +107,10 @@ class Metrics:
         return len(self.closed_pnls)
 
     def to_dict(self) -> dict:
+        annual = self.annual_return
         return {
             "total_return": round(self.total_return, 6),
-            "annual_return": round(self.annual_return, 6),
+            "annual_return": None if annual is None else round(annual, 6),
             "max_drawdown": round(self.max_drawdown, 6),
             "win_rate": round(self.win_rate, 6),
             "sharpe": round(self.sharpe, 6),
