@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 from .rule_expr import RuleSyntaxError, validate
@@ -63,6 +64,23 @@ GATE_NAMES = {
 }
 
 
+# —— 逐笔盈亏门槛（`scripts/profit_scan.py` 用；与上面的状态级六道筛是两套，别混用）——
+# 状态级判的是「这个状态之后会不会跌」，逐笔判的是「交易这个信号扣完费赚不赚钱」，
+# 问的不是一个问题，所以这里不复用 lift/t 那几道。
+TRADE_MIN_TRADES = 300        # 笔数下限（用户 2026-10-16 定的口径）
+TRADE_MIN_WIN_RATE = 0.50     # 胜率必须过半：过低就是靠极少数大赚撑盈亏比
+TRADE_MIN_PAYOFF = 1.0        # 均盈/均亏 > 1
+TRADE_MIN_NET_PP = 0.0        # 每笔扣费后 > 0，「只要赚钱都行，不需要赚太多」
+TRADE_GATE_KEYS = ("trades", "win", "payoff", "net", "sig")
+TRADE_GATE_NAMES = {
+    "trades": "笔数",
+    "win": "胜率",
+    "payoff": "盈亏比",
+    "net": "每笔扣费后",
+    "sig": "防自欺（按尝试次数）",
+}
+
+
 def other_side(side: str) -> str:
     """候选的 side 是人猜的，猜错时数据会自己纠正：筛查里两条边都判一遍，
      declared 不过而对面过了就报「反侧」，别让它静悄悄躺在「不过」那堆里。"""
@@ -93,7 +111,9 @@ def parse_eras(text) -> list[float | None]:
 
 
 def _check(key: str, need: str, got: str, ok: bool) -> dict:
-    return {"key": key, "name": GATE_NAMES[key], "need": need, "got": got, "ok": ok}
+    # 两套门槛共用这个构造函数，所以按 key 现查名字，别让逐笔那五条撞进状态级的字典里
+    return {"key": key, "name": {**GATE_NAMES, **TRADE_GATE_NAMES}[key],
+            "need": need, "got": got, "ok": ok}
 
 
 def evaluate_state(stat: dict, side: str, trigger_days_per_year: float) -> dict:
@@ -134,6 +154,63 @@ def evaluate_state(stat: dict, side: str, trigger_days_per_year: float) -> dict:
     checks.append(_check("freq", f"年均每票触发 ≤ {MAX_TRIGGER_DAYS_PER_YEAR:g} 天",
                          f"{trigger_days_per_year:.1f} 天/票·年",
                          trigger_days_per_year <= MAX_TRIGGER_DAYS_PER_YEAR))
+
+    failed = [c["key"] for c in checks if not c["ok"]]
+    return {"verdict": "不过" if failed else "过", "failed": failed, "checks": checks, "note": ""}
+
+
+def _inv_norm_sf(p: float) -> float:
+    """上侧概率 p 对应的 z（即 P(Z>z)=p）。用二分而不是引 scipy：这台机器上脚本链没带它，
+    而且这个函数一分钟只会被调几次，精度到 1e-4 就够写进报告了。"""
+    if not 0.0 < p < 0.5:
+        raise ValueError(f"p 必须在 (0, 0.5) 之间，收到 {p:g}")
+    lo, hi = 0.0, 12.0
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        if 0.5 * math.erfc(mid / math.sqrt(2.0)) > p:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+def t_required(n_trials: int) -> float:
+    """试了 K 个组合之后，第 K+1 个要多大的 t 才不像是白捡的（单侧 5%，Bonferroni）。
+
+    掷骰子掷 10 次没出六个点不稀奇，掷 800 万次一定能掷出一串——试的次数越多及格线必须越严，
+    否则「扫得越广找到越多好规则」就只是噪声被喂大的假象。
+    """
+    if n_trials < 1:
+        raise ValueError(f"n_trials 至少 1，收到 {n_trials}")
+    return _inv_norm_sf(0.05 / n_trials)
+
+
+def evaluate_trade(stat: dict, n_trials: int) -> dict:
+    """判一条「买入条件 × 卖法」的逐笔盈亏够不够格；返回 verdict ∈ {过, 不过, 不判}。
+
+    `stat` 由 `scripts/profit_scan.py` 汇总：`n_trades`、`win_rate`、`payoff`（均盈/均亏）、
+    `net_per_trade_pp`（扣费后每笔，百分点）、`t_stat`（每笔收益的日级配对 t）、
+    `era_net_pp`（三段各赚多少，**只展示不判**——用户明确说过不需要每个时代都赚钱）。
+    笔数那道先判：量不够就是「不配」；量够但算不出 t（覆盖交易日太少）才是「不判」。
+    """
+    n = int(stat.get("n_trades") or 0)
+    checks = [_check("trades", f"≥{TRADE_MIN_TRADES}", f"{n:,} 笔", n >= TRADE_MIN_TRADES)]
+    if not checks[0]["ok"]:
+        return {"verdict": "不过", "failed": ["trades"], "checks": checks, "note": ""}
+
+    wr, po, net, t = stat.get("win_rate"), stat.get("payoff"), stat.get("net_per_trade_pp"), stat.get("t_stat")
+    if t is None or net is None or wr is None:
+        return {"verdict": "不判", "failed": [], "checks": checks,
+                "note": "逐笔读数算不出来（覆盖交易日太少或全是单侧结果），这份数据说不了话"}
+
+    checks.append(_check("win", f">{TRADE_MIN_WIN_RATE:.0%}", f"{wr:.1%}", wr > TRADE_MIN_WIN_RATE))
+    # 一笔都不亏时均亏是 0，payoff 是 ∞：这是真好看而不是缺数，别判成「不判」
+    po_ok = po is None or math.isinf(po) or po > TRADE_MIN_PAYOFF
+    checks.append(_check("payoff", f">{TRADE_MIN_PAYOFF:g}",
+                         "∞（没有亏损笔）" if po is None or math.isinf(po) else f"{po:.2f}", po_ok))
+    checks.append(_check("net", f"> {TRADE_MIN_NET_PP:g}pp", f"{net:+.3f}pp", net > TRADE_MIN_NET_PP))
+    need_t = t_required(n_trials)
+    checks.append(_check("sig", f"试了 {n_trials:,} 次，要 t≥{need_t:.2f}", f"t {t:.2f}", t >= need_t))
 
     failed = [c["key"] for c in checks if not c["ok"]]
     return {"verdict": "不过" if failed else "过", "failed": failed, "checks": checks, "note": ""}

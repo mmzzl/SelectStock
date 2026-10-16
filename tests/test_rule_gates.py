@@ -194,3 +194,77 @@ class TestOtherSide:
         as_add = rule_gates.evaluate_state(stat, "add", 0.7)
         assert as_sell["verdict"] == "不过"
         assert as_add["verdict"] == "过"
+
+
+def good_trade():
+    """一条逐笔四道筛都该过的读数：笔数够、胜率过半、盈亏比>1、扣后每笔为正。"""
+    return {"n_trades": 1_200, "win_rate": 0.56, "payoff": 1.30,
+            "net_per_trade_pp": 0.45, "t_stat": 6.4,
+            "era_net_pp": "+0.90,-0.30,+0.20"}
+
+
+def trade_stat(**over):
+    stat = good_trade()
+    stat.update(over)
+    from stock_selector.backtest.rule_gates import evaluate_trade
+
+    return evaluate_trade(stat, 1_000)
+
+
+class TestEvaluateTrade:
+    """逐笔门槛判的是「交易这个信号扣完成费赚不赚钱」，和状态级六道筛不是一个问题。"""
+
+    def test_all_four_pass(self):
+        assert trade_stat()["verdict"] == "过"
+
+    def test_few_trades_stops_early(self):
+        r = trade_stat(n_trades=299)
+        assert r["verdict"] == "不过" and r["failed"] == ["trades"]
+        assert len(r["checks"]) == 1          # 量不够就不配再往下判
+
+    def test_win_rate_below_half_fails(self):
+        r = trade_stat(win_rate=0.49)
+        assert r["failed"] == ["win"]
+
+    def test_payoff_below_one_fails(self):
+        r = trade_stat(payoff=0.92)
+        assert r["failed"] == ["payoff"]
+
+    def test_negative_net_after_cost_fails(self):
+        r = trade_stat(net_per_trade_pp=-0.12)
+        assert r["failed"] == ["net"]
+
+    def test_no_losing_trade_is_not_missing_data(self):
+        """均亏为 0 时 payoff 是 ∞：这是真好看，不能判成「没读数」。"""
+        assert trade_stat(payoff=float("inf"))["verdict"] == "过"
+
+    def test_era_is_display_only(self):
+        """用户明确说过不需要每个时代都赚钱：三段东倒西歪也不该打回。"""
+        assert trade_stat(era_net_pp="-0.50,+0.90,-0.20")["verdict"] == "过"
+
+    def test_many_trials_raise_the_bar(self):
+        """同一个 t=4.3：试 1 千次算硬（要 3.90），试 7.5 万次就是噪声堆里挑出来的（要 4.70）。"""
+        from stock_selector.backtest.rule_gates import evaluate_trade
+
+        stat = dict(good_trade(), t_stat=4.3)
+        assert evaluate_trade(stat, 1_000)["verdict"] == "过"
+        assert evaluate_trade(stat, 75_000)["failed"] == ["sig"]
+
+    def test_missing_pairing_reading_is_not_rejected(self):
+        """笔数够但算不出 t：是「这份数据说不了话」，不能报成「已被否掉」。"""
+        r = trade_stat(t_stat=None)
+        assert r["verdict"] == "不判" and "说不了话" in r["note"]
+
+
+class TestTRequired:
+    def test_known_values(self):
+        from stock_selector.backtest.rule_gates import t_required
+
+        assert t_required(1) == pytest.approx(1.645, abs=0.01)
+        assert t_required(1_000) == pytest.approx(3.90, abs=0.05)
+        assert t_required(1_000_000) == pytest.approx(5.33, abs=0.05)
+
+    def test_monotonic_in_trials(self):
+        from stock_selector.backtest.rule_gates import t_required
+
+        assert t_required(10) < t_required(1_000) < t_required(100_000)
