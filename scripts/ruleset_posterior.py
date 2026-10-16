@@ -21,10 +21,19 @@
 判定文法与线上同一个真源：`stock_selector/backtest/rule_expr.py`（结构化条件 ⇄ 表达式 ⇄ 向量化），
 所以这里算出来的东西和 `judge_holding` 不会分家。
 
+两种模式：
+- **规则集回放**（默认）：算一条已生效规则集的持有可信度和各卖出规则事后表现，产物喂给 8001 插件。
+- **候选筛查**（`--candidates`）：一次载入几十条**还没生效**的判据，在同一趟回放里各自与「全体时点」
+  比，逐条按 `stock_selector/backtest/rule_gates.py` 的六道门槛判「过 / 不过」。
+  筛查默认只跑到 `SCREEN_END`（2021-12-31）为止：**2022 年之后是留出段，默认不碰**。
+  三段同号挡得住「只靠某个年代」，挡不住「同一份数据上试了 500 次总有一个对」；
+  留出段只给过筛的少数候选、只读一次（`--from 2022-01-01`）。
+
 用法:
     python scripts/ruleset_posterior.py --dry-run --step 8      # 抽样自检，只打印不落盘
     python scripts/ruleset_posterior.py                          # 全市场 + 写 data/rules/active_posterior.json
     python scripts/ruleset_posterior.py --rules x.json --out y.json --from 2019-01-01
+    python scripts/ruleset_posterior.py --candidates config/rule_candidates.json --out /tmp/screen.json
 """
 
 from __future__ import annotations
@@ -43,13 +52,17 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from stock_selector.backtest import rule_expr  # noqa: E402
+from stock_selector.backtest import rule_expr, rule_gates  # noqa: E402
 from stock_selector.conviction import bucket  # noqa: E402
 
 KLINE_DIR = ROOT / "data" / "stock_kline"
 ACTIVE_FILE = ROOT / "data" / "rules" / "active.json"
 OUT_FILE = ROOT / "data" / "rules" / "active_posterior.json"
+CANDIDATES_FILE = ROOT / "config" / "rule_candidates.json"
 LOG_DIR = ROOT / "logs"
+
+# 筛查默认止于这天：2022-01-01 之后是留出段，跑不到它才算预注册（见文件头）
+SCREEN_END = "2021-12-31"
 
 FWD_SHORT = 10
 FWD_LONG = 20
@@ -92,6 +105,18 @@ def load_rule_set(path: Path) -> dict:
     return {"rule_set_id": data.get("rule_set_id"), "name": str(data.get("name") or ""),
             "sell": sells, "add": adds,
             "fields": sorted(set(fields) | {"close", "low"})}
+
+
+def load_screen(cands: list[dict]) -> dict:
+    """候选筛查用的伪规则集：卖出侧留空，每条候选都当成独立状态求值。
+
+    卖出侧为空 ⇒ `any_sell` 全假 ⇒ `_accumulate` 里的 `add{i}` 就是「这条候选自己触发」，
+    不与其它候选发生 sell 优先的组合关系——筛查阶段要的是单条判据的裸读数，
+    把它们 OR 起来反而看不出该留哪条。
+    """
+    fields = sorted({f for c in cands for f in c["fields"]} | {"close", "low"})
+    return {"rule_set_id": None, "name": f"候选筛查 {len(cands)} 条",
+            "sell": [], "add": [(c["label"], c["expr"]) for c in cands], "fields": fields}
 
 
 # ------------------------------------------------------------------ 累加器
@@ -255,7 +280,7 @@ def flip_soon(mask: np.ndarray, win: int) -> np.ndarray:
 
 
 def replay(files: list[Path], rs: dict, date_list: list[str], day_from: int,
-           progress_cb=None) -> States:
+           day_to: int = 0, progress_cb=None) -> States:
     """progress_cb(已完成块数, 总块数)：Celery 侧要按块更新进度，命令行跑就不传。"""
     axis = np.array(date_list, dtype="datetime64[ns]")
     st = States(len(date_list))
@@ -266,7 +291,7 @@ def replay(files: list[Path], rs: dict, date_list: list[str], day_from: int,
     for bi, block in enumerate(blocks):
         cols = _load_block(block, rs["fields"], axis)
         if cols is not None:
-            _accumulate(st, cols, rs, names, day_from)
+            _accumulate(st, cols, rs, names, day_from, day_to)
         del cols
         if progress_cb is not None:
             progress_cb(bi + 1, len(blocks))
@@ -297,7 +322,8 @@ def _load_block(files: list[Path], fields: list[str], axis: np.ndarray) -> dict 
     return {f: mat[f][:, :kept] for f in fields}
 
 
-def _accumulate(st: States, cols: dict, rs: dict, names: list[str], day_from: int) -> None:
+def _accumulate(st: States, cols: dict, rs: dict, names: list[str], day_from: int,
+                day_to: int = 0) -> None:
     close = cols["close"]
     low = cols["low"]
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -309,6 +335,8 @@ def _accumulate(st: States, cols: dict, rs: dict, names: list[str], day_from: in
               & np.isfinite(mc20) & np.isfinite(ml20))
     if day_from:
         judged[:day_from] = False
+    if day_to:
+        judged[day_to:] = False
     flat = mc20 > FLAT_GAIN
     fly = f20 > FLY_GAIN
     t8 = ml20 <= TAIL8
@@ -376,6 +404,83 @@ def build_payload(st: States, rs: dict, date_list: list[str], n_files: int) -> d
     return payload
 
 
+def build_screen_payload(st: States, cands: list[dict],
+                         date_list: list[str], n_files: int) -> dict:
+    """每条候选各自与「全体时点」比，再按 rule_gates 的六道门槛判过没过。"""
+    all_slot = st.get("all")
+    judged_points = int(all_slot["cnt"].sum()) if all_slot is not None else 0
+    rows = []
+    for i, c in enumerate(cands):
+        stat = summarize(st, f"add{i}", "all", date_list)
+        tpy = rule_gates.trigger_days_per_year(int(stat.get("n") or 0), judged_points)
+        g = rule_gates.evaluate_state(stat, c["side"], tpy)
+        rows.append({**c, "trigger_days_per_year": round(tpy, 1),
+                     **stat, "verdict": g["verdict"], "failed": g["failed"],
+                     "checks": g["checks"], "note": g["note"]})
+    # 过的排前面、其余按 |t| 降序：让人先看「差在哪一道」而不是翻 20 段
+    rows.sort(key=lambda r: (r["verdict"] != "过",
+                             -abs(r.get("vs_base_t") or 0)))
+    passed = [r for r in rows if r["verdict"] == "过"]
+    return {
+        "version": 1, "kind": "candidate_screen",
+        "computed_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "gates": {
+            "min_points": rule_gates.MIN_POINTS, "min_days": rule_gates.MIN_DAYS,
+            "min_abs_t": rule_gates.MIN_T, "round_trip_pp": rule_gates.ROUND_TRIP_PP,
+            "max_trigger_days_per_year": rule_gates.MAX_TRIGGER_DAYS_PER_YEAR,
+            "horizon_days": FWD_LONG, "flat_threshold_pct": round(abs(FLAT_GAIN) * 100, 2),
+            "meaning": ("sell 候选要在触发点上圈出「后 20 日比全体更差」的样本（lift<1、"
+                        "20日超额为负）；add 候选相反。六道门槛全过才给「过」，"
+                        "任一不过就保留基线并记下差在哪一道。"),
+        },
+        "universe": {"days": len(date_list), "files": n_files, "st_excluded": True,
+                     "judged_points": judged_points,
+                     "range": [date_list[0], date_list[-1]]},
+        "base": summarize(st, "all", "all", date_list),
+        "candidates": rows, "passed_ids": [r["id"] for r in passed],
+    }
+
+
+def _fmt(v, spec: str) -> str:
+    """没有配对读数时显示「—」而不是补 0：lift 0.000 看起来像「极端有效」，
+    实际是这段区间样本天数不足、压根没算出这个数。"""
+    return format(v, spec) if v is not None else "  —  "
+
+
+def render_screen(p: dict) -> str:
+    g, u = p["gates"], p["universe"]
+    lines = [f"候选筛查：{len(p['candidates'])} 条判据、同一趟回放，"
+             f"{u['range'][0]}→{u['range'][1]}（{u['days']} 个交易日、{u['judged_points']:,} 个可判时点），"
+             f"剔 ST、观测窗 T+{g['horizon_days']} 交易日、日等权同日配对、不含成本",
+             f"门槛：n≥{g['min_points']:,} 且日≥{g['min_days']} · |t|≥{g['min_abs_t']} · "
+             f"三段时代同号 · 20日超额同号且 ≥{g['round_trip_pp']}pp · "
+             f"年均每票触发≤{g['max_trigger_days_per_year']:g} 天",
+             "⚠️ 未覆盖的两道筛（要过筛候选再用 build_judgement_ledger.py --ab-rules 复验）："
+             "灾难点 p5 预警率、代码对半抽样同号"]
+    b = p["base"]
+    lines.append(f"  全体基准：未跌超{abs(g['flat_threshold_pct']):.0f}% "
+                 f"{b.get('flat_pct', float('nan')):.2f}%（{b.get('n', 0):,} 个时点）")
+    for r in p["candidates"]:
+        if not r.get("n"):
+            lines.append(f"  [{r['verdict']}] {r['side']:4s} {r['label'][:20]:20s} n=0 —— 从未触发")
+            continue
+        why = f"｜机制：{r['why'][:46]}"
+        lines.append(f"  [{r['verdict']}] {r['side']:4s} {r['label'][:20]:20s} "
+                     f"n={r['n']:>10,}/{r['days']:>5,}日 触发{r['trigger_days_per_year']:5.1f}天/年 "
+                     f"未跌超3% {r['flat_pct']:6.2f}% lift {_fmt(r.get('lift'), '.3f')} "
+                     f"t {_fmt(r.get('vs_base_t'), '+6.1f')} "
+                     f"超额20 {_fmt(r.get('exc20_pp'), '+6.2f')}pp "
+                     f"时代 {r.get('era_flat_diff_pp') or '—'}")
+        if r["verdict"] != "过":
+            bad = [f"{c['name']}（要 {c['need']}，实测 {c['got']}）"
+                   for c in r["checks"] if not c["ok"]]
+            lines.append(f"          └ {'；'.join(bad) or r['note']}")
+        lines.append(f"          {r['expr']}{why}")
+    lines.append(f"\n过筛 {len(p['passed_ids'])} 条："
+                 + (", ".join(p["passed_ids"]) if p["passed_ids"] else "无"))
+    return "\n".join(lines)
+
+
 def render(p: dict) -> str:
     c = p["contract"]
     lines = [f"规则集「{p['name']}」回放：{p['universe']['range'][0]}→{p['universe']['range'][1]}，"
@@ -415,34 +520,52 @@ def main() -> None:
 
     ap = argparse.ArgumentParser(description="规则集全市场回放：持有可信度 + 各卖出规则事后表现")
     ap.add_argument("--rules", default=str(ACTIVE_FILE))
+    ap.add_argument("--candidates", default="", help="候选判据清单 JSON；给了就走筛查模式，不读 --rules")
     ap.add_argument("--kline-dir", default=str(KLINE_DIR))
     ap.add_argument("--out", default=str(OUT_FILE))
     ap.add_argument("--step", type=int, default=1, help="每 N 个文件取 1 个（自检用）")
     ap.add_argument("--block", type=int, default=BLOCK)
     ap.add_argument("--from", dest="date_from", default="", help="只统计这天及以后的时点")
+    ap.add_argument("--to", dest="date_to", default="",
+                    help=f"只统计这天及以前的时点；筛查模式默认 {SCREEN_END}（留出段默认不碰）")
     ap.add_argument("--dry-run", action="store_true", help="只打印，不写 JSON")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
     setup_logging(args.verbose)
 
-    rules_path = Path(args.rules)
-    if not rules_path.is_file():
-        logger.error("规则集不存在：%s（先在管理页面「应用」一条）", rules_path)
-        raise SystemExit(2)
-    rs = load_rule_set(rules_path)
-    logger.info("规则集 %s：卖出 %d 条、加仓 %d 条，用到列 %s",
-                rs["name"] or rules_path.name, len(rs["sell"]), len(rs["add"]), rs["fields"])
+    screen = bool(args.candidates)
+    if screen:
+        cands = rule_gates.load_candidates(Path(args.candidates))
+        rs = load_screen(cands)
+        args.date_to = args.date_to or SCREEN_END
+        logger.info("筛查模式：%d 条候选，用到列 %s，止于 %s（留出段不碰）",
+                    len(cands), ",".join(rs["fields"]), args.date_to or "数据末尾")
+    else:
+        rules_path = Path(args.rules)
+        if not rules_path.is_file():
+            logger.error("规则集不存在：%s（先在管理页面「应用」一条）", rules_path)
+            raise SystemExit(2)
+        rs = load_rule_set(rules_path)
+        logger.info("规则集 %s：卖出 %d 条、加仓 %d 条，用到列 %s",
+                    rs["name"] or rules_path.name, len(rs["sell"]), len(rs["add"]), rs["fields"])
 
     BLOCK = max(50, args.block)
     files = sorted(Path(args.kline_dir).glob("*.parquet"))[:: max(1, args.step)]
     date_list, _ = scan_universe(files, rs["fields"])
-    day_from = int(np.searchsorted(np.array(date_list, dtype=object), args.date_from)) \
-        if args.date_from else 0
+    day_axis = np.array(date_list, dtype=object)
+    day_from = int(np.searchsorted(day_axis, args.date_from)) if args.date_from else 0
+    day_to = int(np.searchsorted(day_axis, args.date_to)) + 1 if args.date_to else 0
     if args.date_from:
         logger.info("--from %s → 从第 %d/%d 个交易日开始", args.date_from, day_from, len(date_list))
-    st = replay(files, rs, date_list, day_from)
-    payload = build_payload(st, rs, date_list, len(files))
-    print(render(payload))
+    if args.date_to:
+        logger.info("--to %s → 只统计到第 %d/%d 个交易日", args.date_to, day_to - 1, len(date_list))
+    st = replay(files, rs, date_list, day_from, day_to)
+    if screen:
+        payload = build_screen_payload(st, cands, date_list, len(files))
+        print(render_screen(payload))
+    else:
+        payload = build_payload(st, rs, date_list, len(files))
+        print(render(payload))
     if not args.dry_run:
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
