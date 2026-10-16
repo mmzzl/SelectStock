@@ -51,12 +51,19 @@ def _cleanup(store_db, task_id):
     store_db["backtest_equity"].delete_many({"task_id": task_id})
 
 
+@pytest.fixture(autouse=True)
+def _no_leftover(store_db, sample_result):
+    """用例跑的是本机真实 Mongo，前后都清一次，免得 test-task-001 留在结果库里被当成真回测。"""
+    _cleanup(store_db, sample_result.task_id)
+    yield
+    _cleanup(store_db, sample_result.task_id)
+
+
 class TestStore:
     def test_save_result_persists_to_three_collections(self, store_db, sample_result):
         from stock_selector.backtest.store import BacktestStore
 
         store = BacktestStore(store_db)
-        _cleanup(store_db, sample_result.task_id)
         store.save_result(sample_result)
 
         assert store_db["backtest_results"].find_one(
@@ -73,7 +80,6 @@ class TestStore:
         from stock_selector.backtest.store import BacktestStore
 
         store = BacktestStore(store_db)
-        _cleanup(store_db, sample_result.task_id)
         store.save_result(sample_result)
 
         summary = store.load_summary(sample_result.task_id)
