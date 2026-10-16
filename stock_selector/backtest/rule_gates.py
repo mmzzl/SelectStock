@@ -63,6 +63,14 @@ GATE_NAMES = {
 }
 
 
+def other_side(side: str) -> str:
+    """候选的 side 是人猜的，猜错时数据会自己纠正：筛查里两条边都判一遍，
+     declared 不过而对面过了就报「反侧」，别让它静悄悄躺在「不过」那堆里。"""
+    if side not in SIDES:
+        raise ValueError(f"side 只能是 {' 或 '.join(SIDES)}，收到 {side!r}")
+    return "add" if side == "sell" else "sell"
+
+
 def expected_sign(side: str) -> int:
     """卖出判据要圈中「后来更差」的点（−1），加仓判据要圈中「后来更好」的点（+1）。"""
     if side not in SIDES:

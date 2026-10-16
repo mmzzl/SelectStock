@@ -424,13 +424,21 @@ def build_screen_payload(st: States, cands: list[dict],
         stat = summarize(st, f"add{i}", "all", date_list)
         tpy = rule_gates.trigger_days_per_year(int(stat.get("n") or 0), judged_points)
         g = rule_gates.evaluate_state(stat, c["side"], tpy)
+        other = rule_gates.other_side(c["side"])
+        go = rule_gates.evaluate_state(stat, other, tpy)
+        flipped = g["verdict"] != "过" and go["verdict"] == "过"
         rows.append({**c, "trigger_days_per_year": round(tpy, 1),
-                     **stat, "verdict": g["verdict"], "failed": g["failed"],
-                     "checks": g["checks"], "note": g["note"]})
+                     **stat, "flipped": flipped, "other_side": other,
+                     "verdict": "反侧" if flipped else g["verdict"],
+                     "failed": g["failed"], "checks": g["checks"],
+                     "note": (f"声明的是 {c['side']}，但门槛在 {other} 侧全过："
+                              f"这条该按「{'买入' if other == 'add' else '卖出'}」条件用"
+                              if flipped else g["note"])})
     # 过的排前面、其余按 |t| 降序：让人先看「差在哪一道」而不是翻 20 段
-    rows.sort(key=lambda r: (r["verdict"] != "过",
+    rows.sort(key=lambda r: (r["verdict"] not in ("过", "反侧"),
                              -abs(r.get("vs_base_t") or 0)))
     passed = [r for r in rows if r["verdict"] == "过"]
+    flipped_rows = [r for r in rows if r["flipped"]]
     return {
         "version": 1, "kind": "candidate_screen",
         "computed_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -449,6 +457,7 @@ def build_screen_payload(st: States, cands: list[dict],
                      "axis_range": [date_list[0], date_list[-1]]},
         "base": summarize(st, "all", "all", date_list),
         "candidates": rows, "passed_ids": [r["id"] for r in passed],
+        "flipped_ids": [r["id"] for r in flipped_rows],
     }
 
 
@@ -483,13 +492,17 @@ def render_screen(p: dict) -> str:
                      f"t {_fmt(r.get('vs_base_t'), '+6.1f')} "
                      f"超额20 {_fmt(r.get('exc20_pp'), '+6.2f')}pp "
                      f"时代 {r.get('era_flat_diff_pp') or '—'}")
-        if r["verdict"] != "过":
+        if r["verdict"] not in ("过", "反侧"):
             bad = [f"{c['name']}（要 {c['need']}，实测 {c['got']}）"
                    for c in r["checks"] if not c["ok"]]
             lines.append(f"          └ {'；'.join(bad) or r['note']}")
+        elif r["verdict"] == "反侧":
+            lines.append(f"          └ {r['note']}")
         lines.append(f"          {r['expr']}{why}")
     lines.append(f"\n过筛 {len(p['passed_ids'])} 条："
                  + (", ".join(p["passed_ids"]) if p["passed_ids"] else "无"))
+    if p["flipped_ids"]:
+        lines.append("反侧（side 猜错、对面全过）：" + ", ".join(p["flipped_ids"]))
     return "\n".join(lines)
 
 

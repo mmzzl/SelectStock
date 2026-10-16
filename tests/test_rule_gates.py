@@ -167,3 +167,30 @@ class TestLoadCandidates:
         p = self._write(tmp_path, {"candidates": cands})
         with pytest.raises(ValueError, match="候选"):
             load_candidates(p)
+
+
+class TestOtherSide:
+    """side 是人猜的：猜错时不能把「其实是买入信号」静悄悄判成不过。"""
+
+    def test_other_side_is_the_opposite(self):
+        from stock_selector.backtest import rule_gates
+
+        assert rule_gates.other_side("sell") == "add"
+        assert rule_gates.other_side("add") == "sell"
+
+    def test_other_side_rejects_unknown(self):
+        from stock_selector.backtest import rule_gates
+
+        with pytest.raises(ValueError, match="side"):
+            rule_gates.other_side("hold")
+
+    def test_a_buy_shape_fails_sell_and_passes_add(self):
+        """同一份读数（涨得动、超额为正）：按卖出判是不合格，按买入判全过。"""
+        from stock_selector.backtest import rule_gates
+
+        stat = {"n": 13647, "days": 1564, "lift": 1.331, "vs_base_t": 15.4,
+                "era_flat_diff_pp": "12.37,15.50,7.29", "exc20_pp": 2.35}
+        as_sell = rule_gates.evaluate_state(stat, "sell", 0.7)
+        as_add = rule_gates.evaluate_state(stat, "add", 0.7)
+        assert as_sell["verdict"] == "不过"
+        assert as_add["verdict"] == "过"
