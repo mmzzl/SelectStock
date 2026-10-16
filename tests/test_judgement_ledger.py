@@ -200,11 +200,25 @@ def test_judge_matrix_add_without_sell():
     assert action[0, 0] == 2
 
 
-def test_judge_matrix_refuses_unknown_rule_shape():
-    """规则被改成不可向量化的形状时必须停下来，不能静默按另一套口径算。"""
-    arr = {k: np.zeros((2, 1)) for k in ("close", "ma5", "ma10", "rsi14")}
+def test_judge_matrix_vectorizes_any_rule_from_the_grammar():
+    """规则集可以是任意多条规则的 OR/AND 复合串——判定必须和插件逐行求值同口径，不再挑形状。"""
+    arr = {"close": np.array([[9.4], [11.0], [11.0]]),
+           "ma10": np.array([[10.0]] * 3), "ma5": np.array([[10.0]] * 3),
+           "rsi14": np.array([[80.0], [80.0], [95.0]])}
+    rules = dict(DEFAULT_RULES, sell="close <= ma10 * 0.95 or rsi14 > 90")
+    action, sell = mod.judge_matrix(arr, rules)
+    # 第 1 根靠跌破线触发、第 3 根靠 RSI 触发（OR 的两条腿各自都要能响）
+    assert sell.tolist() == [[True], [False], [True]]
+    assert action.tolist() == [[1], [3], [1]]    # sell 优先；都不触发才是 hold
+
+
+def test_rule_columns_stops_on_unparsable_rule():
+    """表达式不在文法/白名单里时台账要炸在取列这一步，不能按另一种口径算完再落盘。"""
     with pytest.raises(SystemExit):
-        mod.judge_matrix(arr, dict(DEFAULT_RULES, sell="close < ma10 and rsi14 < 30"))
+        mod.rule_columns({"sell": "close < mystery_col", "add": ""})
+    with pytest.raises(SystemExit):
+        mod.rule_columns({"sell": "(close < ma10)", "add": ""})
+    assert set(mod.rule_columns(DEFAULT_RULES)) >= {"date", "close", "ma10", "rsi14", "ma5"}
 
 
 def test_build_rows_maps_matrix_cells_back_to_date_and_code():
@@ -235,7 +249,8 @@ def test_load_kline_aligns_rows_by_date_not_position(tmp_path):
     write("000002", list(reversed(axis)), 5.0)            # 日期乱序
     write("000001", axis[:-1], 1.0)                        # 最后一天缺（停牌）
     write("000003", axis[:59], 9.0)                        # 不足 60 行 → 丢弃
-    dates, codes, arr = mod.load_kline(sorted(tmp_path.glob("*.parquet")))
+    dates, codes, arr = mod.load_kline(sorted(tmp_path.glob("*.parquet")),
+                                             mod.rule_columns(DEFAULT_RULES))
     assert dates == axis                                  # 日期轴按字符串序=时间序
     assert codes == ["000001", "000002"]
     i1, i2 = codes.index("000001"), codes.index("000002")

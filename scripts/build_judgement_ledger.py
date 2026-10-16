@@ -49,7 +49,6 @@ MEMBER_FILE = ROOT / "data" / "sector_heat" / "member.parquet"
 OUT_DIR = ROOT / "data" / "judgement_ledger"
 LOG_DIR = ROOT / "logs"
 
-KLINE_COLUMNS = ["date", "close", "ma5", "ma10", "rsi14"]
 # --ab-rules 只要退出侧，多读几列指标、不碰热度也不落台账
 AB_COLUMNS = ["date", "close", "ma10", "ma20", "atr14", "pos60", "boll_lower"]
 FWD_LABEL = 10          # 学业窗口：T+10 交易日
@@ -89,8 +88,7 @@ def setup_logging(verbose: bool = False) -> None:
     logger.addHandler(fh)
 
 
-def load_kline(files: list[Path], columns: list[str] = KLINE_COLUMNS
-               ) -> tuple[list[str], list[str], dict[str, np.ndarray]]:
+def load_kline(files: list[Path], columns: list[str]) -> tuple[list[str], list[str], dict[str, np.ndarray]]:
     """读全市场日线到稠密矩阵（日期 × 代码）。返回 (dates, codes, {列名: ndarray})。
 
     分两遍扫：第一遍只收日期轴，第二遍逐票填完就把 DataFrame 扔掉。一遍存不下——6,600 个
@@ -127,29 +125,39 @@ def load_kline(files: list[Path], columns: list[str] = KLINE_COLUMNS
     return date_list, code_list, arr
 
 
+def rule_columns(rules: dict) -> list[str]:
+    """这套规则用到哪些列：台账只读这些列，规则一改就不用再手改常量清单。
+
+    表达式不合法时直接停下来——台账和线上判定不一致，后验就成了假数。
+    """
+    from stock_selector.backtest import rule_expr
+
+    fields: set[str] = {"close"}
+    for name in ("sell", "add"):
+        expr = rules.get(name) or ""
+        try:
+            fields |= set(rule_expr.validate(expr))
+        except rule_expr.RuleSyntaxError as exc:
+            raise SystemExit(f"台账拒绝求值 {name}={expr!r}：{exc}")
+    return ["date", *sorted(fields)]
+
+
 def judge_matrix(arr: dict[str, np.ndarray], rules: dict[str, str]) -> tuple[np.ndarray, np.ndarray]:
     """按插件规则串逐格判定 → int8：1=sell 2=add 3=hold 0=不能判。
 
-    规则串与插件同真源（`load_rules()`），但台账是全市场稠密矩阵，只对**可向量化**的形状做批量。
-    规则被 JSON 改成复合表达式（含 and/or）时宁可报错停下来，也不要在这里静默降级成另一种口径——
-    台账和线上判定不一致，后验就成了假数。
+    求值走 `rule_expr.eval_matrix`，和 8001 持仓诊断的 `RuleEvaluator` 是同一份文法、
+    同一条表达式（`load_rules()` 给的 sell 串是规则集里各条的 OR），所以「全部不触发」这个
+    状态在台账、回放、线上三边是同一个意思。缺列会抛 RuleSyntaxError：那是上面
+    `rule_columns()` 漏了列，宁可炸也不要按另一种口径算完再落盘。
     """
-    close, ma5, ma10, rsi = arr["close"], arr["ma5"], arr["ma10"], arr["rsi14"]
-    simple = {
-        "price <= ma10 * 0.95": lambda: close <= ma10 * np.float32(0.95),
-        "": lambda: np.zeros(close.shape, dtype=bool),
-        "close >= ma5 * 1.03 and rsi14 <= 65": lambda: (close >= ma5 * np.float32(1.03)) & (rsi <= 65),
-    }
-    for name, fn in (("sell", rules["sell"]), ("add", rules["add"])):
-        if fn not in simple:
-            raise SystemExit(
-                f"台账只能批量求值已知形状的规则，{name}={fn!r} 不在其中。"
-                f"要么改回默认（与回测同构的简单比较），要么把台账口径一起改成向量化实现，"
-                f"不能在这里悄悄按另一套规则算。")
-    sell = simple[rules["sell"]]()
-    add = simple[rules["add"]]()
+    from stock_selector.backtest import rule_expr
+
+    close = arr["close"]
+    with np.errstate(invalid="ignore"):
+        sell = rule_expr.eval_matrix(rules["sell"], arr)
+        add = rule_expr.eval_matrix(rules["add"], arr)
     action = np.zeros(close.shape, dtype=np.int8)
-    judged = np.isfinite(close) & np.isfinite(ma10)
+    judged = np.isfinite(close)
     action[judged] = 3
     action[judged & add] = 2
     action[judged & sell] = 1          # sell 优先，和 judge_holding 一致
@@ -627,11 +635,12 @@ def main() -> None:
         print(ab_report(date_list, code_list, arr))
         logger.info("并跑用时 %.0fs", time.time() - t0)
         return
-    date_list, code_list, arr = load_kline(files)
+    date_list, code_list, arr = load_kline(files, rule_columns(rules))
     action, sell = judge_matrix(arr, rules)
-    del arr["ma5"], arr["ma10"], arr["rsi14"]   # 上 GB 的稠密矩阵，用完一段扔一段
-    heat = heat_matrix(code_list, arr["close"])
-    fwd10, fwd20, flip = labels(action, sell, arr["close"])
+    close = arr.pop("close")
+    arr.clear()                       # 上 GB 的稠密矩阵，判定完只留 close
+    heat = heat_matrix(code_list, close)
+    fwd10, fwd20, flip = labels(action, sell, close)
     del arr, sell
     ledger = build_rows(date_list, code_list, action, heat, fwd10, fwd20, flip)
     del action, heat, fwd10, fwd20, flip

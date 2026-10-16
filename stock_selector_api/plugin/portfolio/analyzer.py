@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 
-from portfolio import conviction, posterior
+from portfolio import conviction, hold_confidence, posterior
 from portfolio.judge import (HOLD_FLIP_PCT, HOLD_TAIL_P5_PCT, judge_holding,
                             sell_trigger_price)
 from portfolio.revenue import snapshot, summarize
@@ -34,15 +34,17 @@ def analyze_holdings(holdings: list[dict], provider, quotes: dict | None = None)
         price = _price_for(h["code"], row, quotes)
         base["action"], base["action_reason"] = judge_holding(
             row, rules["sell"], rules["add"], cost_price=cost, price=price,
-            disaster_stop_pct=rules["disaster_stop_pct"])
+            disaster_stop_pct=rules["disaster_stop_pct"],
+            sell_rules=rules.get("sell_rules"), add_rules=rules.get("add_rules"))
         # 可信度（剧本成功率）+ 博弈代理：模型缺失/核心特征不齐/ST 时自动回 None，不进 suggestion
         base.update(conviction.evaluate(row))
         # 价格线由同一条 sell 表达式反算（见 stock_selector/backtest/rule_trigger.py），
         # 和上面的判定同内核，不会出现「理由是跌破均线、给出的价却对不上」
-        base["sell_trigger_price"] = sell_trigger_price(row, rules["sell"])
+        base["sell_trigger_price"] = sell_trigger_price(row, rules["sell"], rules.get("sell_rules"))
         base["latest_price"] = round(price, 2)
         base["holding_pnl"] = round((base["latest_price"] - cost) * qty, 2)
         base["pnl_pct"] = round(((base["latest_price"] - cost) / cost * 100), 2) if cost > 0 else 0.0
+        base.update(hold_confidence.evaluate(base["action"], row, rules))
         base["suggestion"] = _conviction_line(base, cost, qty)
         results.append(base)
     return {"results": results, "summary": summarize(results)}
@@ -66,6 +68,12 @@ def _conviction_line(base: dict, cost: float, qty: int) -> str:
         bits.append(f"均线卖点在下方 {gap:.1f}%" if gap > 0 else f"已跌破均线卖点 {abs(gap):.1f}%")
     else:
         bits.append("本判据不含价格线")
+    # 方案 B 的那一行：hold 印「全部卖出规则都不触发」这个联合状态的事后分布，
+    # sell 印**响的那条规则**自己的兑现率/卖飞率。它和下面的台账后验不是同一张表：
+    # 台账是「判成这个状态的点」的整体分布，这里是「当前这套自定义规则集」回放出来的。
+    conf = str(base.get("hold_confidence_text") or "").strip()
+    if conf:
+        bits.append(conf)
     if base["action"] == "hold":
         bits.extend(_posterior_bits(base["action"], price, qty))
     else:
