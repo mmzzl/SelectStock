@@ -165,6 +165,17 @@
 
     // 系统监控
     systemMetrics: () => request('GET', '/system/metrics'),
+
+    // 规则集（页面自定义卖出/加仓判据；应用即切换线上生效判定并投递全市场回放）
+    ruleSetOptions: () => request('GET', '/rule-sets/options'),
+    ruleSetActive: () => request('GET', '/rule-sets/active'),
+    ruleSets: (p) => request('GET', '/rule-sets?page=' + (p.page || 1) + '&size=' + (p.size || 20)),
+    ruleSetDetail: (id) => request('GET', '/rule-sets/' + encodeURIComponent(id)),
+    createRuleSet: (d) => request('POST', '/rule-sets', d),
+    updateRuleSet: (id, d) => request('PUT', '/rule-sets/' + encodeURIComponent(id), d),
+    deleteRuleSet: (id) => request('DELETE', '/rule-sets/' + encodeURIComponent(id)),
+    applyRuleSet: (id) => request('POST', '/rule-sets/' + encodeURIComponent(id) + '/apply'),
+    replayRuleSet: (id) => request('POST', '/rule-sets/' + encodeURIComponent(id) + '/replay'),
   };
 
   window.API = api;

@@ -13,6 +13,7 @@
     { key: 'start', label: '起始日期', type: 'date' },
     { key: 'end', label: '结束日期', type: 'date' },
     { key: 'strategy', label: '策略来源', type: 'select' },
+    { key: 'rule_set_id', label: '规则集判据（留空=用 MongoDB trading_rules；与策略来源二选一）', type: 'rule_set' },
     { key: 'capital', label: '初始资金', type: 'number', step: '1000' },
     { key: 'max_positions', label: '持仓只数上限', type: 'number' },
     { key: 'position_cap_pct', label: '单票仓位上限（0~1）', type: 'number', step: '0.01' },
@@ -97,11 +98,21 @@
       esc(job.stage || '') + '</span>';
   }
 
-  function formHtml() {
+  function formHtml(sets, prefillId) {
     const d = opts.defaults || {};
     const strategyOptions = [{ value: '', label: '规则回测（MongoDB trading_rules）' }]
       .concat((opts.strategies || []).map((s) => ({ value: s, label: '选股策略同源：' + s })));
+    const ruleSetOptions = [{ value: '', label: '不用规则集（按 MongoDB trading_rules 判定）' }]
+      .concat((sets || []).map((s) => ({ value: s.id, label: s.name + (s.is_active ? '（生效中）' : '') })));
+    if (prefillId && !ruleSetOptions.some((o) => o.value === prefillId)) {
+      // 从规则集页跳转过来，但当前账号列不出规则集（或翻页没看到）：仍按 id 提交，
+      // 判据串由后端注入快照，回测结论对的就是那一套规则
+      ruleSetOptions.push({ value: prefillId, label: '规则集 ' + String(prefillId).slice(0, 8) + '…（规则集页跳转）' });
+    }
     return FIELDS.map((f) => {
+      if (f.type === 'rule_set') {
+        return AppUI.fSelect(f.key, f.label, ruleSetOptions, prefillId || '');
+      }
       const value = d[f.key] === null || d[f.key] === undefined ? '' : String(d[f.key]);
       if (f.type === 'select') {
         return AppUI.fSelect(f.key, f.label, strategyOptions, value);
@@ -130,7 +141,13 @@
 
   async function openRunForm() {
     if (!opts) opts = await API.backtestOptions();
-    AppUI.openForm('发起回测', formHtml(), async (form) => {
+    // 规则集页「回测」按钮留下的跳转：读一次就用掉，避免下次打开表单还带着旧规则
+    const prefillId = sessionStorage.getItem('bt_prefill_rule_set') || '';
+    sessionStorage.removeItem('bt_prefill_rule_set');
+    const sets = App.can('rule_set:list')
+      ? (await API.ruleSets({ page: 1, size: 100 })).items || []
+      : [];
+    AppUI.openForm('发起回测', formHtml(sets, prefillId), async (form) => {
       const data = await API.backtestRun(collect(form));
       AppUI.toast('回测任务已投递：' + data.job_id, 'success');
       await loadJobs();
@@ -167,6 +184,7 @@
 
   function detailHtml(job) {
     const r = job.result || {};
+    const p = job.params || {};
     const m = r.metrics || {};
     const cards = [
       ['总收益', fmtRatio(m.total_return)], ['年化', fmtRatio(m.annual_return)],
@@ -174,9 +192,14 @@
       ['夏普', fmtNum(m.sharpe, 2)], ['利润因子(总盈/总亏)', fmtNum(m.profit_factor, 2)],
       ['赔率(均盈/均亏)', fmtNum(m.payoff_ratio, 2)], ['单笔期望(元)', fmtNum(m.expectancy, 0)],
     ];
+    // 规则集回测要把当时注入的判据串亮出来：结果能不能和规则集页面对上，看这一行
+    const snapshot = p.sell_rule
+      ? '<div class="hint">判据快照（规则集 ' + esc(String(p.rule_set_id || '-')) + '）：卖出 ' +
+        esc(p.sell_rule) + ' ｜ 加仓 ' + esc(p.add_rule || '无') + '</div>'
+      : '';
     return '<div class="hint">策略 ' + esc(job.result ? r.strategy : '-') + ' · ' +
       esc(r.start_date || '') + ' ~ ' + esc(r.end_date || '') +
-      ' · 内核任务号 ' + esc(r.task_id || '-') + '</div>' +
+      ' · 内核任务号 ' + esc(r.task_id || '-') + '</div>' + snapshot +
       '<div class="cards">' + cards.map((c) =>
         '<div class="card num" style="min-width:110px">' + esc(c[0]) + '<b style="font-size:20px">' +
         esc(c[1]) + '</b></div>').join('') + '</div>' +
@@ -208,7 +231,12 @@
 
   const COLUMNS = [
     { label: '创建时间', width: '150px', render: (r) => esc(fmtTime(r.created_at)) },
-    { label: '策略', width: '140px', render: (r) => esc((r.params || {}).strategy || '规则回测') },
+    { label: '策略', width: '140px', render: (r) => {
+      const p = r.params || {};
+      if (p.strategy) return esc(p.strategy);
+      // 规则集回测和裸规则回测必须看得出区别，否则「用这套规则跑出来的结果」没法对账
+      return p.rule_set_id ? esc('规则集 ' + String(p.rule_set_id).slice(0, 8)) : '规则回测';
+    } },
     { label: '区间', width: '170px', render: (r) => esc((r.params || {}).start + ' ~ ' + (r.params || {}).end) },
     { label: '状态', width: '90px', render: statusTag },
     { label: '进度', width: '200px', render: bar },

@@ -231,8 +231,9 @@ def _posterior_payload():
                        "lift": 0.965, "vs_base_t": -8.54, "tail8_pct": 6.1,
                        "tail8_lift": 0.9, "enough": True},
         "sell_rules": [{"label": "RSI 超买", "expr": "rsi14 > 90", "n": 512, "days": 210,
-                        "flat_pct": 14.4, "fly_pct": 85.6, "tail8_pct": 3.1, "tail8_lift": 0.42,
-                        "median_ret_pct": 2.4, "exc20_pp": 1.1, "enough": True}],
+                        "flat_pct": 14.4, "base_pct": 34.83, "lift": 0.413, "vs_base_t": -12.1,
+                        "fly_pct": 85.6, "tail8_pct": 3.1, "tail8_lift": 0.42,
+                        "median_ret_pct": 2.4, "exc20_pp": -6.1, "enough": True}],
         "add_rules": [],
     }
 
@@ -258,6 +259,10 @@ async def test_sync_replay_progress_then_success_stores_brief(sent, monkeypatch)
     stored = json.loads((await rule_sets_repo.get(row["id"]))["posterior"])
     assert stored["sell_rules"][0]["fly_pct"] == 85.6
     assert "equity" not in json.dumps(stored)
+    # 详情页要能列出逐条统计，列表不带（一页 20 行没必要拖 JSON）
+    assert detail["posterior"]["sell_rules"][0]["label"] == "RSI 超买"
+    assert detail["posterior"]["sell_rules"][0]["lift"] == 0.413   # 逐条也用 lift+t 判区分度
+    assert "posterior" not in (await svc.list_rule_sets(1, 20))["items"][0]
 
     state["state"], state["payload"] = "PROGRESS", {"progress": 1}
     # 终态后不再查 Celery

@@ -162,7 +162,10 @@ def _decorate(row: dict, full: bool) -> dict:
         out["hold_confidence_t"] = joint.get("vs_base_t")
     else:
         out["hold_confidence_pct"] = None
-    if not full:
+    if full:
+        # 详情页要展示逐条回放统计（每条卖出规则各自有没有区分度），列表只留合计那几个数
+        out["posterior"] = summary
+    else:
         for key in ("sell_expr", "add_expr", "celery_task_id"):
             out.pop(key, None)
     return out
@@ -352,12 +355,14 @@ def _brief(summary: dict) -> dict:
         "joint_hold": {k: joint.get(k) for k in ("n", "days", "flat_pct", "base_pct",
                                                   "lift", "vs_base_t", "tail8_pct",
                                                   "tail8_lift", "enough")},
-        "sell_rules": [{k: r.get(k) for k in ("label", "expr", "n", "days", "flat_pct",
-                                              "fly_pct", "tail8_pct", "tail8_lift",
-                                              "median_ret_pct", "exc20_pp", "enough")}
+        # 逐条也用同一把尺子（lift + 配对 t），页面才能统一判「无区分度」
+        "sell_rules": [{k: r.get(k) for k in ("label", "expr", "n", "days", "flat_pct", "base_pct",
+                                              "lift", "vs_base_t", "fly_pct", "tail8_pct",
+                                              "tail8_lift", "median_ret_pct", "exc20_pp", "enough")}
                        for r in summary.get("sell_rules") or []],
-        "add_rules": [{k: r.get(k) for k in ("label", "expr", "n", "days", "fly_pct",
-                                             "exc20_pp", "enough")}
+        "add_rules": [{k: r.get(k) for k in ("label", "expr", "n", "days", "flat_pct", "base_pct",
+                                             "lift", "vs_base_t", "fly_pct", "tail8_pct",
+                                             "median_ret_pct", "exc20_pp", "enough")}
                       for r in summary.get("add_rules") or []],
     }
 
