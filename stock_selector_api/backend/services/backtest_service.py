@@ -16,7 +16,7 @@ from core.backtest_params import form_spec, validate
 from core.exceptions import BizError, NotFoundError
 from db.sql.base import new_uuid
 from repositories import backtest_jobs_repo
-from services import inbox_notify
+from services import inbox_notify, ruleset_service
 
 logger = logging.getLogger("backtest_service")
 
@@ -47,10 +47,27 @@ def options() -> dict:
     return {"strategies": list_strategies(), **form_spec()}
 
 
+async def _with_rule_set_snapshot(payload: dict) -> dict:
+    """带 rule_set_id 时由服务端注入判据串。
+
+    前端只提交 id：串若由页面传来，就等于「作业参数里记的这套规则」可以伪造，
+    回测结论和规则集页面对不上。快照取的是那一刻 rule_sets 行里的真实表达式。
+    """
+    if payload.get("sell_rule") or payload.get("add_rule"):
+        raise BizError("卖出/加仓判据串不接受页面提交，请改用 rule_set_id", code=400, status_code=400)
+    if not payload.get("rule_set_id"):
+        return payload
+    if payload.get("strategy"):
+        raise BizError("策略模式不消费规则集的卖出/加仓串，请先清空策略", code=400, status_code=400)
+    snap = await ruleset_service.snapshot_by_id(payload["rule_set_id"])
+    return {**payload, "sell_rule": snap["sell"], "add_rule": snap["add"]}
+
+
 async def start_run(user_id: str, params: dict | None, source: str = "manual") -> dict:
     if not user_id:
         raise BizError("user_id 不能为空", code=400, status_code=400)
     payload = validate(params)
+    payload = await _with_rule_set_snapshot(payload)
     if user_id in _inflight:
         raise BizError(f"已有回测任务运行中: {_inflight[user_id]}", code=409, status_code=409)
     inflight = await backtest_jobs_repo.find_inflight(user_id)

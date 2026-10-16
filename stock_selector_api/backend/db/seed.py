@@ -36,6 +36,12 @@ INIT_PERMISSIONS = [
     # 回测模块
     {"code": "backtest:list", "name": "回测任务查看", "module": "backtest"},
     {"code": "backtest:run", "name": "发起回测", "module": "backtest"},
+    # 规则集模块（自定义卖出/加仓判据；应用会改持仓判定与持有可信度）
+    {"code": "rule_set:list", "name": "规则集查看", "module": "backtest"},
+    {"code": "rule_set:create", "name": "新增规则集", "module": "backtest"},
+    {"code": "rule_set:update", "name": "修改规则集", "module": "backtest"},
+    {"code": "rule_set:delete", "name": "删除规则集", "module": "backtest"},
+    {"code": "rule_set:apply", "name": "应用规则集", "module": "backtest"},
     # 设备模块（示例）
     {"code": "device:list", "name": "设备列表", "module": "device"},
     {"code": "device:create", "name": "新增设备", "module": "device"},
@@ -48,6 +54,7 @@ INIT_MENUS = [
     # 一级目录
     {"id": "m_dashboard", "name": "工作台", "menu_type": "menu", "path": "#/dashboard", "icon": "home", "parent_id": "", "sort_order": 1, "permission_code": "", "is_visible": True},
     {"id": "m_backtest", "name": "回测", "menu_type": "menu", "path": "#/backtest", "icon": "chart", "parent_id": "", "sort_order": 3, "permission_code": "backtest:list", "is_visible": True},
+    {"id": "m_rule_set", "name": "规则集", "menu_type": "menu", "path": "#/rulesets", "icon": "filter", "parent_id": "", "sort_order": 4, "permission_code": "rule_set:list", "is_visible": True},
     {"id": "m_device", "name": "资产管理", "menu_type": "dir", "path": "", "icon": "server", "parent_id": "", "sort_order": 2, "permission_code": "", "is_visible": True},
     {"id": "m_sys", "name": "系统管理", "menu_type": "dir", "path": "", "icon": "setting", "parent_id": "", "sort_order": 99, "permission_code": "", "is_visible": True},
     # 设备子菜单
@@ -68,10 +75,11 @@ ROLE_PERMISSION_CODES = {
         "sys:user:list", "sys:role:list", "sys:menu:list",
         "sys:notify:list", "sys:notify:update", "sys:monitor:list",
         "backtest:list", "backtest:run",
+        "rule_set:list", "rule_set:create", "rule_set:update", "rule_set:delete", "rule_set:apply",
         "device:list", "device:create", "device:update", "device:delete",
     ],
-    # 只读：能看回测作业，不能发起回测；系统监控属运维信息，不授予只读档
-    "readonly": ["device:list", "backtest:list"],
+    # 只读：能看回测作业与规则集（当前判据是什么），不能发起回测、更不能改判据
+    "readonly": ["device:list", "backtest:list", "rule_set:list"],
 }
 
 INIT_DEVICES = [

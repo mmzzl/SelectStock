@@ -252,7 +252,9 @@ def flip_soon(mask: np.ndarray, win: int) -> np.ndarray:
     return (cs[win + 1: win + 1 + n] - cs[1: 1 + n]) > 0
 
 
-def replay(files: list[Path], rs: dict, date_list: list[str], day_from: int) -> States:
+def replay(files: list[Path], rs: dict, date_list: list[str], day_from: int,
+           progress_cb=None) -> States:
+    """progress_cb(已完成块数, 总块数)：Celery 侧要按块更新进度，命令行跑就不传。"""
     axis = np.array(date_list, dtype="datetime64[ns]")
     st = States(len(date_list))
     names = [f"rule{i}" for i in range(len(rs["sell"]))] \
@@ -264,6 +266,8 @@ def replay(files: list[Path], rs: dict, date_list: list[str], day_from: int) -> 
         if cols is not None:
             _accumulate(st, cols, rs, names, day_from)
         del cols
+        if progress_cb is not None:
+            progress_cb(bi + 1, len(blocks))
         logger.info("块 %d/%d（%d 票）完成，累计 %.0fs", bi + 1, len(blocks), len(block),
                     time.time() - t0)
     return st

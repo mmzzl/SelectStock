@@ -7,6 +7,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # backend/ 包所在目录（config.py 所在处）
 BACKEND_DIR = Path(__file__).resolve().parent
+# 仓库根：回测内核、data/stock_kline、data/rules 都挂在这里
+REPO_ROOT = BACKEND_DIR.parent.parent
+RULES_DIR = (REPO_ROOT / "data" / "rules").as_posix()
 
 
 class Settings(BaseSettings):
@@ -111,8 +114,17 @@ class Settings(BaseSettings):
     celery_result_ttl: int = 7 * 24 * 3600     # 回测结果在 redis 里的保留时长
     backtest_task_name: str = "backtest.run"   # worker 侧 task 名，后端按名 send_task
     # 回测内核所在仓库根（含 scripts/backtest_main.py 与 data/stock_kline）
-    backtest_root: str = str(BACKEND_DIR.parent.parent)
+    backtest_root: str = str(REPO_ROOT)
     backtest_summary_points: int = 120         # 净值曲线降采样点数，避免作业表塞整条曲线
+
+    # ---------- 规则集（管理页面自定义卖出/加仓规则）----------
+    # 这两个文件是后端与 8002 插件之间唯一的接口：后端写，插件只读（按 mtime 热更新）。
+    # 路径必须与插件 portfolio/rules.py 的 ACTIVE_RULES_FILE 同一处，两边各指一处就分家。
+    ruleset_task_name: str = "ruleset.replay"  # worker 侧全市场回放任务名
+    active_rules_file: str = f"{RULES_DIR}/active.json"
+    ruleset_posterior_file: str = f"{RULES_DIR}/active_posterior.json"
+    # 回放分块票数：250 票 ≈ 120MB float64，机器上同时跑着线上服务（可用内存 ~2.7GB）
+    ruleset_replay_block: int = 250
 
     # ---------- 版本升级中心（自托管）----------
     # 用 as_posix() 归一为 / 分隔：Windows 下仍满足「路径含 /upgrade」契约，且 pathlib 兼容

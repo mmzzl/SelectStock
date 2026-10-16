@@ -18,6 +18,7 @@ from api.v1 import (
     sector,
     news,
     backtest,
+    ruleset,
     system,
     upgrade,
 )
@@ -62,6 +63,9 @@ api_router.include_router(news.router, dependencies=_password_gate)
 
 # —— 回测模块（Celery 投递）与系统监控 ——
 api_router.include_router(backtest.router, dependencies=_password_gate)
+
+# —— 规则集模块（自定义卖出/加仓判据 → 应用后判定与可信度都走它）——
+api_router.include_router(ruleset.router, dependencies=_password_gate)
 api_router.include_router(system.router, dependencies=_password_gate)
 
 # —— 版本升级模块（超管） ——

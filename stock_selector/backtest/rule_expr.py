@@ -84,6 +84,95 @@ def join_rules(expressions: list[str]) -> str:
     return " or ".join(parts) if parts else ""
 
 
+# ------------------------------------------------------------------ 字段目录
+# 管理页面「预处理字段」下拉的数据源。顺序就是页面分组的顺序；一份清单同时喂
+# 卖出/加仓两侧，避免页面自己抄一份列名（抄的那份永远是上个版本的列名）。
+_FIELD_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    ("价格与成交", (
+        ("close", "收盘价"), ("open", "开盘价"),
+        ("high", "最高价"), ("low", "最低价"), ("last_close", "昨收价"),
+        ("pct", "当日涨跌幅%"), ("volume", "成交量"), ("amount", "成交额"),
+    )),
+    ("均线", (
+        ("ma5", "5日均线"), ("ma10", "10日均线"), ("ma20", "20日均线"), ("ma60", "60日均线"),
+        ("ema12", "12日指数均线"), ("ema26", "26日指数均线"),
+    )),
+    ("技术指标", (
+        ("rsi14", "RSI14"), ("kdj_k", "KDJ-K"), ("kdj_d", "KDJ-D"), ("kdj_j", "KDJ-J"),
+        ("wr14", "W%R14"), ("macd_dif", "MACD-DIF"), ("macd_dea", "MACD-DEA"),
+        ("macd_hist", "MACD柱"), ("adx14", "ADX14"), ("roc10", "ROC10"),
+    )),
+    ("波动与通道", (
+        ("atr14", "ATR14"), ("boll_upper", "布林上轨"), ("boll_mid", "布林中轨"),
+        ("boll_lower", "布林下轨"),
+    )),
+    ("量能", (
+        ("vol_ma5", "5日均量"), ("vol_ma20", "20日均量"), ("vol_ratio", "量比"),
+        ("vol_z", "量能Z分数"), ("vol_trend", "量能趋势(5日/20日均量)"), ("obv", "OBV"),
+        ("vol_expanding", "放量"), ("vol_contracting", "缩量"),
+        ("vol_ground", "地量"), ("vol_blast", "爆量"), ("vol_diverge", "量价背离"),
+    )),
+    ("位置", (("pos60", "60日位置分位"),)),
+    ("关键价位", (
+        ("neckline_sup", "颈线支撑"), ("neckline_res", "颈线压力"),
+        ("box_upper", "箱体上沿"), ("box_lower", "箱体下沿"),
+        ("sup20", "20日支撑"), ("res20", "20日压力"),
+    )),
+    ("单根形态", (
+        ("body_ratio", "实体占振幅比"), ("upper_ratio", "上影占振幅比"),
+        ("lower_ratio", "下影占振幅比"), ("gap_pct", "跳空幅度"),
+        ("hammer_low", "低位锤子线"), ("hanging_man_high", "高位吊颈线"),
+        ("shooting_star_high", "高位射击之星"), ("doji_low", "低位十字星"),
+        ("doji_high", "高位十字星"), ("doji_high_blast", "高位十字星且爆量"),
+    )),
+    ("组合形态", (
+        ("bullish_engulf", "看涨吞没"), ("bearish_engulf", "看跌吞没"),
+        ("morning_star", "启明星"), ("evening_star", "黄昏星"),
+        ("piercing_line", "刺透"), ("dark_cloud", "乌云盖顶"), ("harami", "孕线"),
+        ("three_soldiers", "红三兵"), ("three_crows", "黑三鸦"),
+    )),
+    ("中长期形态", (
+        ("w_bottom_break", "W底突破"), ("m_top_break", "M顶跌破"),
+        ("hs_bottom_break", "头肩底突破"), ("hs_top_break", "头肩顶跌破"),
+        ("v_reversal", "V形反转"), ("arc_bottom", "圆弧底"),
+        ("box_break_up", "箱体向上突破"), ("box_break_dn", "箱体向下跌破"),
+        ("tri_break_up", "三角向上突破"), ("tri_break_dn", "三角向下跌破"),
+        ("flag_up_break", "旗形向上突破"), ("flag_dn_break", "旗形向下跌破"),
+        ("pullback_stabilize", "回踩企稳"),
+    )),
+)
+
+
+def fields_catalog() -> list[dict]:
+    """可选字段清单（含分组与中文名）。
+
+    成员资格由 `rule_eval._ALLOWED_COLUMNS` 决定，标签表只是给它加中文：patterns.py
+    以后新增的列会带着裸列名出现在下拉里（组=「其他」），而不是因为这里没写标签就
+    从页面上消失——那种「白名单能用、页面选不到」的哑字段最难查。
+    """
+    out: list[dict] = []
+    labeled: set[str] = set()
+    for group, items in _FIELD_GROUPS:
+        for field, label in items:
+            labeled.add(field)
+            out.append({"field": field, "label": label, "group": group})
+    for name in sorted(_ALLOWED_COLUMNS):
+        # 别名（price/adx）不单列：它们只是同一列的另一种写法，页面上出现两个选项
+        # 只会让人以为「收盘价」和「price」是两个字段。
+        if name in labeled or name in _ALIASES:
+            continue
+        out.append({"field": name, "label": name, "group": "其他"})
+    return out
+
+
+def group_of(field: str) -> str:
+    """给一条已存规则找回它属于哪一组（前端渲染标签用，找不到就是「其他」）。"""
+    for group, items in _FIELD_GROUPS:
+        if any(f == field for f, _ in items):
+            return group
+    return "其他"
+
+
 # ------------------------------------------------------------------ 解析
 
 def _tokens(text: str) -> list[str]:

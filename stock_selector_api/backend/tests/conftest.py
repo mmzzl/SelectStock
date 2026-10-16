@@ -35,6 +35,9 @@ def _test_env(tmp_path_factory):
     settings.notify_channels_file = str(tmp_path_factory.mktemp("ch") / "channels.json")
     settings.notify_policies_file = str(tmp_path_factory.mktemp("po") / "policies.json")
     settings.notify_state_file = str(tmp_path_factory.mktemp("st") / "state.json")
+    # 规则集「应用」会写盘给 8002 插件热读：测试绝不能碰仓库里那份，否则用例一跑线上判定就变了
+    settings.active_rules_file = str(tmp_path_factory.mktemp("rs") / "active.json")
+    settings.ruleset_posterior_file = str(tmp_path_factory.mktemp("rs") / "active_posterior.json")
     from services.notify import policies
 
     policies._save_raw([])

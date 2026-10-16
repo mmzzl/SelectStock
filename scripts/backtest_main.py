@@ -75,6 +75,8 @@ def run_backtest(args, progress_cb=None):
     database = load_mongo_config()["mongodb"]["database"]
     try:
         provider = ParquetProvider(ROOT / "data" / "stock_kline")
+        # 规则模式实际生效的串才记进 params（策略模式不读它，记了反而像是生效过）
+        exit_rules: dict = {}
 
         if args.strategy:
             selection_strategy = create_strategy(args.strategy)
@@ -90,16 +92,23 @@ def run_backtest(args, progress_cb=None):
             strategy_name = f"kernel:{args.strategy}"
         else:
             rules = load_rules(client, database)
-            if not rules["buy"] or not rules["sell"]:
+            # 规则集快照优先：管理页面「应用」的那套判据要和线上判定用同一条表达式串，
+            # 否则回测验的是 MongoDB 里的老规则、持有可信度算的是新规则，两边结论对不上。
+            sell_rule = getattr(args, "sell_rule", None) or rules["sell"]
+            add_rule = getattr(args, "add_rule", None) or rules["add"]
+            if not rules["buy"] or not sell_rule:
                 raise SystemExit("缺少 buy/sell 规则，无法回测")
             strategy = RulesStrategy(
                 provider=provider,
                 buy_rule=rules["buy"],
-                sell_rule=rules["sell"],
-                add_rule=rules["add"],
+                sell_rule=sell_rule,
+                add_rule=add_rule,
                 target_amount=args.target_amount,
             )
-            strategy_name = "rules"
+            rule_set_id = getattr(args, "rule_set_id", None)
+            strategy_name = f"rules:{rule_set_id}" if rule_set_id else "rules"
+            exit_rules = {"rule_set_id": rule_set_id, "sell_rule": sell_rule,
+                          "add_rule": add_rule}
 
         engine = BacktestEngine(
             strategy=strategy,
@@ -126,6 +135,7 @@ def run_backtest(args, progress_cb=None):
                 "max_hold_days": args.max_hold_days,
                 "stop_loss_pct": args.stop_loss_pct,
                 "take_profit_pct": args.take_profit_pct,
+                **exit_rules,
             },
         )
         result = engine.run()
@@ -167,6 +177,11 @@ def main() -> None:
         default=100000.0,
         help="(deprecated) use --capital",
     )
+    parser.add_argument("--sell-rule", default=None,
+                        help="用规则集快照的卖出表达式覆盖 trading_rules（仅规则模式）")
+    parser.add_argument("--add-rule", default=None,
+                        help="用规则集快照的加仓表达式覆盖 trading_rules（仅规则模式）")
+    parser.add_argument("--rule-set-id", default=None, help="规则集快照 id，写进结果参数供复现")
     args = parser.parse_args()
 
     if args.start_capital != 100000.0:

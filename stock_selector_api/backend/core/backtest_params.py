@@ -29,7 +29,15 @@ DEFAULTS: dict = {
     "stop_loss_pct": 0.05,
     "take_profit_pct": 0.0,
     "no_save": False,
+    # 规则集快照：页面「回测」把当前生效的卖出/加仓串带进这一次回测（只在 rules 模式生效，
+    # 即 strategy 为空）。带着串跑策略模式会被内核静默忽略，所以那种组合在 validate 里直接拒。
+    "rule_set_id": "",
+    "sell_rule": "",
+    "add_rule": "",
 }
+
+# 字符串参数：{键: 长度上限}
+_STR_SPEC: dict = {"rule_set_id": 36, "sell_rule": 2000, "add_rule": 2000}
 
 # 数值参数：(类型, 下界, 上界)，None 表示该侧不校验
 _NUM_SPEC: dict = {
@@ -85,6 +93,8 @@ def validate(raw: dict | None) -> dict:
             if len(name) > 64:
                 raise BizError("策略名过长", code=400, status_code=400)
             out[key] = name
+        elif key in _STR_SPEC:
+            out[key] = _text(key, value)
         elif key == "no_save":
             out[key] = bool(value)
         else:
@@ -94,6 +104,7 @@ def validate(raw: dict | None) -> dict:
     effective = merge(out)
     _check_window(effective)
     _check_position_sizing(effective)
+    _check_rule_snapshot(effective)
     return out
 
 
@@ -101,6 +112,25 @@ def _date(key: str, value) -> str:
     text = str(value).strip()
     if not DATE_RE.match(text):
         raise BizError(f"{key} 需为 YYYY-MM-DD 格式", code=400, status_code=400)
+    return text
+
+
+_RULE_CN = {"sell_rule": "卖出规则串", "add_rule": "加仓规则串"}
+
+
+def _text(key: str, value) -> str:
+    from core import rule_grammar
+
+    text = str(value).strip()
+    if len(text) > _STR_SPEC[key]:
+        raise BizError(f"{key} 过长（上限 {_STR_SPEC[key]} 字符）", code=400, status_code=400)
+    if key in _RULE_CN and text:
+        # 当场校验语法：坏串存进内核不会报错，只会让那条规则永远不触发（RuleEvaluator 静默 False）
+        mod = rule_grammar.rule_expr()
+        try:
+            mod.validate(text)
+        except mod.RuleSyntaxError as exc:
+            raise BizError(f"{_RULE_CN[key]}不合法：{exc}", code=400, status_code=400) from None
     return text
 
 
@@ -130,6 +160,21 @@ def _check_position_sizing(params: dict) -> None:
         raise BizError(
             f"单笔买入金额 {params['target_amount']:g} 需小于单票上限 "
             f"{cap:g}（初始资金 × 单票仓位上限）",
+            code=400,
+            status_code=400,
+        )
+
+
+def _check_rule_snapshot(params: dict) -> None:
+    """规则集串只有「规则模式」（不选策略）才消费。
+
+    选了选股策略时出场走 max_hold_days/止损，内核根本不读 sell/add 表达式；
+    那种组合下页面却写着「按规则集退出」，产出的赢比就不能拿去当规则集的依据。
+    """
+    if params["strategy"] and (params["sell_rule"] or params["add_rule"]):
+        raise BizError(
+            "策略模式的出场由持有天数与止损决定，不读规则集的卖出/加仓串；"
+            "要验规则集请先清空策略",
             code=400,
             status_code=400,
         )

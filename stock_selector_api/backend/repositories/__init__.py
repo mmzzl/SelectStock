@@ -21,6 +21,7 @@ from repositories.trades import TradeRepo, trades_repo
 from repositories.inbox import InboxRepo, inbox_repo
 from repositories.selection import SelectJobRepo, SelectResultRepo
 from repositories.backtest import BacktestJobRepo
+from repositories.ruleset import RuleSetRepo
 from repositories.upgrade import UpgradeRepo
 
 # 单例（各自持有无状态方法，可安全复用）
@@ -41,15 +42,17 @@ trades_repo = TradeRepo()
 select_jobs_repo = SelectJobRepo()
 select_results_repo = SelectResultRepo()
 backtest_jobs_repo = BacktestJobRepo()
+rule_sets_repo = RuleSetRepo()
 upgrade_repo = UpgradeRepo()
 
 __all__ = [
     "UserRepo", "RoleRepo", "PermissionRepo", "MenuRepo", "DeviceRepo", "SessionRepo",
     "CaptchaRepo", "LoginLockRepo", "PasswordHistoryRepo", "RbacRepo",
     "PortfolioDiagRunRepo", "PortfolioDiagResultRepo", "HoldingRepo", "TradeRepo",
-    "InboxRepo", "SelectJobRepo", "SelectResultRepo", "BacktestJobRepo", "UpgradeRepo",
+    "InboxRepo", "SelectJobRepo", "SelectResultRepo", "BacktestJobRepo", "RuleSetRepo",
+    "UpgradeRepo",
     "users", "roles", "permissions", "menus", "devices", "sessions", "captchas",
     "login_locks", "password_history", "rbac", "portfolio_runs", "portfolio_results",
     "holdings_repo", "trades_repo", "inbox_repo", "select_jobs_repo", "select_results_repo",
-    "backtest_jobs_repo", "upgrade_repo",
+    "backtest_jobs_repo", "rule_sets_repo", "upgrade_repo",
 ]
