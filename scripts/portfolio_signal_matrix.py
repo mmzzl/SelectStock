@@ -67,6 +67,11 @@ def _scan_one(code: str) -> dict | None:
     切片口径与 `ParquetProvider.window(code, date, required_rows)` 逐项一致：
     按日期升序取 ≤ date 的最后 `required_rows` 行。基准日没行的日子这里根本不会遍历，
     与 `signal_on()` 那条「最后一行早于基准日就返回 None」同效。
+
+    窗前那些行**必须留在表里**（窗口头 30 个交易日的回看要用它们，删了就与实时口径不一致），
+    但只有日期正好落在日历上的行才允许写命中与价格：`searchsorted` 会把早于日历首日的行都返回
+    下标 0，不核对等值就会把整段窗前的命中与收盘价一股脑塞进日历第一天（历史段实测首日因此
+    多出 8.4 万条命中，留出段多 60 万条，并把那天本该停牌的价格填成窗前最后一天的价）。
     """
     path = _CTX["kline_dir"] / f"{code}.parquet"
     if not path.exists():
@@ -79,12 +84,14 @@ def _scan_one(code: str) -> dict | None:
         return None
     dates = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
     df = df.assign(_d=dates).sort_values("_d").reset_index(drop=True)
-    pos = np.searchsorted(calendar, df["_d"].to_numpy())
-    keep = pos < len(calendar)
-    df, pos = df.loc[keep], pos[keep]
-    out = {"code": code, "pos": pos, "hit_pos": np.array([], dtype=np.int32),
+    arr = df["_d"].to_numpy()
+    pos = np.searchsorted(calendar, arr)
+    in_cal = pos < len(calendar)
+    in_cal[in_cal] &= calendar[pos[in_cal]] == arr[in_cal]
+    idx = np.flatnonzero(in_cal)
+    out = {"code": code, "pos": pos[idx], "hit_pos": np.array([], dtype=np.int32),
            "hit_score": np.array([], dtype=np.float64), "hit_name": [],
-           **{col: df[col].astype(float).to_numpy() for col in PRICE_COLUMNS}}
+           **{col: df[col].astype(float).to_numpy()[idx] for col in PRICE_COLUMNS}}
     if len(df) < 2:
         return out
 
@@ -92,7 +99,7 @@ def _scan_one(code: str) -> dict | None:
     hits: list[int] = []
     scores: list[float] = []
     names: list[str] = []
-    for i in range(1, len(df)):
+    for i in idx:
         hit = strategy.signal_at(values.iloc[max(0, i - rows + 1):i + 1].reset_index(drop=True))
         if hit is None:
             continue
@@ -114,18 +121,22 @@ def pool_codes(kline_dir: Path, limit: int = 0) -> list[str]:
 
 
 def trading_calendar(kline_dir: Path, provider: ParquetProvider, codes: list[str],
-                     strict: bool = True) -> np.ndarray:
+                     strict: bool = True, date_from: str = DATE_FROM,
+                     date_to: str = DATE_TO) -> np.ndarray:
     """日历 = `ParquetProvider.dates()`（引擎并集）∩ 窗，与基准那一趟完全同源。
 
     `strict` 时核一遍票池并集与之相等：票池少日子＝矩阵日历比引擎窄，七趟的交易日数就都不对。
     冒烟（只取前 N 只票）时关掉——几十只票当然凑不出完整交易日历，那是抽样不是口径问题。
+
+    `date_from/date_to` 默认就是批次 E/E2 钉死的那个窗；只有留出段（E3）才显式传别的窗，
+    传了也只影响这一个产物，不会把已经落档的 E2 矩阵口径改掉。
     """
-    window = [d for d in provider.dates() if DATE_FROM <= d <= DATE_TO]
+    window = [d for d in provider.dates() if date_from <= d <= date_to]
     pool: set[str] = set()
     for code in codes:
         col = pd.read_parquet(kline_dir / f"{code}.parquet", columns=["date"])
         pool.update(pd.to_datetime(col["date"]).dt.strftime("%Y-%m-%d").tolist())
-    pool_window = {d for d in pool if DATE_FROM <= d <= DATE_TO}
+    pool_window = {d for d in pool if date_from <= d <= date_to}
     missing = [d for d in window if d not in pool_window]
     extra = sorted(d for d in pool_window if d not in set(window))
     if strict and (missing or extra):
@@ -157,10 +168,12 @@ def _densify(results: list[dict], codes: list[str], calendar: np.ndarray) -> dic
     return {"price": price, "hit": hit, "score": score, "hits": hits}
 
 
-def build(kline_dir: Path, out_dir: Path, workers: int, limit: int) -> dict:
+def build(kline_dir: Path, out_dir: Path, workers: int, limit: int,
+          date_from: str = DATE_FROM, date_to: str = DATE_TO) -> dict:
     codes = pool_codes(kline_dir, limit)
     logger.info("算日历：引擎并集 ∩ 票池并集（%d 只票）", len(codes))
-    calendar = trading_calendar(kline_dir, ParquetProvider(kline_dir), codes, strict=not limit)
+    calendar = trading_calendar(kline_dir, ParquetProvider(kline_dir), codes,
+                                strict=not limit, date_from=date_from, date_to=date_to)
     logger.info("池 %d 只 × 日历 %d 天（%s→%s）", len(codes), len(calendar), calendar[0], calendar[-1])
 
     required_rows = int(create_strategy(STRATEGY_NAME).required_rows())
@@ -184,7 +197,7 @@ def build(kline_dir: Path, out_dir: Path, workers: int, limit: int) -> dict:
     pd.DataFrame(dense["hits"], columns=["date", "code", "score", "name"]).to_parquet(
         out_dir / HITS_FILE, index=False)
     meta = {
-        "strategy": STRATEGY_NAME, "date_from": DATE_FROM, "date_to": DATE_TO,
+        "strategy": STRATEGY_NAME, "date_from": date_from, "date_to": date_to,
         "required_rows": required_rows, "pool_codes": len(codes),
         "calendar_days": len(calendar),
         "price_rows": int(np.isfinite(dense["price"]["close"]).sum()),
@@ -291,6 +304,10 @@ def verify(kline_dir: Path, out_dir: Path, points: int, seed: int) -> int:
     dates, codes = provider.dates(), provider.codes()
     rng = random.Random(seed)
     picks = [(rng.choice(dates), rng.choice(codes)) for _ in range(points)]
+    # 随机点几乎踩不到窗两端，而恰恰是这两头最容易漏口径（窗前历史行被当成首日、
+    # 首日停牌被填成前一天的价），所以边界日按代码定点各抽一批压一遍
+    for edge in (dates[0], dates[-1]):
+        picks.extend((edge, c) for c in rng.sample(codes, min(200, len(codes))))
     suspended = 0
     for code in rng.sample(codes, min(60, len(codes))):
         have = set(pd.read_parquet(kline_dir / f"{code}.parquet", columns=["date"])
@@ -330,6 +347,9 @@ def main() -> int:
     ap.add_argument("--out-dir", default=str(OUT_DIR))
     ap.add_argument("--workers", type=int, default=min(6, mp.cpu_count() or 4))
     ap.add_argument("--limit", type=int, default=0, help="只算前 N 只票（冒烟用）")
+    # 窗默认是批次 E/E2 钉死的那个；留出段（E3）才显式传，且只影响 --out-dir 指过去的那个产物
+    ap.add_argument("--date-from", default=DATE_FROM)
+    ap.add_argument("--date-to", default=DATE_TO)
     ap.add_argument("--verify", action="store_true", help="抽点比对矩阵与实时 signal_on")
     ap.add_argument("--points", type=int, default=VERIFY_POINTS)
     ap.add_argument("--seed", type=int, default=SEED)
@@ -341,7 +361,7 @@ def main() -> int:
     if args.verify:
         return verify(kline_dir, out_dir, args.points, args.seed)
     check_mem_headroom(skip=args.skip_mem_guard)
-    build(kline_dir, out_dir, args.workers, args.limit)
+    build(kline_dir, out_dir, args.workers, args.limit, args.date_from, args.date_to)
     return 0
 
 
