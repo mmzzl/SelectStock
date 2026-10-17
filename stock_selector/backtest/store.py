@@ -24,6 +24,7 @@ class BacktestStore:
             "start_date": result.start_date,
             "end_date": result.end_date,
             "metrics": result.metrics,
+            "executability": result.executability,
             "saved_at": datetime.now(timezone.utc),
         }
         self.db[COLLECTION_RESULTS].replace_one(

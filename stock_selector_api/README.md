@@ -315,6 +315,19 @@ celery 状态归并进作业表 —— `PROGRESS→running`（写百分比与阶
 把用户的单飞位永久占住。结果分两层：作业表只留 120 点净值 + 30 笔成交，全量明细由内核写
 MongoDB `backtest_results / backtest_trades / backtest_equity`。
 
+撮合可执行性（2026-10-17 起）：引擎不再假定「看到收盘价就能成交」。判据真源在
+`stock_selector/backtest/executability.py`，与逐笔扫描 `scripts/profit_scan.py` 同一把尺子
+（`LIMIT_TOL_PP=0.05`）：贴着涨停线买不进、`high == low` 的一字板当天没有对手盘卖不掉、
+当日无行情行按停牌处理（买入直接放弃这笔，卖出押着等下一个有行情的日子，不设顺移上限——
+真实账户不会因为卖不掉就把仓位删掉）。每次运行把拦了多少单写进 `result.executability`
+（CLI `--no-save` 也会打印），指标就分得清是行情给的还是「假定都能成交」给的。
+
+一个已知副作用：组合层遇到**日线断档**（不是真停牌）时会把仓位押到数据重现那天，成交价用那天。
+2026-10-17 实跑 `trend_rebound`／抽 300 只／2025-01~2026-06 复核，`sell_blocked=199` 全部来自
+`301212`、`301353` 两只（parquet 从 2025-10-22 直接断到 2026-03-25，各押 99/100 个交易日才出掉），
+买入侧 0 次拦截（该策略买点最高只到 +5.78%，够不到涨停线）。断档回补（886 只可从 Mongo 拼）
+没做之前，跨这段区间的组合级收益/回撤要按「含断档」读。
+
 相关文件：`backend/core/backtest_params.py`、`backend/celery_app.py`、`backend/tasks/backtest_tasks.py`、
 `backend/services/backtest_service.py`、`backend/db/sql/backtest.py`、`backend/repositories/backtest.py`、
 `backend/api/v1/backtest.py`、`frontend/static/js/pages/backtest.js`。

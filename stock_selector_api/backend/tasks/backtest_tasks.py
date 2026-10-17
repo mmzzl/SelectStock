@@ -66,6 +66,8 @@ def _summary(result, params: dict) -> dict:
         "end_date": str(result.end_date),
         "params": params,
         "metrics": {key: _num(value) for key, value in (result.metrics or {}).items()},
+        # 拦下来多少单不写出来，指标就分不清是行情给的还是「假定都能成交」给的
+        "executability": dict(result.executability or {}),
         "equity": _downsample_equity(result.equity or []),
         "trade_count": len(trades),
         "recent_trades": [_trade_row(t) for t in trades[-RECENT_TRADES:]],

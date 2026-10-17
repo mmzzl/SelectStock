@@ -205,6 +205,7 @@ def main() -> None:
             "start_date": result.start_date,
             "end_date": result.end_date,
             "metrics": result.metrics,
+            "executability": result.executability,
             "trades": result.trades,
             "equity": result.equity,
         }
@@ -223,6 +224,22 @@ def main() -> None:
     print("--- metrics ---")
     for k, v in result.metrics.items():
         print(f"  {k:16s}: {v}")
+    ex = result.executability
+    print("--- 撮合可执行性（买不进/卖不掉/停牌）---")
+    print(f"  买不进拦截      : {ex.get('buy_blocked', 0)} 次"
+          f"（加仓被拦 {ex.get('add_blocked', 0)} 次）")
+    print(f"  卖单押着等      : {ex.get('sell_blocked', 0)} 次，"
+          f"最久 {ex.get('sell_wait_days_max', 0)} 个交易日，"
+          f"跑完还押着 {ex.get('sell_pending', {})}")
+    if ex.get("reasons"):
+        print(f"  拦单原因        : {ex['reasons']}")
+    waits = ex.get("sell_wait_by_code") or {}
+    if waits:
+        worst = sorted(waits.items(), key=lambda kv: -kv[1])[:5]
+        print(f"  押过多少天才出  : {worst}"
+              "（押上百天通常是日线断档而不是停牌，成交价用的是数据重现那天）")
+    if ex.get("pct_unknown"):
+        print(f"  涨跌停无从判定  : {ex['pct_unknown']} 次（数据缺 pct 又缺昨收，这些单按可成交放行）")
 
 
 if __name__ == "__main__":

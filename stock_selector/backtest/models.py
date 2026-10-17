@@ -50,3 +50,5 @@ class BacktestResult:
     metrics: dict
     trades: list[dict] = field(default_factory=list)
     equity: list[dict] = field(default_factory=list)
+    # 成交可执行性的账：拦了多少买不进、多少卖单被押着等（没有这行，指标就说不清是行情给的还是撮合假设给的）
+    executability: dict = field(default_factory=dict)

@@ -15,13 +15,16 @@ def dates(n, start="2026-01-05"):
 
 
 def write_stock(dirpath, code, closes, name="测试股", volume=1000):
+    closes = [float(c) for c in closes]
     df = pd.DataFrame({
         "date": dates(len(closes)),
         "open": closes,
         "high": [c * 1.01 for c in closes],
         "low": [c * 0.99 for c in closes],
-        "close": [float(c) for c in closes],
+        "close": closes,
         "volume": [float(volume)] * len(closes),
+        # 撮合要按 pct 判涨跌停，真实日线里有这列，夹具就得有
+        "pct": [0.0] + [(b / a - 1.0) * 100.0 for a, b in zip(closes, closes[1:])],
     })
     df["code"] = code
     df["name"] = name

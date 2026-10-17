@@ -73,6 +73,13 @@ class ParquetProvider:
         row = self._row(date, code)
         return float(row["close"]) if row is not None else None
 
+    def row(self, date: str, code: str) -> dict | None:
+        """当日整行行情（open/high/low/close/pct…），停牌或没有这只票返回 None。
+
+        撮合要判断涨跌停与一字板，只看收盘价不够：`high == low` 才能认出「没有对手盘」。
+        """
+        return self._row(date, code)
+
     def prices(self, date: str, codes: list[str] | None = None) -> dict[str, float]:
         rows = self.rows(date, codes)
         return {c: float(r["close"]) for c, r in rows.items()}

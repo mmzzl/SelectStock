@@ -1,9 +1,15 @@
-"""回测引擎：逐日推进、资金循环撮合、个股状态机。"""
+"""回测引擎：逐日推进、资金循环撮合、个股状态机。
+
+撮合按 A 股的可执行性来（判据真源在 `executability.py`，与逐笔扫描同一套）：
+涨停贴着线买不进、一字板当天没有对手盘卖不掉、停牌押着等下一个有行情的日子。
+之前的版本只看收盘价就假定成交，Sharpe/回撤里混着一笔「撮合假设的钱」。
+"""
 
 from __future__ import annotations
 
 import uuid
 
+from stock_selector.backtest import executability
 from stock_selector.backtest.broker import Broker
 from stock_selector.backtest.metrics import Metrics
 from stock_selector.backtest.models import BacktestResult, EquityPoint
@@ -49,6 +55,39 @@ class BacktestEngine:
         self.last_close: dict[str, float] = {}
         # 加仓指令只带代码，成交记录要名称，就在买入时把代码→名称记下来
         self._names: dict[str, str] = {}
+        # 押着待卖的仓位：code → (股数或 None=清仓, 已经等了多少个交易日)
+        self._want_sell: dict[str, tuple[int | None, int]] = {}
+        self._exec = {"buy_blocked": 0, "add_blocked": 0, "sell_blocked": 0,
+                      "sell_wait_days_max": 0, "pct_unknown": 0,
+                      "sell_wait_by_code": {}}
+        self._exec_reasons: dict[str, int] = {}
+
+    # ---- 可执行性计数 ----
+    def _count(self, kind: str, reason: str) -> None:
+        key = {"buy": "buy_blocked", "add": "add_blocked", "sell": "sell_blocked"}[kind]
+        self._exec[key] += 1
+        tag = f"{kind}:{reason}"
+        self._exec_reasons[tag] = self._exec_reasons.get(tag, 0) + 1
+
+    def _entry_price(self, date: str, code: str, prev_close, kind: str) -> float | None:
+        """能不能按当日收盘买/加这只票：可以就返回成交价，被拦就返回 None 并记账。
+
+        买入和加仓是同一件事（都是付钱建仓），所以共用这段判定。
+        """
+        row = self.data.row(date, code)
+        if row is None:
+            self._count(kind, "suspended")                  # 停牌：没有行情行，这笔放弃
+            return None
+        pct = executability.day_change_pct(row, prev_close)
+        if pct is None:
+            self._exec["pct_unknown"] += 1        # 涨跌停判不了（数据缺 pct 又缺昨收）：放行但要记出来
+        why = executability.buy_blocked(code, pct, row.get("high"), row.get("low"))
+        if why:
+            self._count(kind, why)
+            return None
+        px = float(row["close"])
+        self.last_close[code] = px
+        return px
 
     def _known_price(self, date: str, code: str) -> float | None:
         px = self.data.price(date, code)
@@ -84,31 +123,52 @@ class BacktestEngine:
             if self.progress_cb and (idx % report_step == 0 or idx == total_dates):
                 self.progress_cb(idx, total_dates, date)
 
+            # 「昨收」必须在今天任何价格被记录之前取：涨跌停判定只能用当天之前的价
+            prev_close = dict(self.last_close)
             broker.settle()
 
             holdings = list(broker.positions)
             prices = self._valuation_prices(date, holdings)
             instructions = proxy.evaluate_holdings(date, holdings, prices)
 
+            # ① 卖出：今天的指令先进队列，和之前押着待卖的一起按「当天卖不卖得掉」撮合
             for inst in instructions:
-                if inst.side == "sell" and inst.code in broker.positions:
-                    px = self.data.price(date, inst.code)
-                    if px is not None:
-                        self.last_close[inst.code] = px
-                        broker.sell(inst.code, date, px, shares=inst.shares)
+                if inst.side == "sell" and inst.code in broker.positions \
+                        and inst.code not in self._want_sell:
+                    self._want_sell[inst.code] = (inst.shares, 0)
+            for code in sorted(self._want_sell):
+                shares, waited = self._want_sell[code]
+                if code not in broker.positions:            # 已经清掉了
+                    del self._want_sell[code]
+                    continue
+                row = self.data.row(date, code)
+                why = executability.sell_blocked(row.get("high"), row.get("low")) if row \
+                    else "suspended"
+                if why:
+                    # 仓位还在手上，只能等：真实账户不会因为你卖不掉就把这笔从账上删掉，
+                    # 所以引擎不像逐笔扫描那样到 REPAIR_MAX_DAYS 就丢单，只把押了多少天记出来
+                    self._want_sell[code] = (shares, waited + 1)
+                    self._exec["sell_wait_days_max"] = max(self._exec["sell_wait_days_max"], waited + 1)
+                    self._count("sell", why)
+                    continue
+                px = float(row["close"])
+                self.last_close[code] = px
+                broker.sell(code, date, px, shares=shares)
+                del self._want_sell[code]
+                if waited:
+                    # 押了多少天才出掉要留在账上：一次押上百个交易日多半是日线断档，不是真停牌
+                    self._exec["sell_wait_by_code"][code] = waited
 
             for inst in instructions:
-                if inst.side == "add" and inst.code in broker.positions:
-                    amount = inst.amount
-                    if amount:
-                        px = self.data.price(date, inst.code)
-                        if px is not None:
-                            self.last_close[inst.code] = px
-                            try:
-                                broker.add(inst.code, self._names.get(inst.code) or inst.code,
-                                           date, px, amount)
-                            except ValueError:
-                                pass
+                if inst.side == "add" and inst.code in broker.positions and inst.amount:
+                    px = self._entry_price(date, inst.code, prev_close.get(inst.code), "add")
+                    if px is None:
+                        continue
+                    try:
+                        broker.add(inst.code, self._names.get(inst.code) or inst.code,
+                                   date, px, inst.amount)
+                    except ValueError:
+                        pass
 
             if len(broker.positions) < broker.max_positions:
                 all_prices = self.data.prices(date) if needs_market_prices else {}
@@ -118,10 +178,9 @@ class BacktestEngine:
                         break
                     if o.code in broker.positions:
                         continue
-                    px = self.data.price(date, o.code)
+                    px = self._entry_price(date, o.code, prev_close.get(o.code), "buy")
                     if px is None:
                         continue
-                    self.last_close[o.code] = px
                     self._names[o.code] = o.name
                     try:
                         broker.buy(o.code, o.name, date, px, o.amount)
@@ -157,6 +216,8 @@ class BacktestEngine:
             metrics=metrics.to_dict(),
             trades=[self._trade_dict(t) for t in broker.trades],
             equity=[p.to_dict() for p in equity_points],
+            executability={**self._exec, "reasons": dict(self._exec_reasons),
+                           "sell_pending": {c: w for c, (_, w) in sorted(self._want_sell.items())}},
         )
 
     def _cache_prices(self, date: str, codes: list[str]) -> None:

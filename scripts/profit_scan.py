@@ -95,7 +95,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from base_conditions import COLLECTION as BASE_COLL, HOLDOUT_START  # noqa: E402
 from ruleset_posterior import scan_universe, shift_fwd  # noqa: E402
-from stock_selector.backtest import rule_expr, rule_gates  # noqa: E402
+from stock_selector.backtest import executability, rule_expr, rule_gates  # noqa: E402
 from stock_selector.conviction import bucket  # noqa: E402
 from stock_selector.features.base_columns import board_limit_threshold  # noqa: E402
 
@@ -109,7 +109,7 @@ HOLDS = [3, 5, 10, 20]
 TAKES = [None, 0.06, 0.12, 0.20]
 STOPS = [None, -0.04, -0.08, -0.12]
 COST_PP = 0.30
-REPAIR_MAX = 10                  # 一字板卖不掉最多顺移几天
+REPAIR_MAX = executability.REPAIR_MAX_DAYS   # 一字板卖不掉最多顺移几天（判据真源见 backtest/executability.py）
 BLOCK = 80                       # 每块几只票：内存随它走（列 + 掩码位图 + 16 张网格）。
 # 只改分块，不改判定：一只票只落在一个块里，块内是完整的日线，跨块只做标量/数组累加。
 # 2026-10-17 从 200 降到 80：那天 BLOCK=200 的全量扫把 MemAvailable 压穿，earlyoom 在
@@ -250,15 +250,18 @@ def window(files: list[Path], fields: list[str], date_from: str, date_to: str
 # ------------------------------------------------------------------ 成交模拟（整张网格）
 
 def entry_gate(blk: Block) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """次一交易日开盘买入：返回 (买入价网格, 买得进的网格, 次日有行情的网格)。"""
-    o, h, l, c, p = (blk.cols["open"], blk.cols["high"], blk.cols["low"],
-                     blk.cols["close"], blk.cols["pct"])
+    """次一交易日开盘买入：返回 (买入价网格, 买得进的网格, 次日有行情的网格)。
+
+    「贴着涨停线就买不进」的容差与组合回测同源（`executability.LIMIT_TOL_PP`）。
+    原来还有一条「开盘一字涨停且当日涨幅也到线」才拦——一字当天 open==close，
+    跳空与 `pct` 同一个分母、同一个值，那条必然已被这条覆盖，所以合掉（口径不变）。
+    """
+    o, c = blk.cols["open"], blk.cols["close"]
     e = shift_fwd(o, 1)
     with np.errstate(divide="ignore", invalid="ignore"):
         gap_pp = (e / c - 1.0) * 100.0
     have = np.isfinite(e) & (e > 0) & np.isfinite(c) & (c > 0) & np.isfinite(gap_pp)
-    sealed = have & (shift_fwd(h, 1) == shift_fwd(l, 1))
-    can = (have & (gap_pp < blk.limit - 0.05) & ~(sealed & (shift_fwd(p, 1) >= blk.limit)))
+    can = have & (gap_pp < blk.limit - executability.LIMIT_TOL_PP)
     return np.where(have, e, np.nan), can, have
 
 
@@ -284,7 +287,9 @@ def simulate(blk: Block, entry_px: np.ndarray, can_buy: np.ndarray, plist: list[
         for k in range(2, mon + 1):                  # 第 1 天是买入当天，T+1 不能卖
             hk, lk, ok_k, ck = shift_fwd(h, k), shift_fwd(l, k), shift_fwd(o, k), shift_fwd(c, k)
             have = np.isfinite(ck)
-            sell = have & (hk != lk) & np.isfinite(ok_k) & (ok_k > 0)   # 一字板没有对手盘
+            # 一字板（最高=最低）当天没有对手盘：判据真源在 backtest/executability.py，
+            # 组合回测引擎用的是同一个定义，只是成交时点不同
+            sell = have & (hk != lk) & np.isfinite(ok_k) & (ok_k > 0)
             base = ok0 & have & ~done
             if sl_px is not None:
                 hit = base & (lk <= sl_px)

@@ -4,7 +4,11 @@ import pytest
 
 
 class FakeData:
-    """daily: {date: {code: {"close": float}}}"""
+    """daily: {date: {code: {"close": float}}}
+
+    撮合要看涨跌停与一字板，所以 `row()` 必须给出 high/low/pct；记录里没写就补一组
+    「不拦单」的默认值（非一字、涨幅 2%），要测拦单的用例显式传 high/low/pct。
+    """
 
     def __init__(self, daily):
         self.daily = daily
@@ -16,6 +20,15 @@ class FakeData:
         d = self.daily.get(date, {})
         rec = d.get(code)
         return rec["close"] if rec else None
+
+    def row(self, date, code):
+        rec = self.daily.get(date, {}).get(code)
+        if rec is None:
+            return None
+        c = rec["close"]
+        return {"close": c, "open": rec.get("open", c),
+                "high": rec.get("high", c * 1.02), "low": rec.get("low", c * 0.98),
+                "pct": rec.get("pct", 2.0)}
 
     def prices(self, date, codes=None):
         d = self.daily.get(date, {})
