@@ -276,12 +276,16 @@ python3 scripts/conjunction_candidates.py --dry-run     # 先看
 python3 scripts/conjunction_candidates.py               # 写 config/rule_candidates_conj.json
 # 已有文件要重写必须加 --force：预注册批次一旦定稿就不该跟着读数改
 
-# 2) 扫描（由人触发，会记试次；批次的 60 条必须整批跑）
+# 2) 扫描（会记试次；批次的 60 条必须整批跑）
 python3 scripts/profit_scan.py --inventory-file config/rule_candidates_conj.json \
-  --min-tenure 250 --min-amount 3e7 --dry-run
+  --min-tenure 250 --run-id 20261017-conj-v1 \
+  --export-csv logs/profit_scan/rows_20261017-conj-v1.csv
 ```
 
-三条口径要记住：
+四条口径要记住：
+
+- **票池必须与 v1 那一轮完全一致**（`--min-tenure 250`、`--min-amount 0`、全市场 step=1）。
+  加流动性门槛会让「合取过了」分不清是判据的作用还是换池子的作用——池子也是一个自由度。
 
 - **阈值一个都没新增**：60 条 = C(6,2)=15 个轴对 × 4 象限，全部由 v1 已注册的 12 条尾档
   （pos60 / vol_ratio / vol_z / rsi14 / adx14 / 乖离 的两端）两两 AND 而成，组合不引入新自由度；
@@ -290,6 +294,20 @@ python3 scripts/profit_scan.py --inventory-file config/rule_candidates_conj.json
 - **批次不寄存在 Mongo**：`profit_scan_base_conditions` 每次 `base_conditions.py` 入库前先
   `delete_many({})`，所以 `--inventory-file` 走本地 JSON；对它用 `--limit-conditions` 会直接报错，
   从固定条数里挑几条看等于事后挑数据。
+
+**批次 B 已跑完（2026-10-17 16:49，run_id `20261017-conj-v1`，3,840 行在
+`profit_scan_rows` + `logs/profit_scan/rows_20261017-conj-v1.csv`，累计试次 129,856）：**
+判定分布 **过 0 / 不过 3,840**。同一份票池（`cells_ok` 3,578,690 与 v1 那一轮逐格相同）下：
+
+- 卡点全在按交易日聚类的显著性——**3,840 格无一例外都带 `sig`**；981 格其余四道内容门槛
+  （笔数≥300、胜率>50%、盈亏比>1、扣后每笔>0）全过，但其中只有 271 格按日均值还是正的，
+  最高 `t_day=4.29`（及格线 4.94）。
+- 目标 4 的硬读数：笔数≥300 的 3,328 格里**盈亏比最高 1.90、中位 1.11，没有一格 ≥2.0**。
+  所以「盈亏比 2.0」和「笔数够多」在日线两轴合取这个空间里不能同时成立。
+- 最像样的三族（缩量超买 / 高位缩量 / 放量强趋势）按日 t 只有 1.8~2.8，且每笔只比同日大盘基准
+  多 0.2~0.5pp——那点利润大部分是「当天买什么都涨」的 β。
+- **这批 37 个"差一口气"的格子不许事后挑出来当规则**；要验它们只能另开一个预注册批次，
+  并走三轴（时代 / 子时期 / 股票抽样）。买入腿这条路（单条件 → 两轴合取）到此判完。
 
 ### 7. 回测（Celery 投递，后端零计算）
 
