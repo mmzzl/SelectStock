@@ -265,6 +265,32 @@ curl -s http://localhost:8001/api/portfolio/analyze -H 'Content-Type: applicatio
 不等于运行时状态。台账 `scripts/build_judgement_ledger.py` 每晚 19:00 重建后，规则关着会让 hold 那一格
 退化成全市场基线、转卖列为 NaN，这是预期结果，不是故障。
 
+#### 合取判据批次 B：预注册清单与扫描入口（2026-10-17）
+
+单条件那一层已经扫到头（62,208 格只剩 1 条及格、买入腿 0/952 独立成立），下一批改成
+**两根轴的合取**。清单由生成器产出，不手抄、也不从 Mongo 取：
+
+```bash
+# 1) 生成/重生成预注册批次（只写文件，不读行情、不烧试次）
+python3 scripts/conjunction_candidates.py --dry-run     # 先看
+python3 scripts/conjunction_candidates.py               # 写 config/rule_candidates_conj.json
+# 已有文件要重写必须加 --force：预注册批次一旦定稿就不该跟着读数改
+
+# 2) 扫描（由人触发，会记试次；批次的 60 条必须整批跑）
+python3 scripts/profit_scan.py --inventory-file config/rule_candidates_conj.json \
+  --min-tenure 250 --min-amount 3e7 --dry-run
+```
+
+三条口径要记住：
+
+- **阈值一个都没新增**：60 条 = C(6,2)=15 个轴对 × 4 象限，全部由 v1 已注册的 12 条尾档
+  （pos60 / vol_ratio / vol_z / rsi14 / adx14 / 乖离 的两端）两两 AND 而成，组合不引入新自由度；
+- **试次是累计的**：这一批 60 × 64 = 3,840 格，从 `logs/profit_scan/trials.jsonl` 的累计数里加，
+  及格线（`rule_gates.t_required`）按累计试次抬，`--trial-budget`（默认 30 万）用满就拒绝再扫；
+- **批次不寄存在 Mongo**：`profit_scan_base_conditions` 每次 `base_conditions.py` 入库前先
+  `delete_many({})`，所以 `--inventory-file` 走本地 JSON；对它用 `--limit-conditions` 会直接报错，
+  从固定条数里挑几条看等于事后挑数据。
+
 ### 7. 回测（Celery 投递，后端零计算）
 
 红线与前几章一致：**后端不做任何回测算术**。`services/backtest_service.py` 只做参数校验、

@@ -43,6 +43,12 @@
 （卖出要落在窗口内，跨过留出段起点的数据不许用来选规则）。2022 之后是留出段，
 只在过筛之后用 `--from 2022-01-01` 读它一次。
 
+**候选批次可以从文件读**（`--inventory-file`）：合取判据那批由
+`scripts/conjunction_candidates.py` 预注册到 `config/rule_candidates_conj.json`，不能寄存在
+Mongo 的 `profit_scan_base_conditions` 里 —— `base_conditions.py` 每次入库前先 `delete_many({})`，
+批次会随时被清掉。批次文件必须整批跑：`--limit-conditions` 遇到批次文件直接报错
+（从 60 条里挑 10 条看，挑的动作本身就回到了数据里，预注册就没意义了）。
+
 **数据深度是个硬约束**（2026-09-28 那轮说的「2006→2021」是错的，10-17 全池实测）：
 `data/stock_kline/*.parquet` 是分批滚动重建的，5,186 只股票票深浅不一（92~2,637 行、中位 1,827 行），
 其中 1,641 只的第一根日线在 2015 年、1,019 只在 2016 年——那是重建深度，不是上市日期。
@@ -461,18 +467,47 @@ def make_row(c: dict, prof: dict, st: dict, n_trials: int, n_stock: int, n_days:
 
 # ------------------------------------------------------------------ 清单
 
-def load_inventory(limit: int) -> list[dict]:
-    """从 Mongo 取基础条件；试水时按类别分层抽，别让 720 条价格条件把样本占满。"""
+def load_inventory(limit: int, inventory_file: str = "") -> tuple[list[dict], dict]:
+    """取候选条件，返回 (条件列表, 批次信息)。
+
+    默认从 Mongo 取基础条件；试水时按类别分层抽，别让 720 条价格条件把样本占满。
+    `--inventory-file` 读预注册批次文件（合取那批）：**整批取，不抽**，
+    从固定条数里挑几条看等于事后挑数据。
+    """
+    keys = ("id", "kind", "field", "ref", "expr", "label", "percentile", "sample_trigger_pct")
+    if inventory_file:
+        path = Path(inventory_file)
+        if not path.is_file():
+            raise SystemExit(f"--inventory-file 找不到文件：{path}")
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        items = doc.get("conditions") or []
+        if not items:
+            raise SystemExit(f"{path} 里没有 conditions")
+        declared = doc.get("n_conditions")
+        if declared is not None and int(declared) != len(items):
+            raise SystemExit(f"{path} 声明 {declared} 条、实际 {len(items)} 条："
+                             f"预注册批次的条数不许改（改了就等于重新挑数据）")
+        holdout = str(doc.get("holdout_start") or HOLDOUT_START)
+        if holdout != HOLDOUT_START:
+            raise SystemExit(f"{path} 的 holdout_start={holdout} 与扫描口径 {HOLDOUT_START} 不一致")
+        conds = sorted(({k: c.get(k) for k in keys} for c in items), key=band_key)
+        if limit and limit < len(conds):
+            raise SystemExit(f"预注册批次（{path.name}，{len(conds)} 条）要整批跑，"
+                             f"--limit-conditions={limit} 请去掉：从固定条数里挑几条看，"
+                             f"挑的动作本身就回到了数据里")
+        return conds, {"source": str(path), "batch_id": doc.get("batch_id"),
+                       "batch_name": doc.get("name")}
+
     import database
 
     col = database.get_db()[BASE_COLL]
-    conds = sorted(({k: d.get(k) for k in ("id", "kind", "field", "ref", "expr", "label",
-                                           "percentile", "sample_trigger_pct")}
+    conds = sorted(({k: d.get(k) for k in keys}
                     for d in col.find({}, {"_id": 0})), key=band_key)
     if not conds:
         raise SystemExit(f"{BASE_COLL} 是空的，先跑 scripts/base_conditions.py")
+    batch = {"source": f"mongo:{BASE_COLL}"}
     if not limit or limit >= len(conds):
-        return conds
+        return conds, batch
     by: dict[str, list[dict]] = {}
     for c in conds:
         by.setdefault(c["kind"], []).append(c)
@@ -500,7 +535,7 @@ def load_inventory(limit: int) -> list[dict]:
         g = by[kind]
         # 类内也摊开取（按分位序等距），别全取排在最前面的那一档
         picked += [g[int(round(x))] for x in np.linspace(0, len(g) - 1, min(quota[kind], len(g)))]
-    return sorted(picked, key=band_key)
+    return sorted(picked, key=band_key), batch
 
 
 # ------------------------------------------------------------------ 主扫描
@@ -969,6 +1004,8 @@ def main() -> int:
     ap.add_argument("--skip-mem-guard", action="store_true",
                     help="不等内存水位（默认可用不足 3G、或交换剩余不足一成时直接拒绝起跑）")
     ap.add_argument("--limit-conditions", type=int, default=0, help="只扫 N 条（分层抽，试水）")
+    ap.add_argument("--inventory-file", default="",
+                    help="预注册批次 JSON（scripts/conjunction_candidates.py 生成），整批读、不抽")
     ap.add_argument("--from", dest="date_from", default=DATE_FROM)
     ap.add_argument("--to", dest="date_to", default=HOLDOUT_START)
     ap.add_argument("--amount", type=int, default=20_000, help="每笔金额（元），成本档口径")
@@ -994,7 +1031,7 @@ def main() -> int:
 
     check_mem_headroom(args.skip_mem_guard)
 
-    conds = load_inventory(args.limit_conditions)
+    conds, batch = load_inventory(args.limit_conditions, args.inventory_file)
     for c in conds:
         c["fields"] = rule_expr.validate(c["expr"])
     profs = profiles()
@@ -1061,6 +1098,7 @@ def main() -> int:
                    "run_id": "" if args.dry_run else run_id, "combos": combos,
                    "trials_total": args.trials_total, "dry_run": bool(args.dry_run),
                    "n_pass": len(good), "window": [args.date_from, args.date_to],
+                   "batch_id": batch.get("batch_id"), "inventory": batch.get("source"),
                    "pool": pool_doc})
     if args.dry_run:
         logger.info("dry-run：不写 Mongo（累计试次已记账到 %s 次）", f"{args.trials_total:,}")
@@ -1072,7 +1110,7 @@ def main() -> int:
            "n_trials_total": args.trials_total, "trial_budget": args.trial_budget,
            "t_required": round(rule_gates.t_required(args.trials_total), 3), "cost_pp": COST_PP,
            "trade_amount": args.amount, "step": args.step, "files": len(files),
-           "stocks": meta["stocks"], "pool": pool_doc,
+           "stocks": meta["stocks"], "pool": pool_doc, "batch": batch,
            "n_pass": len(good), "elapsed_s": round(meta["elapsed"], 1), "fills": meta["fills"],
            "holdout_start": HOLDOUT_START}
     to_mongo(run, rows)

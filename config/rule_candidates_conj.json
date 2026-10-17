@@ -1,0 +1,1594 @@
+{
+ "batch_id": "20261017-conj-v1",
+ "name": "合取判据 v1（预注册批次，跑前不加不减）",
+ "note": "60 条全部由 v1 已注册的 12 条尾档两两 AND 而成，阈值一个都没新增：组合不引入新自由度，多重比较只花在 60×64=3840 个格子上。跑之前不许按读数增删条目；expr 文法与线上判定同一真源 stock_selector/backtest/rule_expr.py。",
+ "holdout_start": "2021-12-31",
+ "source_inventory": "/data/work/SelectStock/logs/profit_scan/base_conditions.json",
+ "n_axes": 6,
+ "n_axis_pairs": 15,
+ "n_conditions": 60,
+ "n_profiles": 64,
+ "n_cells": 3840,
+ "conditions": [
+  {
+   "id": "c_posL_vrL",
+   "kind": "conjunction",
+   "field": "pos60+vol_ratio",
+   "ref": "",
+   "expr": "pos60 < 0.02837 and vol_ratio < 0.6205",
+   "label": "60日位置低位 且 量比缩量",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "pos60",
+    "vol_ratio"
+   ],
+   "why": "区间底部 + 无人交易：抛压也不在，是真冷门而不是急跌，等的是量不是价",
+   "sources": [
+    {
+     "id": "n_pos60_q0_10",
+     "expr": "pos60 < 0.02837"
+    },
+    {
+     "id": "n_vol_ratio_q0_10",
+     "expr": "vol_ratio < 0.6205"
+    }
+   ]
+  },
+  {
+   "id": "c_posL_vrH",
+   "kind": "conjunction",
+   "field": "pos60+vol_ratio",
+   "ref": "",
+   "expr": "pos60 < 0.02837 and vol_ratio >= 1.481",
+   "label": "60日位置低位 且 量比放量",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "pos60",
+    "vol_ratio"
+   ],
+   "why": "区间底部 + 放量：低位有人接货，经典建仓形态；也可能是最后一跌的恐慌换手，所以要看卖法",
+   "sources": [
+    {
+     "id": "n_pos60_q0_10",
+     "expr": "pos60 < 0.02837"
+    },
+    {
+     "id": "n_vol_ratio_q90_100",
+     "expr": "vol_ratio >= 1.481"
+    }
+   ]
+  },
+  {
+   "id": "c_posH_vrL",
+   "kind": "conjunction",
+   "field": "pos60+vol_ratio",
+   "ref": "",
+   "expr": "pos60 >= 0.913 and vol_ratio < 0.6205",
+   "label": "60日位置高位 且 量比缩量",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "pos60",
+    "vol_ratio"
+   ],
+   "why": "区间顶部 + 缩量：涨不动只能存量对倒，顶部最常见的失力形态",
+   "sources": [
+    {
+     "id": "n_pos60_q90_100",
+     "expr": "pos60 >= 0.913"
+    },
+    {
+     "id": "n_vol_ratio_q0_10",
+     "expr": "vol_ratio < 0.6205"
+    }
+   ]
+  },
+  {
+   "id": "c_posH_vrH",
+   "kind": "conjunction",
+   "field": "pos60+vol_ratio",
+   "ref": "",
+   "expr": "pos60 >= 0.913 and vol_ratio >= 1.481",
+   "label": "60日位置高位 且 量比放量",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "pos60",
+    "vol_ratio"
+   ],
+   "why": "区间顶部 + 放量：高位换手兑现，获利盘出货与新多接力同价，方向要后来才知道",
+   "sources": [
+    {
+     "id": "n_pos60_q90_100",
+     "expr": "pos60 >= 0.913"
+    },
+    {
+     "id": "n_vol_ratio_q90_100",
+     "expr": "vol_ratio >= 1.481"
+    }
+   ]
+  },
+  {
+   "id": "c_posL_vzL",
+   "kind": "conjunction",
+   "field": "pos60+vol_z",
+   "ref": "",
+   "expr": "pos60 < 0.02837 and vol_z + 1.121 < 0",
+   "label": "60日位置低位 且 量能Z量能收缩",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "pos60",
+    "vol_z"
+   ],
+   "why": "同 pos×vr 的 LL，把相对量比换成绝对量能 Z 做口径对照",
+   "sources": [
+    {
+     "id": "n_pos60_q0_10",
+     "expr": "pos60 < 0.02837"
+    },
+    {
+     "id": "n_vol_z_q0_10",
+     "expr": "vol_z + 1.121 < 0"
+    }
+   ]
+  },
+  {
+   "id": "c_posL_vzH",
+   "kind": "conjunction",
+   "field": "pos60+vol_z",
+   "ref": "",
+   "expr": "pos60 < 0.02837 and vol_z >= 1.546",
+   "label": "60日位置低位 且 量能Z量能放大",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "pos60",
+    "vol_z"
+   ],
+   "why": "同 pos×vr 的 LH（对照）",
+   "sources": [
+    {
+     "id": "n_pos60_q0_10",
+     "expr": "pos60 < 0.02837"
+    },
+    {
+     "id": "n_vol_z_q90_100",
+     "expr": "vol_z >= 1.546"
+    }
+   ]
+  },
+  {
+   "id": "c_posH_vzL",
+   "kind": "conjunction",
+   "field": "pos60+vol_z",
+   "ref": "",
+   "expr": "pos60 >= 0.913 and vol_z + 1.121 < 0",
+   "label": "60日位置高位 且 量能Z量能收缩",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "pos60",
+    "vol_z"
+   ],
+   "why": "同 pos×vr 的 HL（对照）",
+   "sources": [
+    {
+     "id": "n_pos60_q90_100",
+     "expr": "pos60 >= 0.913"
+    },
+    {
+     "id": "n_vol_z_q0_10",
+     "expr": "vol_z + 1.121 < 0"
+    }
+   ]
+  },
+  {
+   "id": "c_posH_vzH",
+   "kind": "conjunction",
+   "field": "pos60+vol_z",
+   "ref": "",
+   "expr": "pos60 >= 0.913 and vol_z >= 1.546",
+   "label": "60日位置高位 且 量能Z量能放大",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "pos60",
+    "vol_z"
+   ],
+   "why": "同 pos×vr 的 HH（对照）",
+   "sources": [
+    {
+     "id": "n_pos60_q90_100",
+     "expr": "pos60 >= 0.913"
+    },
+    {
+     "id": "n_vol_z_q90_100",
+     "expr": "vol_z >= 1.546"
+    }
+   ]
+  },
+  {
+   "id": "c_posL_rsiL",
+   "kind": "conjunction",
+   "field": "pos60+rsi14",
+   "ref": "",
+   "expr": "pos60 < 0.02837 and rsi14 < 33.86",
+   "label": "60日位置低位 且 RSI14超卖",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "pos60",
+    "rsi14"
+   ],
+   "why": "跌了很久 + 短期也弱：时间成本那一半已就位，缺的是「有没有钱来」",
+   "sources": [
+    {
+     "id": "n_pos60_q0_10",
+     "expr": "pos60 < 0.02837"
+    },
+    {
+     "id": "n_rsi14_q0_10",
+     "expr": "rsi14 < 33.86"
+    }
+   ]
+  },
+  {
+   "id": "c_posL_rsiH",
+   "kind": "conjunction",
+   "field": "pos60+rsi14",
+   "ref": "",
+   "expr": "pos60 < 0.02837 and rsi14 >= 64.31",
+   "label": "60日位置低位 且 RSI14超买",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "pos60",
+    "rsi14"
+   ],
+   "why": "跌了很久 + 短期已冲高：底部刚启动就追，是最容易买在反弹尾巴的一格",
+   "sources": [
+    {
+     "id": "n_pos60_q0_10",
+     "expr": "pos60 < 0.02837"
+    },
+    {
+     "id": "n_rsi14_q90_100",
+     "expr": "rsi14 >= 64.31"
+    }
+   ]
+  },
+  {
+   "id": "c_posH_rsiL",
+   "kind": "conjunction",
+   "field": "pos60+rsi14",
+   "ref": "",
+   "expr": "pos60 >= 0.913 and rsi14 < 33.86",
+   "label": "60日位置高位 且 RSI14超卖",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "pos60",
+    "rsi14"
+   ],
+   "why": "高位 + 短期超卖：强势票回调，趋势还在但短期弱，抄底与破位在这一格分不清",
+   "sources": [
+    {
+     "id": "n_pos60_q90_100",
+     "expr": "pos60 >= 0.913"
+    },
+    {
+     "id": "n_rsi14_q0_10",
+     "expr": "rsi14 < 33.86"
+    }
+   ]
+  },
+  {
+   "id": "c_posH_rsiH",
+   "kind": "conjunction",
+   "field": "pos60+rsi14",
+   "ref": "",
+   "expr": "pos60 >= 0.913 and rsi14 >= 64.31",
+   "label": "60日位置高位 且 RSI14超买",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "pos60",
+    "rsi14"
+   ],
+   "why": "高位 + 短期超买：拥挤再加透支，卖出证据最强的一格",
+   "sources": [
+    {
+     "id": "n_pos60_q90_100",
+     "expr": "pos60 >= 0.913"
+    },
+    {
+     "id": "n_rsi14_q90_100",
+     "expr": "rsi14 >= 64.31"
+    }
+   ]
+  },
+  {
+   "id": "c_posL_adxL",
+   "kind": "conjunction",
+   "field": "pos60+adx14",
+   "ref": "",
+   "expr": "pos60 < 0.02837 and adx14 < 13.76",
+   "label": "60日位置低位 且 ADX14无趋势",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "pos60"
+   ],
+   "why": "低位 + 无方向：底部横盘无人问津 —— 本批要检验的核心假设（持仓被时间磨死）",
+   "sources": [
+    {
+     "id": "n_pos60_q0_10",
+     "expr": "pos60 < 0.02837"
+    },
+    {
+     "id": "n_adx14_q0_10",
+     "expr": "adx14 < 13.76"
+    }
+   ]
+  },
+  {
+   "id": "c_posL_adxH",
+   "kind": "conjunction",
+   "field": "pos60+adx14",
+   "ref": "",
+   "expr": "pos60 < 0.02837 and adx14 >= 39.8",
+   "label": "60日位置低位 且 ADX14强趋势",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "pos60"
+   ],
+   "why": "低位 + 强方向：正在趋势性下跌（ADX 不分方向），逆着买等于接刀",
+   "sources": [
+    {
+     "id": "n_pos60_q0_10",
+     "expr": "pos60 < 0.02837"
+    },
+    {
+     "id": "n_adx14_q90_100",
+     "expr": "adx14 >= 39.8"
+    }
+   ]
+  },
+  {
+   "id": "c_posH_adxL",
+   "kind": "conjunction",
+   "field": "pos60+adx14",
+   "ref": "",
+   "expr": "pos60 >= 0.913 and adx14 < 13.76",
+   "label": "60日位置高位 且 ADX14无趋势",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "pos60"
+   ],
+   "why": "高位 + 无方向：高位横盘滞涨，方向消失后靠什么继续涨",
+   "sources": [
+    {
+     "id": "n_pos60_q90_100",
+     "expr": "pos60 >= 0.913"
+    },
+    {
+     "id": "n_adx14_q0_10",
+     "expr": "adx14 < 13.76"
+    }
+   ]
+  },
+  {
+   "id": "c_posH_adxH",
+   "kind": "conjunction",
+   "field": "pos60+adx14",
+   "ref": "",
+   "expr": "pos60 >= 0.913 and adx14 >= 39.8",
+   "label": "60日位置高位 且 ADX14强趋势",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "pos60"
+   ],
+   "why": "高位 + 强方向：主升段，趋势是持有方的朋友",
+   "sources": [
+    {
+     "id": "n_pos60_q90_100",
+     "expr": "pos60 >= 0.913"
+    },
+    {
+     "id": "n_adx14_q90_100",
+     "expr": "adx14 >= 39.8"
+    }
+   ]
+  },
+  {
+   "id": "c_posL_biasL",
+   "kind": "conjunction",
+   "field": "pos60+close/ma20",
+   "ref": "",
+   "expr": "pos60 < 0.02837 and close < ma20 * 0.95",
+   "label": "60日位置低位 且 20日线乖离线下5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "close",
+    "ma20",
+    "pos60"
+   ],
+   "why": "区间底部 + 已跌破月线 5%：双重弱势，趋势卖出证据比单看一根足",
+   "sources": [
+    {
+     "id": "n_pos60_q0_10",
+     "expr": "pos60 < 0.02837"
+    },
+    {
+     "id": "p_close_ma20_d5_below",
+     "expr": "close < ma20 * 0.95"
+    }
+   ]
+  },
+  {
+   "id": "c_posL_biasH",
+   "kind": "conjunction",
+   "field": "pos60+close/ma20",
+   "ref": "",
+   "expr": "pos60 < 0.02837 and close > ma20 * 1.05",
+   "label": "60日位置低位 且 20日线乖离线上5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "close",
+    "ma20",
+    "pos60"
+   ],
+   "why": "区间底部 + 站上月线 5%：整段位置低但刚从均线下方拉起，底部反转的第一格",
+   "sources": [
+    {
+     "id": "n_pos60_q0_10",
+     "expr": "pos60 < 0.02837"
+    },
+    {
+     "id": "p_close_ma20_d5_above",
+     "expr": "close > ma20 * 1.05"
+    }
+   ]
+  },
+  {
+   "id": "c_posH_biasL",
+   "kind": "conjunction",
+   "field": "pos60+close/ma20",
+   "ref": "",
+   "expr": "pos60 >= 0.913 and close < ma20 * 0.95",
+   "label": "60日位置高位 且 20日线乖离线下5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "close",
+    "ma20",
+    "pos60"
+   ],
+   "why": "区间顶部 + 跌破月线 5%：新高之后回落破线，趋势资金离场",
+   "sources": [
+    {
+     "id": "n_pos60_q90_100",
+     "expr": "pos60 >= 0.913"
+    },
+    {
+     "id": "p_close_ma20_d5_below",
+     "expr": "close < ma20 * 0.95"
+    }
+   ]
+  },
+  {
+   "id": "c_posH_biasH",
+   "kind": "conjunction",
+   "field": "pos60+close/ma20",
+   "ref": "",
+   "expr": "pos60 >= 0.913 and close > ma20 * 1.05",
+   "label": "60日位置高位 且 20日线乖离线上5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "close",
+    "ma20",
+    "pos60"
+   ],
+   "why": "区间顶部 + 高于月线 5%：新高位大幅站上均线，追高与持盈的分歧点",
+   "sources": [
+    {
+     "id": "n_pos60_q90_100",
+     "expr": "pos60 >= 0.913"
+    },
+    {
+     "id": "p_close_ma20_d5_above",
+     "expr": "close > ma20 * 1.05"
+    }
+   ]
+  },
+  {
+   "id": "c_vrL_vzL",
+   "kind": "conjunction",
+   "field": "vol_ratio+vol_z",
+   "ref": "",
+   "expr": "vol_ratio < 0.6205 and vol_z + 1.121 < 0",
+   "label": "量比缩量 且 量能Z量能收缩",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "vol_ratio",
+    "vol_z"
+   ],
+   "why": "两个量能指标同时确认「真缩量」：把冷门状态钉死，避免单个口径的假象",
+   "sources": [
+    {
+     "id": "n_vol_ratio_q0_10",
+     "expr": "vol_ratio < 0.6205"
+    },
+    {
+     "id": "n_vol_z_q0_10",
+     "expr": "vol_z + 1.121 < 0"
+    }
+   ]
+  },
+  {
+   "id": "c_vrL_vzH",
+   "kind": "conjunction",
+   "field": "vol_ratio+vol_z",
+   "ref": "",
+   "expr": "vol_ratio < 0.6205 and vol_z >= 1.546",
+   "label": "量比缩量 且 量能Z量能放大",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "vol_ratio",
+    "vol_z"
+   ],
+   "why": "相对缩量但绝对量能放大 = 全场放量而这只票没跟上，相对冷门（背离格）",
+   "sources": [
+    {
+     "id": "n_vol_ratio_q0_10",
+     "expr": "vol_ratio < 0.6205"
+    },
+    {
+     "id": "n_vol_z_q90_100",
+     "expr": "vol_z >= 1.546"
+    }
+   ]
+  },
+  {
+   "id": "c_vrH_vzL",
+   "kind": "conjunction",
+   "field": "vol_ratio+vol_z",
+   "ref": "",
+   "expr": "vol_ratio >= 1.481 and vol_z + 1.121 < 0",
+   "label": "量比放量 且 量能Z量能收缩",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "vol_ratio",
+    "vol_z"
+   ],
+   "why": "相对放量但绝对收缩 = 全场缩量而这只票还有成交，相对活跃（背离格）",
+   "sources": [
+    {
+     "id": "n_vol_ratio_q90_100",
+     "expr": "vol_ratio >= 1.481"
+    },
+    {
+     "id": "n_vol_z_q0_10",
+     "expr": "vol_z + 1.121 < 0"
+    }
+   ]
+  },
+  {
+   "id": "c_vrH_vzH",
+   "kind": "conjunction",
+   "field": "vol_ratio+vol_z",
+   "ref": "",
+   "expr": "vol_ratio >= 1.481 and vol_z >= 1.546",
+   "label": "量比放量 且 量能Z量能放大",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "vol_ratio",
+    "vol_z"
+   ],
+   "why": "同时确认「真放量」：稳健判定，与 LL 一起构成本轴族的对照对",
+   "sources": [
+    {
+     "id": "n_vol_ratio_q90_100",
+     "expr": "vol_ratio >= 1.481"
+    },
+    {
+     "id": "n_vol_z_q90_100",
+     "expr": "vol_z >= 1.546"
+    }
+   ]
+  },
+  {
+   "id": "c_vrL_rsiL",
+   "kind": "conjunction",
+   "field": "vol_ratio+rsi14",
+   "ref": "",
+   "expr": "vol_ratio < 0.6205 and rsi14 < 33.86",
+   "label": "量比缩量 且 RSI14超卖",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "rsi14",
+    "vol_ratio"
+   ],
+   "why": "无量阴跌：卖压体现在时间上而不是成交量上",
+   "sources": [
+    {
+     "id": "n_vol_ratio_q0_10",
+     "expr": "vol_ratio < 0.6205"
+    },
+    {
+     "id": "n_rsi14_q0_10",
+     "expr": "rsi14 < 33.86"
+    }
+   ]
+  },
+  {
+   "id": "c_vrL_rsiH",
+   "kind": "conjunction",
+   "field": "vol_ratio+rsi14",
+   "ref": "",
+   "expr": "vol_ratio < 0.6205 and rsi14 >= 64.31",
+   "label": "量比缩量 且 RSI14超买",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "rsi14",
+    "vol_ratio"
+   ],
+   "why": "轻盘拉升：少量资金就能把 RSI 推高，最容易出假突破",
+   "sources": [
+    {
+     "id": "n_vol_ratio_q0_10",
+     "expr": "vol_ratio < 0.6205"
+    },
+    {
+     "id": "n_rsi14_q90_100",
+     "expr": "rsi14 >= 64.31"
+    }
+   ]
+  },
+  {
+   "id": "c_vrH_rsiL",
+   "kind": "conjunction",
+   "field": "vol_ratio+rsi14",
+   "ref": "",
+   "expr": "vol_ratio >= 1.481 and rsi14 < 33.86",
+   "label": "量比放量 且 RSI14超卖",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "rsi14",
+    "vol_ratio"
+   ],
+   "why": "下跌中放量：恐慌换手或主力承接，同一价格两种解释",
+   "sources": [
+    {
+     "id": "n_vol_ratio_q90_100",
+     "expr": "vol_ratio >= 1.481"
+    },
+    {
+     "id": "n_rsi14_q0_10",
+     "expr": "rsi14 < 33.86"
+    }
+   ]
+  },
+  {
+   "id": "c_vrH_rsiH",
+   "kind": "conjunction",
+   "field": "vol_ratio+rsi14",
+   "ref": "",
+   "expr": "vol_ratio >= 1.481 and rsi14 >= 64.31",
+   "label": "量比放量 且 RSI14超买",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "rsi14",
+    "vol_ratio"
+   ],
+   "why": "放量上攻且短期已透支：涨得最猛也最贵的一格",
+   "sources": [
+    {
+     "id": "n_vol_ratio_q90_100",
+     "expr": "vol_ratio >= 1.481"
+    },
+    {
+     "id": "n_rsi14_q90_100",
+     "expr": "rsi14 >= 64.31"
+    }
+   ]
+  },
+  {
+   "id": "c_vrL_adxL",
+   "kind": "conjunction",
+   "field": "vol_ratio+adx14",
+   "ref": "",
+   "expr": "vol_ratio < 0.6205 and adx14 < 13.76",
+   "label": "量比缩量 且 ADX14无趋势",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "vol_ratio"
+   ],
+   "why": "死水：缩量 + 无方向，冷门程度的下限",
+   "sources": [
+    {
+     "id": "n_vol_ratio_q0_10",
+     "expr": "vol_ratio < 0.6205"
+    },
+    {
+     "id": "n_adx14_q0_10",
+     "expr": "adx14 < 13.76"
+    }
+   ]
+  },
+  {
+   "id": "c_vrL_adxH",
+   "kind": "conjunction",
+   "field": "vol_ratio+adx14",
+   "ref": "",
+   "expr": "vol_ratio < 0.6205 and adx14 >= 39.8",
+   "label": "量比缩量 且 ADX14强趋势",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "vol_ratio"
+   ],
+   "why": "存量趋势推动：趋势靠少数人对倒维持，能不能成交要单独看涨跌停",
+   "sources": [
+    {
+     "id": "n_vol_ratio_q0_10",
+     "expr": "vol_ratio < 0.6205"
+    },
+    {
+     "id": "n_adx14_q90_100",
+     "expr": "adx14 >= 39.8"
+    }
+   ]
+  },
+  {
+   "id": "c_vrH_adxL",
+   "kind": "conjunction",
+   "field": "vol_ratio+adx14",
+   "ref": "",
+   "expr": "vol_ratio >= 1.481 and adx14 < 13.76",
+   "label": "量比放量 且 ADX14无趋势",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "vol_ratio"
+   ],
+   "why": "震荡放量：换手高却不出方向，摩擦成本最高的一格",
+   "sources": [
+    {
+     "id": "n_vol_ratio_q90_100",
+     "expr": "vol_ratio >= 1.481"
+    },
+    {
+     "id": "n_adx14_q0_10",
+     "expr": "adx14 < 13.76"
+    }
+   ]
+  },
+  {
+   "id": "c_vrH_adxH",
+   "kind": "conjunction",
+   "field": "vol_ratio+adx14",
+   "ref": "",
+   "expr": "vol_ratio >= 1.481 and adx14 >= 39.8",
+   "label": "量比放量 且 ADX14强趋势",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "vol_ratio"
+   ],
+   "why": "资金推动的趋势：最像「有人在做」的一格",
+   "sources": [
+    {
+     "id": "n_vol_ratio_q90_100",
+     "expr": "vol_ratio >= 1.481"
+    },
+    {
+     "id": "n_adx14_q90_100",
+     "expr": "adx14 >= 39.8"
+    }
+   ]
+  },
+  {
+   "id": "c_vrL_biasL",
+   "kind": "conjunction",
+   "field": "vol_ratio+close/ma20",
+   "ref": "",
+   "expr": "vol_ratio < 0.6205 and close < ma20 * 0.95",
+   "label": "量比缩量 且 20日线乖离线下5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "close",
+    "ma20",
+    "vol_ratio"
+   ],
+   "why": "破位后无人补：缩量加均线下方，阴跌继续",
+   "sources": [
+    {
+     "id": "n_vol_ratio_q0_10",
+     "expr": "vol_ratio < 0.6205"
+    },
+    {
+     "id": "p_close_ma20_d5_below",
+     "expr": "close < ma20 * 0.95"
+    }
+   ]
+  },
+  {
+   "id": "c_vrL_biasH",
+   "kind": "conjunction",
+   "field": "vol_ratio+close/ma20",
+   "ref": "",
+   "expr": "vol_ratio < 0.6205 and close > ma20 * 1.05",
+   "label": "量比缩量 且 20日线乖离线上5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "close",
+    "ma20",
+    "vol_ratio"
+   ],
+   "why": "轻盘拉高：浮盈靠不住，量能没跟上",
+   "sources": [
+    {
+     "id": "n_vol_ratio_q0_10",
+     "expr": "vol_ratio < 0.6205"
+    },
+    {
+     "id": "p_close_ma20_d5_above",
+     "expr": "close > ma20 * 1.05"
+    }
+   ]
+  },
+  {
+   "id": "c_vrH_biasL",
+   "kind": "conjunction",
+   "field": "vol_ratio+close/ma20",
+   "ref": "",
+   "expr": "vol_ratio >= 1.481 and close < ma20 * 0.95",
+   "label": "量比放量 且 20日线乖离线下5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "close",
+    "ma20",
+    "vol_ratio"
+   ],
+   "why": "跌破均线且有对手盘：卖信号强度最高的一格（真有人在卖）",
+   "sources": [
+    {
+     "id": "n_vol_ratio_q90_100",
+     "expr": "vol_ratio >= 1.481"
+    },
+    {
+     "id": "p_close_ma20_d5_below",
+     "expr": "close < ma20 * 0.95"
+    }
+   ]
+  },
+  {
+   "id": "c_vrH_biasH",
+   "kind": "conjunction",
+   "field": "vol_ratio+close/ma20",
+   "ref": "",
+   "expr": "vol_ratio >= 1.481 and close > ma20 * 1.05",
+   "label": "量比放量 且 20日线乖离线上5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "close",
+    "ma20",
+    "vol_ratio"
+   ],
+   "why": "主升放量：获利盘随时兑现，止盈与持盈的分界",
+   "sources": [
+    {
+     "id": "n_vol_ratio_q90_100",
+     "expr": "vol_ratio >= 1.481"
+    },
+    {
+     "id": "p_close_ma20_d5_above",
+     "expr": "close > ma20 * 1.05"
+    }
+   ]
+  },
+  {
+   "id": "c_vzL_rsiL",
+   "kind": "conjunction",
+   "field": "vol_z+rsi14",
+   "ref": "",
+   "expr": "vol_z + 1.121 < 0 and rsi14 < 33.86",
+   "label": "量能Z量能收缩 且 RSI14超卖",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "rsi14",
+    "vol_z"
+   ],
+   "why": "同 vr×rsi 的 LL（绝对量能口径对照）",
+   "sources": [
+    {
+     "id": "n_vol_z_q0_10",
+     "expr": "vol_z + 1.121 < 0"
+    },
+    {
+     "id": "n_rsi14_q0_10",
+     "expr": "rsi14 < 33.86"
+    }
+   ]
+  },
+  {
+   "id": "c_vzL_rsiH",
+   "kind": "conjunction",
+   "field": "vol_z+rsi14",
+   "ref": "",
+   "expr": "vol_z + 1.121 < 0 and rsi14 >= 64.31",
+   "label": "量能Z量能收缩 且 RSI14超买",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "rsi14",
+    "vol_z"
+   ],
+   "why": "同 vr×rsi 的 LH（对照）",
+   "sources": [
+    {
+     "id": "n_vol_z_q0_10",
+     "expr": "vol_z + 1.121 < 0"
+    },
+    {
+     "id": "n_rsi14_q90_100",
+     "expr": "rsi14 >= 64.31"
+    }
+   ]
+  },
+  {
+   "id": "c_vzH_rsiL",
+   "kind": "conjunction",
+   "field": "vol_z+rsi14",
+   "ref": "",
+   "expr": "vol_z >= 1.546 and rsi14 < 33.86",
+   "label": "量能Z量能放大 且 RSI14超卖",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "rsi14",
+    "vol_z"
+   ],
+   "why": "同 vr×rsi 的 HL（对照）",
+   "sources": [
+    {
+     "id": "n_vol_z_q90_100",
+     "expr": "vol_z >= 1.546"
+    },
+    {
+     "id": "n_rsi14_q0_10",
+     "expr": "rsi14 < 33.86"
+    }
+   ]
+  },
+  {
+   "id": "c_vzH_rsiH",
+   "kind": "conjunction",
+   "field": "vol_z+rsi14",
+   "ref": "",
+   "expr": "vol_z >= 1.546 and rsi14 >= 64.31",
+   "label": "量能Z量能放大 且 RSI14超买",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "rsi14",
+    "vol_z"
+   ],
+   "why": "同 vr×rsi 的 HH（对照）",
+   "sources": [
+    {
+     "id": "n_vol_z_q90_100",
+     "expr": "vol_z >= 1.546"
+    },
+    {
+     "id": "n_rsi14_q90_100",
+     "expr": "rsi14 >= 64.31"
+    }
+   ]
+  },
+  {
+   "id": "c_vzL_adxL",
+   "kind": "conjunction",
+   "field": "vol_z+adx14",
+   "ref": "",
+   "expr": "vol_z + 1.121 < 0 and adx14 < 13.76",
+   "label": "量能Z量能收缩 且 ADX14无趋势",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "vol_z"
+   ],
+   "why": "同 vr×adx 的 LL（对照）",
+   "sources": [
+    {
+     "id": "n_vol_z_q0_10",
+     "expr": "vol_z + 1.121 < 0"
+    },
+    {
+     "id": "n_adx14_q0_10",
+     "expr": "adx14 < 13.76"
+    }
+   ]
+  },
+  {
+   "id": "c_vzL_adxH",
+   "kind": "conjunction",
+   "field": "vol_z+adx14",
+   "ref": "",
+   "expr": "vol_z + 1.121 < 0 and adx14 >= 39.8",
+   "label": "量能Z量能收缩 且 ADX14强趋势",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "vol_z"
+   ],
+   "why": "同 vr×adx 的 LH（对照）",
+   "sources": [
+    {
+     "id": "n_vol_z_q0_10",
+     "expr": "vol_z + 1.121 < 0"
+    },
+    {
+     "id": "n_adx14_q90_100",
+     "expr": "adx14 >= 39.8"
+    }
+   ]
+  },
+  {
+   "id": "c_vzH_adxL",
+   "kind": "conjunction",
+   "field": "vol_z+adx14",
+   "ref": "",
+   "expr": "vol_z >= 1.546 and adx14 < 13.76",
+   "label": "量能Z量能放大 且 ADX14无趋势",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "vol_z"
+   ],
+   "why": "同 vr×adx 的 HL（对照）",
+   "sources": [
+    {
+     "id": "n_vol_z_q90_100",
+     "expr": "vol_z >= 1.546"
+    },
+    {
+     "id": "n_adx14_q0_10",
+     "expr": "adx14 < 13.76"
+    }
+   ]
+  },
+  {
+   "id": "c_vzH_adxH",
+   "kind": "conjunction",
+   "field": "vol_z+adx14",
+   "ref": "",
+   "expr": "vol_z >= 1.546 and adx14 >= 39.8",
+   "label": "量能Z量能放大 且 ADX14强趋势",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "vol_z"
+   ],
+   "why": "同 vr×adx 的 HH（对照）",
+   "sources": [
+    {
+     "id": "n_vol_z_q90_100",
+     "expr": "vol_z >= 1.546"
+    },
+    {
+     "id": "n_adx14_q90_100",
+     "expr": "adx14 >= 39.8"
+    }
+   ]
+  },
+  {
+   "id": "c_vzL_biasL",
+   "kind": "conjunction",
+   "field": "vol_z+close/ma20",
+   "ref": "",
+   "expr": "vol_z + 1.121 < 0 and close < ma20 * 0.95",
+   "label": "量能Z量能收缩 且 20日线乖离线下5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "close",
+    "ma20",
+    "vol_z"
+   ],
+   "why": "同 vr×bias 的 LL（对照）",
+   "sources": [
+    {
+     "id": "n_vol_z_q0_10",
+     "expr": "vol_z + 1.121 < 0"
+    },
+    {
+     "id": "p_close_ma20_d5_below",
+     "expr": "close < ma20 * 0.95"
+    }
+   ]
+  },
+  {
+   "id": "c_vzL_biasH",
+   "kind": "conjunction",
+   "field": "vol_z+close/ma20",
+   "ref": "",
+   "expr": "vol_z + 1.121 < 0 and close > ma20 * 1.05",
+   "label": "量能Z量能收缩 且 20日线乖离线上5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "close",
+    "ma20",
+    "vol_z"
+   ],
+   "why": "同 vr×bias 的 LH（对照）",
+   "sources": [
+    {
+     "id": "n_vol_z_q0_10",
+     "expr": "vol_z + 1.121 < 0"
+    },
+    {
+     "id": "p_close_ma20_d5_above",
+     "expr": "close > ma20 * 1.05"
+    }
+   ]
+  },
+  {
+   "id": "c_vzH_biasL",
+   "kind": "conjunction",
+   "field": "vol_z+close/ma20",
+   "ref": "",
+   "expr": "vol_z >= 1.546 and close < ma20 * 0.95",
+   "label": "量能Z量能放大 且 20日线乖离线下5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "close",
+    "ma20",
+    "vol_z"
+   ],
+   "why": "同 vr×bias 的 HL（对照）",
+   "sources": [
+    {
+     "id": "n_vol_z_q90_100",
+     "expr": "vol_z >= 1.546"
+    },
+    {
+     "id": "p_close_ma20_d5_below",
+     "expr": "close < ma20 * 0.95"
+    }
+   ]
+  },
+  {
+   "id": "c_vzH_biasH",
+   "kind": "conjunction",
+   "field": "vol_z+close/ma20",
+   "ref": "",
+   "expr": "vol_z >= 1.546 and close > ma20 * 1.05",
+   "label": "量能Z量能放大 且 20日线乖离线上5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "close",
+    "ma20",
+    "vol_z"
+   ],
+   "why": "同 vr×bias 的 HH（对照）",
+   "sources": [
+    {
+     "id": "n_vol_z_q90_100",
+     "expr": "vol_z >= 1.546"
+    },
+    {
+     "id": "p_close_ma20_d5_above",
+     "expr": "close > ma20 * 1.05"
+    }
+   ]
+  },
+  {
+   "id": "c_rsiL_adxL",
+   "kind": "conjunction",
+   "field": "rsi14+adx14",
+   "ref": "",
+   "expr": "rsi14 < 33.86 and adx14 < 13.76",
+   "label": "RSI14超卖 且 ADX14无趋势",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "rsi14"
+   ],
+   "why": "阴跌磨底：短期弱且没有加速，最熬人的一格",
+   "sources": [
+    {
+     "id": "n_rsi14_q0_10",
+     "expr": "rsi14 < 33.86"
+    },
+    {
+     "id": "n_adx14_q0_10",
+     "expr": "adx14 < 13.76"
+    }
+   ]
+  },
+  {
+   "id": "c_rsiL_adxH",
+   "kind": "conjunction",
+   "field": "rsi14+adx14",
+   "ref": "",
+   "expr": "rsi14 < 33.86 and adx14 >= 39.8",
+   "label": "RSI14超卖 且 ADX14强趋势",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "rsi14"
+   ],
+   "why": "趋势性下跌：短期弱叠加方向强，最不该抄底",
+   "sources": [
+    {
+     "id": "n_rsi14_q0_10",
+     "expr": "rsi14 < 33.86"
+    },
+    {
+     "id": "n_adx14_q90_100",
+     "expr": "adx14 >= 39.8"
+    }
+   ]
+  },
+  {
+   "id": "c_rsiH_adxL",
+   "kind": "conjunction",
+   "field": "rsi14+adx14",
+   "ref": "",
+   "expr": "rsi14 >= 64.31 and adx14 < 13.76",
+   "label": "RSI14超买 且 ADX14无趋势",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "rsi14"
+   ],
+   "why": "震荡上沿：冲高即回，趋势不给接力",
+   "sources": [
+    {
+     "id": "n_rsi14_q90_100",
+     "expr": "rsi14 >= 64.31"
+    },
+    {
+     "id": "n_adx14_q0_10",
+     "expr": "adx14 < 13.76"
+    }
+   ]
+  },
+  {
+   "id": "c_rsiH_adxH",
+   "kind": "conjunction",
+   "field": "rsi14+adx14",
+   "ref": "",
+   "expr": "rsi14 >= 64.31 and adx14 >= 39.8",
+   "label": "RSI14超买 且 ADX14强趋势",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "rsi14"
+   ],
+   "why": "加速段：涨得最顺也离顶部最近",
+   "sources": [
+    {
+     "id": "n_rsi14_q90_100",
+     "expr": "rsi14 >= 64.31"
+    },
+    {
+     "id": "n_adx14_q90_100",
+     "expr": "adx14 >= 39.8"
+    }
+   ]
+  },
+  {
+   "id": "c_rsiL_biasL",
+   "kind": "conjunction",
+   "field": "rsi14+close/ma20",
+   "ref": "",
+   "expr": "rsi14 < 33.86 and close < ma20 * 0.95",
+   "label": "RSI14超卖 且 20日线乖离线下5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "close",
+    "ma20",
+    "rsi14"
+   ],
+   "why": "双超卖（短期弱 + 破线）：均值回复的买入候选",
+   "sources": [
+    {
+     "id": "n_rsi14_q0_10",
+     "expr": "rsi14 < 33.86"
+    },
+    {
+     "id": "p_close_ma20_d5_below",
+     "expr": "close < ma20 * 0.95"
+    }
+   ]
+  },
+  {
+   "id": "c_rsiL_biasH",
+   "kind": "conjunction",
+   "field": "rsi14+close/ma20",
+   "ref": "",
+   "expr": "rsi14 < 33.86 and close > ma20 * 1.05",
+   "label": "RSI14超卖 且 20日线乖离线上5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "close",
+    "ma20",
+    "rsi14"
+   ],
+   "why": "强势票短期回调到位（趋势仍在、短期弱）：向下摊低与加仓的经典分歧格",
+   "sources": [
+    {
+     "id": "n_rsi14_q0_10",
+     "expr": "rsi14 < 33.86"
+    },
+    {
+     "id": "p_close_ma20_d5_above",
+     "expr": "close > ma20 * 1.05"
+    }
+   ]
+  },
+  {
+   "id": "c_rsiH_biasL",
+   "kind": "conjunction",
+   "field": "rsi14+close/ma20",
+   "ref": "",
+   "expr": "rsi14 >= 64.31 and close < ma20 * 0.95",
+   "label": "RSI14超买 且 20日线乖离线下5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "close",
+    "ma20",
+    "rsi14"
+   ],
+   "why": "破位后的急反弹：反抽性质，兑现窗口而不是趋势恢复",
+   "sources": [
+    {
+     "id": "n_rsi14_q90_100",
+     "expr": "rsi14 >= 64.31"
+    },
+    {
+     "id": "p_close_ma20_d5_below",
+     "expr": "close < ma20 * 0.95"
+    }
+   ]
+  },
+  {
+   "id": "c_rsiH_biasH",
+   "kind": "conjunction",
+   "field": "rsi14+close/ma20",
+   "ref": "",
+   "expr": "rsi14 >= 64.31 and close > ma20 * 1.05",
+   "label": "RSI14超买 且 20日线乖离线上5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "close",
+    "ma20",
+    "rsi14"
+   ],
+   "why": "超买 + 高乖离：回撤风险最大，提前止盈的候选",
+   "sources": [
+    {
+     "id": "n_rsi14_q90_100",
+     "expr": "rsi14 >= 64.31"
+    },
+    {
+     "id": "p_close_ma20_d5_above",
+     "expr": "close > ma20 * 1.05"
+    }
+   ]
+  },
+  {
+   "id": "c_adxL_biasL",
+   "kind": "conjunction",
+   "field": "adx14+close/ma20",
+   "ref": "",
+   "expr": "adx14 < 13.76 and close < ma20 * 0.95",
+   "label": "ADX14无趋势 且 20日线乖离线下5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "close",
+    "ma20"
+   ],
+   "why": "无方向 + 破线：震荡阴跌，趋势与位置都不站在持有方",
+   "sources": [
+    {
+     "id": "n_adx14_q0_10",
+     "expr": "adx14 < 13.76"
+    },
+    {
+     "id": "p_close_ma20_d5_below",
+     "expr": "close < ma20 * 0.95"
+    }
+   ]
+  },
+  {
+   "id": "c_adxL_biasH",
+   "kind": "conjunction",
+   "field": "adx14+close/ma20",
+   "ref": "",
+   "expr": "adx14 < 13.76 and close > ma20 * 1.05",
+   "label": "ADX14无趋势 且 20日线乖离线上5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "close",
+    "ma20"
+   ],
+   "why": "无方向 + 线上滞涨：震荡上沿",
+   "sources": [
+    {
+     "id": "n_adx14_q0_10",
+     "expr": "adx14 < 13.76"
+    },
+    {
+     "id": "p_close_ma20_d5_above",
+     "expr": "close > ma20 * 1.05"
+    }
+   ]
+  },
+  {
+   "id": "c_adxH_biasL",
+   "kind": "conjunction",
+   "field": "adx14+close/ma20",
+   "ref": "",
+   "expr": "adx14 >= 39.8 and close < ma20 * 0.95",
+   "label": "ADX14强趋势 且 20日线乖离线下5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "close",
+    "ma20"
+   ],
+   "why": "强趋势 + 破线：趋势明确向下，灾难线之外的止损候选",
+   "sources": [
+    {
+     "id": "n_adx14_q90_100",
+     "expr": "adx14 >= 39.8"
+    },
+    {
+     "id": "p_close_ma20_d5_below",
+     "expr": "close < ma20 * 0.95"
+    }
+   ]
+  },
+  {
+   "id": "c_adxH_biasH",
+   "kind": "conjunction",
+   "field": "adx14+close/ma20",
+   "ref": "",
+   "expr": "adx14 >= 39.8 and close > ma20 * 1.05",
+   "label": "ADX14强趋势 且 20日线乖离线上5%",
+   "threshold": null,
+   "percentile": null,
+   "sample_trigger_pct": null,
+   "fields": [
+    "adx14",
+    "close",
+    "ma20"
+   ],
+   "why": "强趋势 + 高乖离：持盈还是止盈的分歧点，本批主要检验「让利润跑」能不能跑",
+   "sources": [
+    {
+     "id": "n_adx14_q90_100",
+     "expr": "adx14 >= 39.8"
+    },
+    {
+     "id": "p_close_ma20_d5_above",
+     "expr": "close > ma20 * 1.05"
+    }
+   ]
+  }
+ ]
+}
