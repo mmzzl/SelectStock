@@ -5,6 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+# 费率真源：任何按「比例」算成本的地方（逐笔扫描、判定台账、动作模型的分支差额）都从这里取，
+# 别在脚本里再抄一遍万 2.5 / 0.05%——抄错不会报错，只会让两边的钱不一样。
+# commission_min 是「单笔最低 5 元」，不按比例走，所以只适用于账户，不适用于 pp 口径。
+COMMISSION_RATE = 0.00025
+STAMP_TAX_RATE = 0.0005
+SELL_FEE_RATE = STAMP_TAX_RATE + COMMISSION_RATE      # 卖出单边费率（佣金 + 印花税）
+
 
 @dataclass
 class Position:
@@ -37,9 +44,9 @@ class Broker:
         capital: float = 100000.0,
         max_positions: int = 5,
         position_cap_pct: float = 0.2,
-        commission_rate: float = 0.00025,
+        commission_rate: float = COMMISSION_RATE,
         commission_min: float = 5.0,
-        stamp_tax_rate: float = 0.0005,
+        stamp_tax_rate: float = STAMP_TAX_RATE,
     ) -> None:
         self.cash = float(capital)
         self.settling = 0.0

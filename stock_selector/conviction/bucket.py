@@ -24,6 +24,17 @@ BOARD_FUND = "场内基金"   # 15/16/5x ETF·LOF·REITs
 # （实测 22.6% vs 30.9%），归进主板会把股票格子的数字整体拉偏，比它自己宣称的 CI 还宽。
 FUND_PREFIXES = ("15", "16", "50", "51", "52", "53", "55", "56", "58")
 
+# 可下单股票池的代码段（正向白名单）：沪 60/68、深 00/30。写成正向而不是「非基金」，
+# 因为池子还要顺手把北交所（8/4/920）挡在外面——那是逐笔扫描 v1、合取批次 B 用的同一个口径，
+# 换池子等于换自由度，所以这里只有这一处真源，脚本别再各写一遍元组。
+STOCK_PREFIXES = ("60", "68", "00", "30")
+
+
+def is_stock_code(code) -> bool:
+    """60/68/00/30 打头才算股票池；159/51x/52x/55x/56x/58x 是场内基金，8/4/920 是北交所。"""
+    return str(code).startswith(STOCK_PREFIXES)
+
+
 # 建模型/查表都按这个固定顺序编码类别：线上把板块名翻译成下标，
 # 不依赖 pandas categorical 的推断顺序（换了 pandas 版本也不会串位）。
 BOARD_CATEGORIES = (BOARD_MAIN, BOARD_GEM, BOARD_STAR, BOARD_BJ, BOARD_FUND)

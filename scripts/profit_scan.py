@@ -125,7 +125,6 @@ BASE_FIELDS = ["open", "high", "low", "close", "pct", "amount"]
 # 追涨（上市 ≤41 个交易日的格子），成熟票在每一条过筛条件下都是负的；池子里还混着
 # 1,445 只场内基金（15/51/52/53/55/56/58 打头）。所以先把「买的是股票、而且散户
 # 真买得到」摆正，再谈规则好不好——不然调出来的判据是在调次新股博弈那一段行情。
-STOCK_PREFIX = ("60", "68", "00", "30")   # 沪深股票的代码段，其余是场内基金
 AMOUNT_WINDOW = 20                        # 流动性按买入信号日前 20 个交易日的日均成交额判
 DEFAULT_MIN_TENURE = 250                  # 上市满一年（约 250 个交易日）才算进池
 POOL = {"min_tenure": DEFAULT_MIN_TENURE, "min_amount": 0.0}   # main() 按命令行覆盖
@@ -133,14 +132,13 @@ POOL = {"min_tenure": DEFAULT_MIN_TENURE, "min_amount": 0.0}   # main() 按命�
 logger = logging.getLogger("profit_scan")
 
 
-def is_stock_code(code) -> bool:
-    """60/68/00/30 打头才是股票；159/51x/52x/55x/56x/58x 是场内基金（ETF/LOF）。"""
-    return str(code).startswith(STOCK_PREFIX)
-
-
 def filter_funds(files: list[Path]) -> tuple[list[Path], int]:
-    """按代码段剔掉场内基金（文件名就是代码，不用读盘）。返回 (留下的, 剔掉的只数)。"""
-    keep = [f for f in files if is_stock_code(f.stem)]
+    """按代码段剔掉场内基金与北交所（文件名就是代码，不用读盘）。返回 (留下的, 剔掉的只数)。
+
+    代码段真源在 `conviction/bucket.is_stock_code`——动作模型的样本要用**同一个池子**，
+    不然两边的「超额」比的不是同一批票。
+    """
+    keep = [f for f in files if bucket.is_stock_code(f.stem)]
     return keep, len(files) - len(keep)
 
 
