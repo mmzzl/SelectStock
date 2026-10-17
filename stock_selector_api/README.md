@@ -227,6 +227,44 @@ curl -s "http://localhost:8000/api/portfolio/runs?user_id=u_1001&page=1&size=20"
 
 相关文件：`backend/db/sql/portfolio.py`、`backend/schemas/portfolio.py`、`backend/repositories/portfolio.py`、`backend/services/portfolio_service.py`、`backend/services/portfolio_plugin.py`、`backend/api/v1/portfolio.py`。
 
+#### 形态买卖规则的停用与恢复（2026-10-17）
+
+线上现在**只有成本灾难线（−8%）在判 sell**，形态类的卖出/加仓规则全部关着。理由：两条占位规则
+（`sell = price <= ma10*0.95`、`add = close >= ma5*1.03 and rsi14 <= 65`）零标定、常数抄自测试夹具，
+没有任何回放证据支撑，先停用再说。
+
+生效的那份是 `data/rules/active.json`（**gitignore，只存在于本机**，不在仓库里）。三种形状的含义必须分清：
+
+| JSON 里的值 | 含义 |
+|---|---|
+| 键缺失 / `null` | 沿用 `portfolio/rules.py` 的默认常量（等于没关） |
+| `[]`（空列表） | **这一侧规则被关闭**，判定只剩灾难线 |
+| 非空列表 | 用这批规则判 |
+
+恢复办法，二选一，**都不用重启进程**（`load_rules()` 每次判定都重读文件，没有进程内缓存）：
+
+```bash
+# A) 正式恢复：在后台管理页「规则集」里建一条规则集并点「应用」
+#    —— 点应用会直接覆盖 data/rules/active.json，手写那份就没了
+# B) 应急回退：删掉这份文件 → 退回 rules.py 默认常量（占位规则又会活过来）
+rm /data/work/SelectStock/data/rules/active.json
+```
+
+改完抽查一条判定，确认文案里没有基于形态卖点的台账数（关着时不该出现「20 日内 X% 自行转卖」）。
+直连插件 8001 只算不落库，用「成本=现价」造一个零盈亏的例子最稳：
+
+```bash
+curl -s http://localhost:8001/api/portfolio/analyze -H 'Content-Type: application/json' \
+  -d "{\"user_id\":\"_manual_check\",\"natural_day\":\"$(date +%F)\",\"holdings\":[{\"code\":\"600519\",\"name\":\"贵州茅台\",\"quantity\":100,\"cost_price\":1400.0}]}" \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin)["results"][0]; print(d["action"], d.get("sell_trigger_price"), d["suggestion"])'
+```
+
+（把 `cost_price` 换成 600519 的现价附近，让它落在 hold；浮亏超过 8% 就会由灾难线判成 sell。）
+
+注意管理页在 `rule_set_id: null` 时显示「未应用任何规则集」，而线上其实在用这份手写文件——页面读数
+不等于运行时状态。台账 `scripts/build_judgement_ledger.py` 每晚 19:00 重建后，规则关着会让 hold 那一格
+退化成全市场基线、转卖列为 NaN，这是预期结果，不是故障。
+
 ### 7. 回测（Celery 投递，后端零计算）
 
 红线与前几章一致：**后端不做任何回测算术**。`services/backtest_service.py` 只做参数校验、

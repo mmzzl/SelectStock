@@ -1909,6 +1909,62 @@ supervisord 本身由发行版自带的 `supervisor.service` 托管并已 `enabl
 4. 切 live 之后仓位利用率会真的掉到 14%~20%——这是已接受的代价，不是故障，
    对外解释与告警文案都按这个口径写。
 
+## 本机已关停的服务与恢复办法（2026-10-17）
+
+查内存时关了三样东西，都是可逆的。恢复前先看「为什么关」和「恢复的代价」，别当故障排查。
+
+### 1. 持仓的形态买卖规则（判定链路，不是进程）
+
+线上现在**只有成本灾难线 −8% 在判 sell**，加仓侧同样关着。占位规则零标定，先停用。
+生效文件是 `data/rules/active.json`（gitignore，只在本机）。恢复办法、`[]` 与「键缺失」的语义差别、
+抽查命令见 `stock_selector_api/README.md` §6「形态买卖规则的停用与恢复」。改文件不用重启进程
+（`load_rules()` 每次判定重读）。
+
+### 2. lex 项目（WeKnora 四容器 + lexmath-backend + lexmath-cloudflared）
+
+现状：四个 WeKnora 容器 `Exited`，`lexmath-backend` / `lexmath-cloudflared` 均 `inactive + disabled`。
+
+```bash
+docker start WeKnora-postgres WeKnora-docreader WeKnora-app WeKnora-frontend
+sudo systemctl enable --now lexmath-backend
+# 公网入口要的话再单独起（quick tunnel → localhost:80）：
+sudo systemctl enable --now lexmath-cloudflared
+```
+
+compose 项目在 `/data/work/WeKnora` 与 `/data/work/lex_math_new`。
+
+**⚠️ 两个绝对别停的容器**：SelectStock 的公网入口和数据库都住在 lex 的 compose 项目里——
+
+- `lexmath-nginx`：`/etc/nginx/conf.d/selectstock.conf` 在它内部（`listen 80` + `listen 8080`，
+  `server_name www.luro.uno`，`proxy_pass http://selectstock_api` → `host.docker.internal:8010`），
+  并把 80/8080 发布到宿主机。链路是「Cloudflare → 本机 `cloudflared.service`（named tunnel，还在跑）
+  → 宿主机 80/8080 → 这个容器 → 后端 8010」。停了它 = SelectStock 网页与 App 全下线；
+- `lexmath-mongo`：SelectStock 的 `stock_kline`（1,221 万条）、`profit_scan_rows`、`stock_indicators`、
+  `eastmoney_news` 全在这一个实例里。停了它 = 选股/回测/扫描一起断。
+
+要再关 lex 的东西时只能按上面的名字逐个关，**不要 `docker compose down`**。
+
+### 3. llama-server（崩溃循环已修好根因，服务仍关）
+
+现状 `inactive + disabled`。历史：`/usr/local/bin/llama-server` 是个外壳，去固定路径找
+`libllama-server-impl.so` 找不到 → 每分钟 114 行重启日志、累计 16,197 次，白白刷 journald。
+修法是加了一个 drop-in（`/etc/systemd/system/llama-server.service.d/llama-lib-path.conf`）把
+`LD_LIBRARY_PATH` 指到 `/data/work/llama.cpp/build/bin`。**drop-in 在，所以现在启动就能起来**，不用再改别的。
+
+```bash
+sudo systemctl enable --now llama-server   # 端口 18080
+```
+
+代价：模型 `Qwen3.5-4B-Q4_K_S.gguf` 2.59 GB，启动即常驻 pinned 这么多内存。这台机器的内存本来就是这次调查的主角，
+起之前确认当时没有全量扫描/回测在跑。`lexmath-llama.service` 是**另一个也绑 18080、也吃这个模型**的 unit
+（它直接跑 `build/bin` 里的真二进制，所以没有库路径问题），一直是 `disabled`、日志为空；
+两个不能同时起，动它同样要先问。
+
+### 4. journald
+
+已 `--vacuum-size=500M` 一次性清过（清掉 3.4 GB）。**没有**设永久上限，日志会慢慢再涨回去。
+要长期封顶就加 drop-in `SystemMaxUse=500M` 后重启 `systemd-journald`（这一步当时没批，没做）。
+
 ## session-context：跨会话上下文维护
 
 开发过程中由 AI 维护两层知识，断线/重开对话后不丢上下文：
