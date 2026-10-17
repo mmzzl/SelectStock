@@ -79,13 +79,20 @@ def evaluate(action: str, row: dict, rules: dict) -> dict:
     if payload is None:
         return {"hold_confidence_pct": None,
                 "hold_confidence_text": "持有可信度：这套规则还没跑过全市场回放"}
-    if not _matches(payload, rules):
-        return {"hold_confidence_pct": None,
-                "hold_confidence_text": "持有可信度：回放对应的是另一套卖出规则，暂不给数"}
-
     c = payload.get("contract") or {}
     horizon = int(c.get("horizon_days") or 20)
     flat_th = float(c.get("flat_threshold_pct") or 3.0)
+
+    if not (rules.get("sell_rules") or []):
+        # 形态卖出规则被显式关掉了（active.json 给空列表）：「全部规则都不触发」这个状态压根不存在，
+        # 把另一套规则的数印上来就是假数。判成 sell 的那一侧仍然要说清响的是哪条线（只剩灾难线）。
+        if action == "hold":
+            return _no_pct("持有可信度：形态卖出规则已关闭、只剩成本灾难线，"
+                           "「全部规则都不触发」这个状态无从定义")
+        return _rule_line(payload, rules, row, action, c, horizon, flat_th)
+    if not _matches(payload, rules):
+        return {"hold_confidence_pct": None,
+                "hold_confidence_text": "持有可信度：回放对应的是另一套卖出规则，暂不给数"}
 
     if action in ("sell", "add"):
         # 判成 sell/add 时，「全部不触发」这个状态压根不成立，印它是自相矛盾；

@@ -156,9 +156,15 @@ def judge_matrix(arr: dict[str, np.ndarray], rules: dict[str, str]) -> tuple[np.
     from stock_selector.backtest import rule_expr
 
     close = arr["close"]
+
+    def mask(expr: str) -> np.ndarray:
+        """空表达式 = 这一侧规则被关掉了（active.json 给的是空列表）：一条都不响。
+        `eval_matrix("")` 返回 None，留着它就会在下面的 `&` 上炸。"""
+        return rule_expr.eval_matrix(expr, arr) if expr else np.zeros(close.shape, bool)
+
     with np.errstate(invalid="ignore"):
-        sell = rule_expr.eval_matrix(rules["sell"], arr)
-        add = rule_expr.eval_matrix(rules["add"], arr)
+        sell = mask(rules["sell"])
+        add = mask(rules["add"])
     action = np.zeros(close.shape, dtype=np.int8)
     judged = np.isfinite(close)
     action[judged] = 3
@@ -388,11 +394,14 @@ def heat_bin(heat: np.ndarray) -> np.ndarray:
 
 def build_rows(date_list: list[str], code_list: list[str], action: np.ndarray,
                heat: np.ndarray, fwd10: np.ndarray, fwd20: np.ndarray,
-               flip: np.ndarray) -> pd.DataFrame:
+               flip: np.ndarray | None) -> pd.DataFrame:
     """稠密矩阵 → 逐日逐票一行，只留「有判定且有学业」的格子。
 
     date/code 存成 category，分箱只在抽出来的一维切片上做：全市场矩阵有 2,500 万格，
     多留一个 int8 矩阵就是 100 MB，而这台机器上还跑着线上服务。
+
+    `flip=None` 表示「20 日内自己变成 sell」这个观测**不存在**（形态卖出规则关着），
+    整列留 NaN——写成 0 会被读成「观测到一次都没转卖」，那是同义反复不是数。
     """
     flat = np.flatnonzero((action != 0) & np.isfinite(fwd10))
     n_cols = len(code_list)
@@ -405,7 +414,8 @@ def build_rows(date_list: list[str], code_list: list[str], action: np.ndarray,
         "heat_bin": heat_bin(heat_1d),
         "fwd_ret_10": fwd10.ravel()[flat],
         "fwd_ret_20": fwd20.ravel()[flat],
-        "flip_sell_20": flip.ravel()[flat].astype(np.int8),
+        "flip_sell_20": (np.full(int(flat.size), np.nan) if flip is None
+                         else flip.ravel()[flat].astype(np.int8)),
     })
 
 
@@ -643,6 +653,10 @@ def main() -> None:
     arr.clear()                       # 上 GB 的稠密矩阵，判定完只留 close
     heat = heat_matrix(code_list, close)
     fwd10, fwd20, flip = labels(action, sell, close)
+    if not str(rules["sell"] or "").strip():
+        # 形态卖出规则关着 ⇒「hold 的点自己变成 sell」这个状态没有定义（0% 是同义反复）。
+        # 整列留 NaN，下游按「这个数给不出来」走，诊断页那一行也就不印了。
+        flip = None
     del arr, sell
     ledger = build_rows(date_list, code_list, action, heat, fwd10, fwd20, flip)
     del action, heat, fwd10, fwd20, flip

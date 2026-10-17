@@ -76,3 +76,24 @@ def test_disaster_uses_live_price_not_the_parquet_close():
     action2, _ = judge_holding(row, "price <= ma10 * 0.95", "", cost_price=10.0,
                                disaster_stop_pct=8.0)
     assert action2 == "hold"
+
+
+def test_closed_rule_set_only_judges_by_disaster_line():
+    """两侧规则关掉（空列表 + 空串）：形态上一律 hold，只有越过成本灾难线才 sell。
+
+    这个格子的 close=10 / ma10=11 按占位趋势线 `price <= ma10*0.95` 是要判卖的，
+    所以它同时钉住「关掉之后那条没标定过的线真的不再响」。
+    """
+    row = dict(ROW, close=10.0, price=10.0, ma10=11.0)
+    assert judge_holding(row, "", "", cost_price=10.0, price=10.0,
+                         disaster_stop_pct=8.0, sell_rules=[], add_rules=())[0] == "hold"
+    assert judge_holding(row, "", "", cost_price=11.0, price=10.0,
+                         disaster_stop_pct=8.0, sell_rules=[], add_rules=())[0] == "sell"
+    assert sell_trigger_price(row, "", []) is None
+
+
+def test_add_rules_empty_does_not_fall_back_to_string():
+    """给了空列表就不再看 `add_rule` 那根 OR 串——否则「关掉」会被默认串复活。"""
+    row = dict(ROW, close=11.0, ma5=10.0, rsi14=50.0)
+    assert judge_holding(row, "close < 0", "close >= ma5 * 1.03 and rsi14 <= 65",
+                         add_rules=[])[0] == "hold"

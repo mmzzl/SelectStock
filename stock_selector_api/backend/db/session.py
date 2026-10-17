@@ -32,5 +32,10 @@ def get_collection(name: str):
     return get_mongo_client()[get_db()][name]
 
 
+def get_scan_collection(name: str):
+    """逐笔盈亏扫描结果库（`scripts/profit_scan.py` 写的那套，和后端业务库不同库）。"""
+    return get_mongo_client()[settings.scan_mongo_db][name]
+
+
 def is_mongodb() -> bool:
     return settings.is_mongodb()

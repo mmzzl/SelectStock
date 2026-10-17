@@ -15,6 +15,7 @@ import sys
 from config import settings
 
 _mod = None
+_gates = None
 
 
 def rule_expr():
@@ -37,3 +38,20 @@ def compile_conditions(conditions: list[dict]) -> str:
 def check_expr(expr: str) -> list[str]:
     """校验表达式串，返回它用到的字段；不合法抛 RuleSyntaxError。"""
     return rule_expr().validate(expr)
+
+
+def trade_gates():
+    """逐笔盈亏门槛的唯一真源：`stock_selector/backtest/rule_gates.py`。
+
+    页面默认筛法（「只看笔数达标的卖法」）必须跟判定用同一个数，写第二份就会漂移；
+    和文法一样惰性加载，API 进程启动时不拖 numpy。
+    """
+    global _gates
+    if _gates is None:
+        root = str(settings.backtest_root)
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from stock_selector.backtest import rule_gates as mod
+
+        _gates = mod
+    return _gates

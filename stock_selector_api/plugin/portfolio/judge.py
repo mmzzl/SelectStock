@@ -45,12 +45,14 @@ def judge_holding(row: dict, sell_rule: str, add_rule: str, *, cost_price: float
     hit = first_hit(sell_rules, row)
     if hit is not None:
         return "sell", _rule_reason("sell", hit)
-    if sell_rule and not sell_rules and _eval.eval(sell_rule, row):
+    # `sell_rules is None` 才是「老式单串调用」；空列表是「这一侧的规则被关掉了」，
+    # 用 `not sell_rules` 判会让关掉的规则集顺着 sell_rule 那根 OR 串复活。
+    if sell_rule and sell_rules is None and _eval.eval(sell_rule, row):
         return "sell", REASON["sell"][:MAX_REASON_LEN]
     hit = first_hit(add_rules, row)
     if hit is not None:
         return "add", _rule_reason("add", hit)
-    if add_rule and not add_rules and _eval.eval(add_rule, row):
+    if add_rule and add_rules is None and _eval.eval(add_rule, row):
         return "add", REASON["add"][:MAX_REASON_LEN]
     return "hold", REASON["hold"][:MAX_REASON_LEN]
 

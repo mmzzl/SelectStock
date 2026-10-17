@@ -19,6 +19,7 @@ from api.v1 import (
     news,
     backtest,
     ruleset,
+    profit_scan,
     system,
     upgrade,
 )
@@ -67,6 +68,9 @@ api_router.include_router(backtest.router, dependencies=_password_gate)
 # —— 规则集模块（自定义卖出/加仓判据 → 应用后判定与可信度都走它）——
 api_router.include_router(ruleset.router, dependencies=_password_gate)
 api_router.include_router(system.router, dependencies=_password_gate)
+
+# —— 逐笔盈亏扫描（预计算结果只读，判定口径见 scripts/profit_scan.py）——
+api_router.include_router(profit_scan.router, dependencies=_password_gate)
 
 # —— 版本升级模块（超管） ——
 api_router.include_router(upgrade.router, dependencies=_password_gate)

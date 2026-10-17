@@ -17,6 +17,10 @@
 
 多条卖出规则的语义（页面「应用」的那套）：`sell` 串是各条规则的 OR，命中任意一条即建议卖出；
 「持有可信度」量的则是**全部规则都不触发**这个联合状态（见 `scripts/ruleset_posterior.py`）。
+
+把这一侧**关掉**是另一种形状：active.json 里 `"sell_rules": []` / `"add_rules": []` 显式给空列表，
+读出来就是「这条侧没有形态规则」，判定只剩成本灾难线（`disaster_stop_pct`）。注意别写成缺键或
+写成 `null`——那两类会被当成「文件没给这一侧」，退回到上面那两条占位默认值。
 """
 from __future__ import annotations
 
@@ -88,8 +92,12 @@ def load_rules() -> dict:
         if isinstance(value, str) and value.strip():
             out[key] = value.strip()
     for key in ("sell_rules", "add_rules"):
-        items = _normalize_items(data.get(key))
-        if items:
+        raw = data.get(key)
+        items = _normalize_items(raw)
+        # 给了列表就照列表办，**空列表＝「这一侧一条形态规则都没有」**——关掉未标定的占位规则
+        # 要能表达出来（默认常量里带着 sell/add，只把列表留空、不认这一层就会退回到占位规则）。
+        # 完全没有这个键才沿用默认。
+        if isinstance(raw, list) or items:
             out[key] = items
             out[_LEGACY[key]] = join_or(items)
     stop = data.get("disaster_stop_pct")

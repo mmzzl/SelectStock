@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     database_url: str = f"sqlite+aiosqlite:///{BACKEND_DIR.parent / 'data' / 'app.db'}"
     mongo_uri: str = "mongodb://localhost:27017"
     mongo_db: str = "app_template"
+    # 逐笔盈亏扫描的结果库：scripts/profit_scan.py 写的是爬虫那套库，不是后端自己的 app_template
+    scan_mongo_db: str = "eastmoney_news"
 
     # 验证码（登录防爆破）
     captcha_enabled: bool = True           # 是否启用验证码

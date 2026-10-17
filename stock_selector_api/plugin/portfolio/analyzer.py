@@ -20,6 +20,9 @@ def analyze_holdings(holdings: list[dict], provider, quotes: dict | None = None)
     最后一根还是上一交易日的收盘，落库的盈亏不能按那个数算。
     """
     rules = load_rules()
+    # 形态卖出规则被显式关掉（active.json 给空列表 → 拼出来的 OR 串是空）：台账里
+    # 「hold 的点 20 日内自行转卖 X%」这个状态就不存在了，那一行不能再印。
+    form_sell_closed = not str(rules.get("sell") or "").strip()
     results: list[dict] = []
     for h in holdings:
         cost = float(h.get("cost_price", 0.0) or 0.0)
@@ -45,12 +48,14 @@ def analyze_holdings(holdings: list[dict], provider, quotes: dict | None = None)
         base["holding_pnl"] = round((base["latest_price"] - cost) * qty, 2)
         base["pnl_pct"] = round(((base["latest_price"] - cost) / cost * 100), 2) if cost > 0 else 0.0
         base.update(hold_confidence.evaluate(base["action"], row, rules))
-        base["suggestion"] = _conviction_line(base, cost, qty)
+        base["suggestion"] = _conviction_line(base, cost, qty,
+                                              form_sell_closed=form_sell_closed)
         results.append(base)
     return {"results": results, "summary": summarize(results)}
 
 
-def _conviction_line(base: dict, cost: float, qty: int) -> str:
+def _conviction_line(base: dict, cost: float, qty: int, *,
+                     form_sell_closed: bool = False) -> str:
     """把「这条判定值多少钱」写成几个可核对的频率，不是一个分数。
 
     两个同类基线来自 2026-10-12 的全市场回验（见 judge 里 HOLD_* 的注释）：说的是「处在同样
@@ -75,9 +80,11 @@ def _conviction_line(base: dict, cost: float, qty: int) -> str:
     if conf:
         bits.append(conf)
     if base["action"] == "hold":
-        bits.extend(_posterior_bits(base["action"], price, qty))
+        bits.extend(_posterior_bits(base["action"], price, qty, hide_flip=form_sell_closed))
     else:
-        post = posterior.lookup(base["action"])
+        # 判成 sell 却只剩灾难线时，台账里的 sell 格是**旧规则**测出来的点集（和这条灾难线无关），
+        # 拿它说事等于给一条没回放过的判据配事后数。台账重建后那一格干脆没有行。
+        post = None if form_sell_closed else posterior.lookup(base["action"])
         if post:
             bits.append(_cross_hold_line(post))
     if cost > 0 and price < cost:
@@ -103,11 +110,16 @@ def _cross_hold_line(post: dict) -> str:
             + ("" if post["era_sign_stable"] else "（跨时代不同号）"))
 
 
-def _posterior_bits(action: str, price: float, qty: int) -> list[str]:
+def _posterior_bits(action: str, price: float, qty: int, *,
+                    hide_flip: bool = False) -> list[str]:
     """hold 这一格的后验分布：上涨概率（含区间）、20 日自行转卖比例、尾部再亏多少元。
 
     数字直读 `data/judgement_ledger/posterior.parquet`（每天 19:00 全市场重算），台账没建时
     退回 judge.py 里 2026-10-12 那次全量标定的常数——两者口径相同，只是新鲜度不同。
+
+    `hide_flip`：形态卖出规则关着时不看那张表的转卖列。它衡量的是「hold 点后来自己变成 sell」，
+    而 sell 现在只剩成本灾难线——台账里那一列要么是没重算的旧规则数（46% 是占位规则测的），
+    要么是重建后的 NaN，无论哪种都不是当前这套规则的数，印出来就是假数。
     """
     post = posterior.lookup(action)
     if post is None:
@@ -118,7 +130,7 @@ def _posterior_bits(action: str, price: float, qty: int) -> list[str]:
         tag = "" if post["credible"] else f"·样本不足(宽{post['ci_width_pp']:.1f}pp)"
         tail_txt = (f"同类 hold 后 10 日上涨 {post['up_pct']:.1f}%"
                     f"[{post['ci_low_pct']:.1f},{post['ci_high_pct']:.1f}]{tag}")
-    flip = post.get("flip_sell_20_pct")
+    flip = None if hide_flip else post.get("flip_sell_20_pct")
     p5 = post.get("fwd20_p5_pct")
     bits = []
     if tail_txt:

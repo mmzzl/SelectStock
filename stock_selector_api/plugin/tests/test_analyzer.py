@@ -1,4 +1,6 @@
 """test_analyzer.py"""
+import json
+
 from portfolio.analyzer import analyze_holdings
 
 
@@ -28,8 +30,7 @@ ROWS = {
 }
 
 
-def test_analyze_judges_and_computes_revenue(monkeypatch):
-    monkeypatch.setenv("PLUGIN_RULES_FILE", "")   # 用默认规则
+def test_analyze_judges_and_computes_revenue():
     out = analyze_holdings(HOLDINGS, FakeProvider(ROWS))
     by_code = {r["code"]: r for r in out["results"]}
     assert by_code["600001"]["action"] == "sell"
@@ -50,8 +51,7 @@ def test_analyze_judges_and_computes_revenue(monkeypatch):
     assert s["holding_count"] == 3
 
 
-def test_analyze_missing_row_sorted_to_sell(monkeypatch):
-    monkeypatch.setenv("PLUGIN_RULES_FILE", "")
+def test_analyze_missing_row_sorted_to_sell():
     rows = dict(ROWS)
     del rows["600003"]                       # 行情缺失
     out = analyze_holdings(HOLDINGS, FakeProvider(rows))
@@ -61,9 +61,8 @@ def test_analyze_missing_row_sorted_to_sell(monkeypatch):
     assert by_code["600003"]["sell_trigger_price"] is None   # 没行情就没法反算，不能编一个价
 
 
-def test_analyze_swaps_only_the_price_when_live_quote_given(monkeypatch):
+def test_analyze_swaps_only_the_price_when_live_quote_given():
     """18:00 之前手动触发诊断：指标行还是上一交易日的，判定照旧，但落库的盈亏得按现价算。"""
-    monkeypatch.setenv("PLUGIN_RULES_FILE", "")
     out = analyze_holdings(HOLDINGS[:1], FakeProvider(ROWS),
                            quotes={"600001": {"price": 9.6}})
     r = out["results"][0]
@@ -117,16 +116,14 @@ def _hold_row(close=10.5, ma10=11.0, ma5=10.5):
             "rsi14": 40.0, "vol_ma5": 100.0, "volume": 100.0}
 
 
-def test_disaster_line_flips_a_hold_into_sell(monkeypatch):
-    monkeypatch.setenv("PLUGIN_RULES_FILE", "")
+def test_disaster_line_flips_a_hold_into_sell():
     holdings = [{"code": "600009", "name": "丁", "quantity": 100, "cost_price": 12.0}]
     out = analyze_holdings(holdings, FakeProvider({"600009": _hold_row()}))
     r = out["results"][0]
     assert r["action"] == "sell" and "灾难线" in r["action_reason"]
 
 
-def test_hold_row_carries_quantified_conviction(monkeypatch):
-    monkeypatch.setenv("PLUGIN_RULES_FILE", "")
+def test_hold_row_carries_quantified_conviction():
     holdings = [{"code": "600009", "name": "丁", "quantity": 100, "cost_price": 10.8}]
     out = analyze_holdings(holdings, FakeProvider({"600009": _hold_row()}))
     r = out["results"][0]
@@ -139,9 +136,41 @@ def test_hold_row_carries_quantified_conviction(monkeypatch):
     assert "回本需 +2.9%" in r["suggestion"]         # 现价 10.5 低于成本 10.8
 
 
-def test_realtime_price_below_trigger_says_so(monkeypatch):
+def test_closed_form_rules_drop_the_ledger_flip_line(tmp_path, monkeypatch):
+    """形态卖出规则关掉后，「hold 点 20 日内 46% 自行转卖」这条必须消失。
+
+    它衡量的是「hold 后来自己变成 sell」，而现在 sell 只剩成本灾难线（台账没有成本价，
+    根本复现不出这一格）；parquet 里那个数还是占位规则时代测的，印出来就是假数。
+    """
+    from portfolio.analyzer import _conviction_line
+
+    monkeypatch.setenv("POSTERIOR_FILE", str(tmp_path / "no_posterior.parquet"))
+    text = _conviction_line({"latest_price": 10.5, "action": "hold",
+                             "sell_trigger_price": None}, 10.8, 100,
+                            form_sell_closed=True)
+    assert "自行转卖" not in text
+    assert "尾部 p5" in text          # 尾部风险描述的是任意持仓点，不是某条规则的产物，留着
+    open_text = _conviction_line({"latest_price": 10.5, "action": "hold",
+                                  "sell_trigger_price": None}, 10.8, 100)
+    assert "自行转卖" in open_text    # 规则开着时照旧
+
+
+def test_closed_ruleset_via_active_file(tmp_path, monkeypatch):
+    """整条链：active.json 给空列表 → hold、无价格线、不印转卖率。"""
+    rules_file = tmp_path / "closed.json"
+    rules_file.write_text(json.dumps({"name": "只留灾难线", "sell_rules": [],
+                                      "add_rules": [], "disaster_stop_pct": 8.0}),
+                          encoding="utf-8")
+    monkeypatch.setenv("PLUGIN_RULES_FILE", str(rules_file))
+    holdings = [{"code": "600009", "name": "丁", "quantity": 100, "cost_price": 10.8}]
+    out = analyze_holdings(holdings, FakeProvider({"600009": _hold_row()}))
+    r = out["results"][0]
+    assert r["action"] == "hold" and r["sell_trigger_price"] is None
+    assert "自行转卖" not in r["suggestion"]
+
+
+def test_realtime_price_below_trigger_says_so():
     """判定拿日线指标行（所以仍是 hold），价格线拿实时价（已破线）。这时不能写「在下方」反话。"""
-    monkeypatch.setenv("PLUGIN_RULES_FILE", "")
     holdings = [{"code": "600009", "name": "丁", "quantity": 100, "cost_price": 10.8}]
     out = analyze_holdings(holdings, FakeProvider({"600009": _hold_row()}),
                            quotes={"600009": {"price": 10.2}})
@@ -150,9 +179,8 @@ def test_realtime_price_below_trigger_says_so(monkeypatch):
     assert "已跌破均线卖点 2.5%" in r["suggestion"]
 
 
-def test_sell_row_does_not_quote_hold_baseline(monkeypatch):
+def test_sell_row_does_not_quote_hold_baseline():
     """「同类 hold 有 45% 转卖」只描述 hold 那一格，判成 sell 还印它是自己跟自己抬杠。"""
-    monkeypatch.setenv("PLUGIN_RULES_FILE", "")
     holdings = [{"code": "600009", "name": "丁", "quantity": 100, "cost_price": 12.0}]
     out = analyze_holdings(holdings, FakeProvider({"600009": _hold_row()}))
     r = out["results"][0]
@@ -161,8 +189,7 @@ def test_sell_row_does_not_quote_hold_baseline(monkeypatch):
     assert "回本需 +14.3%" in r["suggestion"]
 
 
-def test_missing_row_still_holds_without_inventing_numbers(monkeypatch):
-    monkeypatch.setenv("PLUGIN_RULES_FILE", "")
+def test_missing_row_still_holds_without_inventing_numbers():
     holdings = [{"code": "600008", "name": "戊", "quantity": 100, "cost_price": 12.0}]
     out = analyze_holdings(holdings, FakeProvider({}))
     r = out["results"][0]

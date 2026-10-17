@@ -24,18 +24,33 @@
 - 网格一律存 **float64**。存 float32 时 976 笔里有 5 笔的触发日/止损判定会翻
   （`kdj_k < kdj_d` 这种临界比较、以及最低价与止损价相等的情况），一翻就顺着冷却期把后面几笔挪位；
   每块才 200 只票，float64 多占的几十 MB 换掉这个尾巴值得。
-- `bench_net_pp` = 同一段窗口里**全体时点**按同一种卖法的扣后均值（市场本身赚多少），
+- `bench_net_pp` = 同一段窗口里**票池内全体时点**按同一种卖法的扣后均值（市场本身赚多少），
   `excess_pp` 才是这条条件比基准多赚的部分——只看绝对值容易把牛市当成能力。
+  基准与买点共用同一张票池掩码，否则「超额」是拿池子外的时点比的。
+
+票池（2026-10-17 加的，因为上一轮全量的利润全部来自 2016-2017 的次新/创业板追涨）：
+- 代码段不是 60/68/00/30 的**场内基金**（15/51/52/53/55/56/58 打头，共 1,445 只）在读盘前就剔掉；
+- 信号日这只票在本库里至少已有 `--min-tenure`（默认 250）根日线，逐格生效不是整只票剔除；
+- 可选 `--min-amount`：信号日前 20 个交易日日均成交额下限（元），把「冷门到买不进卖不出」挡住。
+门槛剔了多少格子写进 run doc（`pool.cells_live / cells_ok`），页面据此报出被剔掉的比例。
+
+**及格线按累计试次抬，不按每轮重置**：`logs/profit_scan/trials.jsonl` 记每一轮跑了多少组合
+（`--dry-run` 也记，它同样看过这份数据），跑之前把 Mongo 历史 run 里没记过的 `n_trials` 一起加上。
+`--trial-budget`（默认 30 万次）用满就拒绝再扫——反复扫同一批行情总能凑出一条「过」的，
+那不是规则，是掷骰子。
 
 数据只看留出段之前：止于 2021-12-31，且**末尾 `max(H)+2` 个交易日不做买点**
 （卖出要落在窗口内，跨过留出段起点的数据不许用来选规则）。2022 之后是留出段，
 只在过筛之后用 `--from 2022-01-01` 读它一次。
 
-**数据深度是个硬约束**（2026-10-17 试水实测）：`data/stock_kline/*.parquet` 是滚动重建的，
-每只票约 1827 行、到 2026-10-16 为止，所以 2021-12-31 之前最多只有 ~1480 个交易日
-（最早 2015-05 起），老票的历史被截在 2015 年底、次新股则整段都在。
-留出段前的可用样本 ≈ 5.2M 个股·日 × ~1500 天，不是一直以为的 2006→2021。
-默认起点因此设成 `DATE_FROM`，三段时代切分也落在这 6 年里面。
+**数据深度是个硬约束**（2026-09-28 那轮说的「2006→2021」是错的，10-17 全池实测）：
+`data/stock_kline/*.parquet` 是分批滚动重建的，5,186 只股票票深浅不一（92~2,637 行、中位 1,827 行），
+其中 1,641 只的第一根日线在 2015 年、1,019 只在 2016 年——那是重建深度，不是上市日期。
+另有 622 只在 2015-06→2021-12 里有一个 >120 天的洞（一部分是真停牌，一部分是那段没补上），
+904 只 2023-2025 三年一行都没有、直接跳到 2026。
+留出段前的可用样本因此比「16 年 × 全市场」小得多，三段时代切分也只是这 6 年里的三段。
+`--min-tenure` 量的就是这个库里有日线的根数（不是真实上市日期），老票被截断的历史会让它
+在窗口头一年显得像次新——所以门槛剔了多少要报出来，别藏在平均数里。
 
 算法上一个不显然的点：卖出模拟与「买入条件」无关，所以每块票对每种持有天数只需在
 **整张（交易日 × 票）网格**上跑一遍 16 个卖法，条件那一侧只是去网格上按自己的触发点做减法/查表。
@@ -49,6 +64,8 @@
     python3 scripts/profit_scan.py --limit-conditions 10 --step 20 --dry-run   # 试水：先看口径
     python3 scripts/profit_scan.py --limit-conditions 10 --step 20 --explain 3 --dump-trades 3
     python3 scripts/profit_scan.py                                             # 全量 6.2 万组合
+    python3 scripts/profit_scan.py --min-tenure 500 --min-amount 3e7          # 再收紧票池
+    python3 scripts/profit_scan.py --from 2022-01-01 --trial-budget 0         # 留出段只验一次
 """
 
 from __future__ import annotations
@@ -87,14 +104,53 @@ TAKES = [None, 0.06, 0.12, 0.20]
 STOPS = [None, -0.04, -0.08, -0.12]
 COST_PP = 0.30
 REPAIR_MAX = 10                  # 一字板卖不掉最多顺移几天
-BLOCK = 200                      # 每块几只票：内存随它走（列 + 掩码位图 + 16 张网格）
+BLOCK = 80                       # 每块几只票：内存随它走（列 + 掩码位图 + 16 张网格）。
+# 只改分块，不改判定：一只票只落在一个块里，块内是完整的日线，跨块只做标量/数组累加。
+# 2026-10-17 从 200 降到 80：那天 BLOCK=200 的全量扫把 MemAvailable 压穿，earlyoom 在
+# 10:19/10:26 连着杀掉 IDE 进程——扫描是自己的事，不该拿整台机器换。
 CURVE_K = [1, 2, 3, 5, 10, 20]   # 归因：收益落在持有第几天
 BOOT_N = 20                      # 归因：按月块重抽次数
 TRADING_DAYS = 245
+TRIAL_LEDGER = LOG_DIR / "trials.jsonl"
 FULL_STOCKS = 6300                 # 全量跑大约多少只票入格（6631 个文件剔 ST/短史）
 BASE_FIELDS = ["open", "high", "low", "close", "pct", "amount"]
 
+# 票池门槛。10-17 那轮全量扫出 315 条「过」，拆开看利润全部来自 2016-2017 的次新/创业板
+# 追涨（上市 ≤41 个交易日的格子），成熟票在每一条过筛条件下都是负的；池子里还混着
+# 1,445 只场内基金（15/51/52/53/55/56/58 打头）。所以先把「买的是股票、而且散户
+# 真买得到」摆正，再谈规则好不好——不然调出来的判据是在调次新股博弈那一段行情。
+STOCK_PREFIX = ("60", "68", "00", "30")   # 沪深股票的代码段，其余是场内基金
+AMOUNT_WINDOW = 20                        # 流动性按买入信号日前 20 个交易日的日均成交额判
+DEFAULT_MIN_TENURE = 250                  # 上市满一年（约 250 个交易日）才算进池
+POOL = {"min_tenure": DEFAULT_MIN_TENURE, "min_amount": 0.0}   # main() 按命令行覆盖
+
 logger = logging.getLogger("profit_scan")
+
+
+def is_stock_code(code) -> bool:
+    """60/68/00/30 打头才是股票；159/51x/52x/55x/56x/58x 是场内基金（ETF/LOF）。"""
+    return str(code).startswith(STOCK_PREFIX)
+
+
+def filter_funds(files: list[Path]) -> tuple[list[Path], int]:
+    """按代码段剔掉场内基金（文件名就是代码，不用读盘）。返回 (留下的, 剔掉的只数)。"""
+    keep = [f for f in files if is_stock_code(f.stem)]
+    return keep, len(files) - len(keep)
+
+
+def trailing_mean(col: np.ndarray, days: int) -> np.ndarray:
+    """近 `days` 行（含当天）的均值，NaN 当缺数跳过；整窗没有有效值 → NaN（门槛判不过）。
+
+    amount 有爬虫留下的 null（见 10-15 那条修复），所以不能把 NaN 当 0，否则一只票会因为
+    缺数被误判成「没流动性」而踢出池子。
+    """
+    v = np.where(np.isfinite(col), col, 0.0)
+    n = np.isfinite(col).astype(np.float64)
+    cs_v, cs_n = np.cumsum(v, axis=0), np.cumsum(n, axis=0)
+    pad = np.zeros((days, col.shape[1]))
+    s = cs_v - np.vstack([pad, cs_v[:-days]])
+    c = cs_n - np.vstack([pad, cs_n[:-days]])
+    return np.where(c > 0, s / np.maximum(c, 1), np.nan)
 
 
 def profiles() -> list[dict]:
@@ -153,6 +209,26 @@ class Block:
         # 涨停线是板块属性，按票存一行百分数，网格比较时直接广播
         self.limit = (np.array([board_limit_threshold(c) for c in codes], dtype=np.float64)
                       if codes else np.zeros(0, dtype=np.float64))[None, :]
+        self.ok = self._pool_mask()
+
+    def _pool_mask(self) -> np.ndarray:
+        """可下单格子：有日线 + 本库里它已有 `min_tenure` 根日线 + 近 20 日日均成交额过线。
+
+        门槛是**逐格**而不是整只票剔除：一只次新股在第 251 根日线之前不该下单、之后就该，
+        前后两段本来就在这张网格里。买点掩码、基准（bench）、下单分母共用这一张，
+        「比基准超额」才是同一个池子的对比，不是拿池子外的时点当基准。
+
+        量的是「本库里有日线的根数」而不是真实上市日期：一部分老票的重建深度只到 2015 年，
+        窗口头一年会被当成新票剔掉——那是数据深度的问题不是判据的问题，所以门槛剔了多少格子
+        要报进 run doc，别让它藏在平均数里。
+        """
+        close = self.cols["close"]
+        ok = np.isfinite(close)
+        if POOL["min_tenure"] > 0:
+            ok &= np.cumsum(ok, axis=0) >= POOL["min_tenure"]
+        if POOL["min_amount"] > 0:
+            ok &= trailing_mean(self.cols["amount"], AMOUNT_WINDOW) >= POOL["min_amount"]
+        return ok
 
 
 def window(files: list[Path], fields: list[str], date_from: str, date_to: str
@@ -440,15 +516,19 @@ def scan(files: list[Path], conds: list[dict], profs: list[dict], args) -> tuple
     n_days = len(dates)
     era_cuts = (day_lo + (day_hi - day_lo) // 3, day_lo + 2 * (day_hi - day_lo) // 3)
     logger.info("轴 %d 天，买点第 %d~%d 行（%s → %s）：%d 票 × %d 条件 × %d 卖法 = %d 组合，"
-                "每块 %d 票", n_days, day_lo, day_hi - 1, dates[day_lo], dates[day_hi - 1],
-                len(files), len(conds), len(profs), len(conds) * len(profs), BLOCK)
+                "每块 %d 票；票池门槛 上市≥%d 根日线、近%d日日均成交额≥%s 元",
+                n_days, day_lo, day_hi - 1, dates[day_lo], dates[day_hi - 1],
+                len(files), len(conds), len(profs), len(conds) * len(profs), BLOCK,
+                POOL["min_tenure"], AMOUNT_WINDOW, f"{POOL['min_amount']:,.0f}")
 
     rows: list[dict] = []
-    bench = {p["tag"]: np.zeros(4) for p in profs}     # n/s1/s2/win：全体时点同卖法 = 基准
+    bench = {p["tag"]: np.zeros(4) for p in profs}     # n/s1/s2/win：同池子全体时点同卖法 = 基准
     fills = {"cells": 0, "buy_blocked": 0, "no_next_quote": 0}
+    # 门槛前后的格子数：报进 run doc，这样「票池收紧了多少」是可核对的数，而不是日志里一句话
+    pool = {"cells_live": 0, "cells_ok": 0, "stocks_ok": 0}
     timing = {"load": 0.0, "masks": 0.0, "simulate": 0.0, "gather": 0.0}
     stocks = 0
-    n_trials = len(conds) * len(profs)
+    n_trials = args.trials_total          # 跨轮累计的试次数，main() 里算好（见 prior_trials）
     # 每种持有天数占 profs 里连续 16 个槽位（profiles() 按 h→tp→sl 生成），按跨度累加
     span: dict[int, slice] = {}
     for i, p in enumerate(profs):
@@ -471,7 +551,9 @@ def scan(files: list[Path], conds: list[dict], profs: list[dict], args) -> tuple
         bits = []
         for c in conds:
             try:
-                m = rule_expr.eval_matrix(c["expr"], blk.cols)
+                # 票池门槛在这里就 AND 进买点掩码：条件响在一只基金上、或响在它上市第 30 天，
+                # 都不算买点。基准那一侧用的是同一张 blk.ok，两边同池子才叫超额。
+                m = rule_expr.eval_matrix(c["expr"], blk.cols) & blk.ok
             except Exception as exc:
                 logger.warning("%s 求值失败：%s", c["id"], exc)
                 bits.append(None)
@@ -481,15 +563,23 @@ def scan(files: list[Path], conds: list[dict], profs: list[dict], args) -> tuple
         entry_px, can_buy, have_quote = entry_gate(blk)
         in_win = (np.arange(n_days)[:, None] >= day_lo) & (np.arange(n_days)[:, None] < day_hi)
         win_cells = np.broadcast_to(in_win, (n_days, blk.n_stock))
-        fills["cells"] += int(win_cells.sum())
-        fills["no_next_quote"] += int((win_cells & ~have_quote).sum())
-        fills["buy_blocked"] += int((win_cells & have_quote & ~can_buy).sum())
+        # 分母只数「这只票当天真的有日线、且过票池门槛」的格子。整块网格是矩形（交易日 × 票），
+        # 票没上市的那些天全是 NaN，把它们算进来会把「还没上市」报成「买不到」——
+        # 实测这样误报出来的无行情率是 34.65%，而真实值只有 0.2%
+        live = blk.ok & win_cells
+        fills["cells"] += int(live.sum())
+        fills["no_next_quote"] += int((live & ~have_quote).sum())
+        fills["buy_blocked"] += int((live & have_quote & ~can_buy).sum())
+        # 门槛前后的格子数都按买点窗口算（和上面的下单分母同一个口径），差值就是门槛剔掉的
+        pool["cells_live"] += int((np.isfinite(blk.cols["close"]) & win_cells).sum())
+        pool["cells_ok"] += int(live.sum())
+        pool["stocks_ok"] += int(live.any(axis=0).sum())
         for hold, plist in by_h.items():
             tp = time.time()
             grids = simulate(blk, entry_px, can_buy, plist)
             ret16 = np.stack([grids[p["tag"]][0] for p in plist])       # (16, n_days, n_stock)
             ok16 = np.stack([grids[p["tag"]][1] for p in plist])
-            sel = ok16.astype(bool) & win_cells[None]
+            sel = ok16.astype(bool) & blk.ok[None] & win_cells[None]
             for pi, p in enumerate(plist):
                 bv = np.where(sel[pi], ret16[pi], 0.0)
                 b = bench[p["tag"]]
@@ -529,7 +619,8 @@ def scan(files: list[Path], conds: list[dict], profs: list[dict], args) -> tuple
                                  int(cells[hold_row[prof["hold"]], ci])))
     meta = {"window": (dates[day_lo], dates[day_hi - 1]), "n_days": n_win_days,
             "bench": {k: dict(zip(("n", "s1", "s2", "win"), v)) for k, v in bench.items()},
-            "fills": fills, "timing": {k: round(v, 2) for k, v in timing.items()},
+            "fills": fills, "pool": pool, "trials_total": n_trials,
+            "timing": {k: round(v, 2) for k, v in timing.items()},
             "elapsed": time.time() - t0, "blocks": len(blocks),
             "files": len(files), "stocks": stocks, "block": BLOCK}
     return rows, meta
@@ -565,8 +656,10 @@ def explain(files: list[Path], conds: list[dict], profs: list[dict], targets: di
         if blk.n_stock == 0:
             continue
         pc = blk.cols["pct"]
-        up += np.nansum(np.where(np.isfinite(pc), (pc > 0).astype(np.float32), 0.0), axis=1)
-        tot += np.isfinite(pc).sum(axis=1)
+        # 市场环境（涨跌家数）也只数池子里的票：门槛外的基金/次新不该进「当天大盘强弱」的分母
+        live = blk.ok & np.isfinite(pc)
+        up += np.where(live, (pc > 0).astype(np.float32), 0.0).sum(axis=1)
+        tot += live.sum(axis=1)
         entry_px, can_buy, _ = entry_gate(blk)
         tags = {targets[c["id"]] for c in pick}
         grids = {tag: simulate(blk, entry_px, can_buy, [prof_by_tag[tag]], with_day=True)[tag]
@@ -575,7 +668,7 @@ def explain(files: list[Path], conds: list[dict], profs: list[dict], targets: di
         for c in pick:
             tag = targets[c["id"]]
             prof = prof_by_tag[tag]
-            m = rule_expr.eval_matrix(c["expr"], blk.cols)
+            m = rule_expr.eval_matrix(c["expr"], blk.cols) & blk.ok   # 与主扫描同一张票池掩码
             acc = cooldown(m, prof["hold"], day_lo, day_hi)
             del m
             di, si = np.nonzero(acc)
@@ -692,6 +785,41 @@ def to_mongo(run: dict, rows: list[dict]) -> None:
     logger.info("已写 Mongo：%s.%s run=%s %d 行", db.name, ROWS_COLL, run["run_id"], len(docs))
 
 
+def trials_used(exclude_run_id: str = "") -> int:
+    """累计试过多少个组合 = 本地台账 + Mongo 里台账没记到的历史 run（按 run_id 去重）。
+
+    及格线必须按**累计**试次抬，不是每轮重置：同一批行情反复扫，试的次数是加在一起的，
+    否则一轮不行就扫二十轮，总能靠运气凑出一条判定「过」的规则。本地台账连 `--dry-run`
+    一起记（干跑不落 Mongo，但它确实看过这份数据，不记就是给试次留后门）。
+    """
+    total, seen = 0, set()
+    if TRIAL_LEDGER.is_file():
+        for line in TRIAL_LEDGER.read_text(encoding="utf-8").splitlines():
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            total += int(rec.get("combos") or 0)
+            if rec.get("run_id"):
+                seen.add(str(rec["run_id"]))
+    try:
+        import database
+
+        for d in database.get_db()[RUNS_COLL].find({}, {"run_id": 1, "n_trials": 1}):
+            rid = str(d.get("run_id") or "")
+            if rid and rid not in seen and rid != exclude_run_id:
+                total += int(d.get("n_trials") or 0)
+    except Exception as exc:
+        logger.warning("Mongo 历史试次没读到，这一轮只按本地台账算：%s", exc)
+    return total
+
+
+def append_trials(rec: dict) -> None:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    with TRIAL_LEDGER.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
 def attach_bench_and_neighbours(rows: list[dict], meta: dict, conds: list[dict]) -> None:
     """补两列：同卖法全体时点的基准，与同字段相邻档在同种卖法下的扣后每笔。"""
     for r in rows:
@@ -724,18 +852,25 @@ def render(rows: list[dict], meta: dict, conds: list[dict], profs: list[dict], a
     s = FULL_STOCKS / max(1, meta["stocks"])
     k = 972 / max(1, len(conds))
     est = (t["load"] + t["simulate"]) * s + (t["masks"] + t["gather"]) * s * k
+    pool = meta["pool"]
+    total = meta["trials_total"]
     L = [f"窗口 {meta['window'][0]} → {meta['window'][1]}（{meta['n_days']} 个交易日做买点；"
          f"止于 {args.date_to}，末尾 {max(HOLDS) + 2} 天留作卖出窗口，留出段不碰）",
          f"{len(conds)} 条件 × {len(profs)} 卖法 = {combos:,} 组合；每笔扣 {COST_PP}pp"
-         f"（{args.amount:,} 元/笔口径）；尝试 {combos:,} 次 ⇒ 显著性要 t≥"
-         f"{rule_gates.t_required(combos):.2f}（按交易日聚类）",
-         f"入格 {meta['stocks']} 只票 / {meta['n_days']} 天，读数 {len(rows):,} 行，"
+         f"（{args.amount:,} 元/笔口径）；累计尝试 {total:,} 次（本轮 {combos:,}）⇒ 显著性要 t≥"
+         f"{rule_gates.t_required(total):.2f}（按交易日聚类）",
+         f"票池：有日线 {pool['cells_live']:,} 格 → 过门槛 {pool['cells_ok']:,} 格"
+         f"（门槛剔掉 {1 - pool['cells_ok'] / max(1, pool['cells_live']):.1%}），"
+         f"入格 {meta['stocks']:,} 只票里 {pool['stocks_ok']:,} 只至少有一段可下单；"
+         f"门槛=上市≥{POOL['min_tenure']} 根日线"
+         + (f"、近{AMOUNT_WINDOW}日日均成交额≥{POOL['min_amount']:,.0f} 元" if POOL['min_amount'] else ""),
+         f"读数 {len(rows):,} 行，"
          f"耗时 {meta['elapsed']:.1f}s = 读盘 {t['load']:.1f}s + 条件求值 {t['masks']:.1f}s"
          f" + 网格模拟 {t['simulate']:.1f}s + 取数读数 {t['gather']:.1f}s",
          f"外推全量（约 {FULL_STOCKS:,} 票 × 972 条件 = {972 * len(profs):,} 组合）"
          f"≈ {est / 60:.0f} 分钟：票数 ×{s:.1f}、条件 ×{k:.1f}，"
          f"读盘/模拟只按票数放大、求值/取数按两者一起放大（线性估，误差会在 1.5 倍内）",
-         f"买点格子 {f['cells']:,} 个：次日没有行情（停牌/未上市/退市）{f['no_next_quote']:,} 个"
+         f"下单格子 {f['cells']:,} 个：次日没有行情（停牌/退市）{f['no_next_quote']:,} 个"
          f"（{f['no_next_quote'] / max(1, f['cells']):.2%}），次日开盘顶涨停或一字板买不进 "
          f"{f['buy_blocked']:,} 个（{f['buy_blocked'] / max(1, f['cells']):.2%}）",
          "判定分布：" + "、".join(f"{v} {sum(1 for r in rows if r['verdict'] == v):,}"
@@ -778,11 +913,61 @@ def export_csv(path: Path, rows: list[dict]) -> None:
 
 # ------------------------------------------------------------------ CLI
 
+MEM_MIN_AVAIL_GB = 3.0
+MEM_MIN_SWAP_FREE_PCT = 10.0
+MEMINFO = Path("/proc/meminfo")
+
+
+def mem_headroom(path: Path = MEMINFO) -> dict:
+    """从 /proc/meminfo 取可用内存和交换余量。`MemAvailable` 才是能给这块用的，
+    `MemFree` 会把可回收的页缓存算成没有；没配交换时 swap_free_pct=None（那条不做判定）。"""
+    kb: dict[str, float] = {}
+    try:
+        for line in path.read_text().splitlines():
+            key, _, rest = line.partition(":")
+            parts = rest.split()
+            if parts:
+                kb[key.strip()] = float(parts[0])
+    except OSError:
+        return {}
+    total_sw = kb.get("SwapTotal", 0.0)
+    return {"avail_gb": kb.get("MemAvailable", 0.0) / 1048576.0,
+            "swap_free_pct": (100.0 * kb.get("SwapFree", 0.0) / total_sw) if total_sw > 0 else None,
+            "swap_total_gb": total_sw / 1048576.0}
+
+
+def check_mem_headroom(skip: bool = False, path: Path = MEMINFO) -> dict:
+    """起跑前拦一道：这一轮要同时握着 BLOCK 只票的列、972 条掩码位图和 16 张收益网格，
+    峰值几个 G。内存压穿时 earlyoom 不会挑责任进程下手，它按 oom_score 杀，被杀的不一定是扫描
+    （2026-10-17 那天两次把 IDE 杀了），所以宁可不跑。"""
+    m = mem_headroom(path)
+    if not m:
+        logger.warning("读不到 /proc/meminfo，内存水位检查跳过")
+        return m
+    swap = m["swap_free_pct"]
+    logger.info("起跑前内存：可用 %.1fG，交换剩余 %s",
+                m["avail_gb"], "没有交换分区" if swap is None else f"{swap:.0f}%")
+    if skip:
+        return m
+    bad = []
+    if m["avail_gb"] < MEM_MIN_AVAIL_GB:
+        bad.append(f"可用内存 {m['avail_gb']:.1f}G < {MEM_MIN_AVAIL_GB:.0f}G")
+    if swap is not None and swap < MEM_MIN_SWAP_FREE_PCT:
+        bad.append(f"交换只剩 {swap:.0f}% < {MEM_MIN_SWAP_FREE_PCT:.0f}%")
+    if bad:
+        raise SystemExit(
+            f"起跑前内存不够：{'；'.join(bad)}。先让出内存再跑（关掉吃内存的进程，或把 --step 调大"
+            f"先扫一小批）；确认过风险、就要在这点余量上硬跑，再加 --skip-mem-guard。")
+    return m
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="买入条件 × 卖法 的逐笔盈亏扫描")
     ap.add_argument("--kline-dir", default=str(KLINE_DIR))
     ap.add_argument("--step", type=int, default=1, help="每 N 个文件取 1 只票（试水用 20）")
     ap.add_argument("--block", type=int, default=BLOCK)
+    ap.add_argument("--skip-mem-guard", action="store_true",
+                    help="不等内存水位（默认可用不足 3G、或交换剩余不足一成时直接拒绝起跑）")
     ap.add_argument("--limit-conditions", type=int, default=0, help="只扫 N 条（分层抽，试水）")
     ap.add_argument("--from", dest="date_from", default=DATE_FROM)
     ap.add_argument("--to", dest="date_to", default=HOLDOUT_START)
@@ -791,6 +976,12 @@ def main() -> int:
     ap.add_argument("--explain-force", default="",
                     help="强制归因的 cond_id=卖法（逗号分隔）。试水时一条没过，用它把归因趟跑通")
     ap.add_argument("--dump-trades", type=int, default=0, help="打印 N 笔逐笔明细供人工复算")
+    ap.add_argument("--min-tenure", type=int, default=DEFAULT_MIN_TENURE,
+                    help="信号日这只票在本库里至少已有多少根日线（把次新博弈挡在外面）；0=不设")
+    ap.add_argument("--min-amount", type=float, default=0.0,
+                    help=f"信号日前 {AMOUNT_WINDOW} 个交易日日均成交额下限（元）；0=不设")
+    ap.add_argument("--trial-budget", type=int, default=300_000,
+                    help="累计试次预算：用满就收手不再扫；0=不设限")
     ap.add_argument("--export-csv", default="")
     ap.add_argument("--dry-run", action="store_true", help="不写 Mongo")
     ap.add_argument("--run-id", default="")
@@ -801,11 +992,32 @@ def main() -> int:
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 
+    check_mem_headroom(args.skip_mem_guard)
+
     conds = load_inventory(args.limit_conditions)
     for c in conds:
         c["fields"] = rule_expr.validate(c["expr"])
     profs = profiles()
-    files = sorted(Path(args.kline_dir).glob("*.parquet"))[:: max(1, args.step)]
+    files = sorted(Path(args.kline_dir).glob("*.parquet"))
+    files, dropped_funds = filter_funds(files)
+    if dropped_funds:
+        logger.info("票池：按代码段剔掉场内基金 %s 只，剩 %s 个日线文件",
+                    f"{dropped_funds:,}", f"{len(files):,}")
+    files = files[:: max(1, args.step)]
+    POOL["min_tenure"] = max(0, args.min_tenure)
+    POOL["min_amount"] = max(0.0, args.min_amount)
+
+    combos = len(conds) * len(profs)
+    prior = trials_used(args.run_id)
+    if args.trial_budget and prior >= args.trial_budget:
+        raise SystemExit(
+            f"累计已经试过 {prior:,} 个组合，超出试次预算 {args.trial_budget:,}：再扫下去「找出一条过的"
+            f"规则」越来越像是试出来的，不是行情里真有的。要接着找得换样本（另一段行情、另一批字段），"
+            f"而不是把门槛再降一档。")
+    args.trials_total = prior + combos
+    if args.trial_budget and args.trials_total > args.trial_budget:
+        logger.warning("这一轮跑完累计 %s 次，超出预算 %s：这是最后一轮",
+                       f"{args.trials_total:,}", f"{args.trial_budget:,}")
     rows, meta = scan(files, conds, profs, args)
     attach_bench_and_neighbours(rows, meta, conds)
     print(render(rows, meta, conds, profs, args))
@@ -841,16 +1053,26 @@ def main() -> int:
     if args.export_csv:
         export_csv(Path(args.export_csv), rows)
         print(f"CSV：{args.export_csv}")
+    pool_doc = {"min_tenure": POOL["min_tenure"], "min_amount": POOL["min_amount"],
+                "amount_window_days": AMOUNT_WINDOW, "dropped_funds": dropped_funds,
+                "files": len(files), **meta["pool"]}
+    # 干跑也记试次：它同样看过这份数据，不记账就等于给「反复扫到出一条过的」留后门
+    append_trials({"ts": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+                   "run_id": "" if args.dry_run else run_id, "combos": combos,
+                   "trials_total": args.trials_total, "dry_run": bool(args.dry_run),
+                   "n_pass": len(good), "window": [args.date_from, args.date_to],
+                   "pool": pool_doc})
     if args.dry_run:
-        logger.info("dry-run：不写 Mongo")
+        logger.info("dry-run：不写 Mongo（累计试次已记账到 %s 次）", f"{args.trials_total:,}")
         return 0
-    combos = len(conds) * len(profs)
     run = {"run_id": run_id, "created_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
            "window": list(meta["window"]), "n_days": meta["n_days"],
            "date_from": args.date_from, "date_to": args.date_to,
            "n_conditions": len(conds), "n_profiles": len(profs), "n_trials": combos,
-           "t_required": round(rule_gates.t_required(combos), 3), "cost_pp": COST_PP,
+           "n_trials_total": args.trials_total, "trial_budget": args.trial_budget,
+           "t_required": round(rule_gates.t_required(args.trials_total), 3), "cost_pp": COST_PP,
            "trade_amount": args.amount, "step": args.step, "files": len(files),
+           "stocks": meta["stocks"], "pool": pool_doc,
            "n_pass": len(good), "elapsed_s": round(meta["elapsed"], 1), "fills": meta["fills"],
            "holdout_start": HOLDOUT_START}
     to_mongo(run, rows)

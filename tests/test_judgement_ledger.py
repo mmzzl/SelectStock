@@ -285,3 +285,31 @@ def test_fired_within_prev_looks_back_not_at_today():
     assert not prev[3, 0]                  # 当天自己那次不算「提前预警」
     assert prev[4, 0] and prev[5, 0]
     assert not prev[2, 0]                  # 窗口只看前 2 行
+
+
+def test_judge_matrix_with_closed_rules_is_all_hold():
+    """两侧规则关着（active.json 空列表 → sell/add 都是空串）：不能炸，也不能瞎判。
+
+    `eval_matrix("")` 给的是 None，早先这里直接 `judged & add` 就 TypeError，19:00 的台账整晚没数。
+    """
+    arr = {"close": np.ones((6, 3), dtype=np.float32)}
+    action, sell = mod.judge_matrix(arr, {"sell": "", "add": ""})
+    assert (action == 3).all()
+    assert not sell.any()
+
+
+def test_build_rows_without_sell_rules_leaves_flip_nan():
+    """flip=None ⇒「hold 自己变成 sell」这个观测不存在，整列留 NaN，不是 0。
+
+    写 0 会被下游读成「观测到一次都没转卖」，那是同义反复：规则关着本来就不可能转卖。
+    """
+    n = 4
+    dates = pd.date_range("2020-01-01", periods=2).strftime("%Y-%m-%d")
+    action = np.full((2, 2), 3, dtype=np.int8)
+    fwd = np.zeros((2, 2), dtype=np.float32)
+    heat = np.full((2, 2), 50.0, dtype=np.float32)
+    df = mod.build_rows(list(dates), ["000001", "000002"], action, heat, fwd, fwd, None)
+    assert df["flip_sell_20"].isna().all()
+    df0 = mod.build_rows(list(dates), ["000001", "000002"], action, heat, fwd, fwd,
+                         np.zeros((2, 2), dtype=bool))
+    assert (df0["flip_sell_20"] == 0).all()          # 有规则时仍然是真的 0/1
