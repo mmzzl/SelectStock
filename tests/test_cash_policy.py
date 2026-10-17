@@ -26,6 +26,18 @@ def test_reserve_zero_is_never_binding():
     assert p.active_days == []
 
 
+def test_tranches_zero_never_releases_the_reserve():
+    """批次 E3 的纯躺平对照格（C10/C20）：tranches=0 ⇒ 下限恒等于预留，暴跌日也不放子弹。
+
+    对照格不需要任何新代码——日程循环 `range(0)` 不进，所以锚点当天也照样卡着下限。
+    `active_days` 为空 ⇒ 机制列自动不适用（没有放过子弹，就没什么「次日收益」可读）。
+    """
+    p = policy(0.2, 0, {"d2", "d4"}, DAYS)
+    assert [p.floor(d, 100_000) for d in DAYS] == [20_000.0] * 7
+    assert p.active_days == []
+    assert p.floor("d2", 50_000) == pytest.approx(10_000)     # 锚点当天总资产变了，下限跟着变
+
+
 def test_normal_day_holds_the_reserve_back():
     p = policy(0.2, 2, {"d4"}, DAYS)
     assert p.floor("d1", 100_000) == pytest.approx(20_000)

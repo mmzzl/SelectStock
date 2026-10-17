@@ -61,6 +61,21 @@ def _init_worker(kline_dir: str, calendar: np.ndarray, required_rows: int, strat
     _CTX["strategy"] = create_strategy(strategy_name)
 
 
+def calendar_positions(calendar: np.ndarray, dates: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """行日期 → (留在表里的行下标, 对应的日历下标)。
+
+    `searchsorted` 对**早于日历首日**的行也返回下标 0，所以必须逐个核对日期等值：
+    不核对就会把整段窗前的命中与收盘价一股脑塞进日历第一天（历史段实测首日因此多出 8.4 万条命中，
+    留出段多 60 万条，并把那天本该停牌的价格填成窗前最后一天的价）。
+    晚于日历末日的行由 `pos < len(calendar)` 那条挡掉。
+    """
+    pos = np.searchsorted(calendar, dates)
+    in_cal = pos < len(calendar)
+    in_cal[in_cal] &= calendar[pos[in_cal]] == dates[in_cal]
+    idx = np.flatnonzero(in_cal)
+    return idx, pos[idx]
+
+
 def _scan_one(code: str) -> dict | None:
     """单只票：只在自己有行情的日子里问判据，其余日子天生是「无行情行」＝无信号。
 
@@ -69,9 +84,7 @@ def _scan_one(code: str) -> dict | None:
     与 `signal_on()` 那条「最后一行早于基准日就返回 None」同效。
 
     窗前那些行**必须留在表里**（窗口头 30 个交易日的回看要用它们，删了就与实时口径不一致），
-    但只有日期正好落在日历上的行才允许写命中与价格：`searchsorted` 会把早于日历首日的行都返回
-    下标 0，不核对等值就会把整段窗前的命中与收盘价一股脑塞进日历第一天（历史段实测首日因此
-    多出 8.4 万条命中，留出段多 60 万条，并把那天本该停牌的价格填成窗前最后一天的价）。
+    但只有日期正好落在日历上的行才允许写命中与价格——见 `calendar_positions()`。
     """
     path = _CTX["kline_dir"] / f"{code}.parquet"
     if not path.exists():
@@ -85,11 +98,8 @@ def _scan_one(code: str) -> dict | None:
     dates = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
     df = df.assign(_d=dates).sort_values("_d").reset_index(drop=True)
     arr = df["_d"].to_numpy()
-    pos = np.searchsorted(calendar, arr)
-    in_cal = pos < len(calendar)
-    in_cal[in_cal] &= calendar[pos[in_cal]] == arr[in_cal]
-    idx = np.flatnonzero(in_cal)
-    out = {"code": code, "pos": pos[idx], "hit_pos": np.array([], dtype=np.int32),
+    idx, cal_pos = calendar_positions(calendar, arr)
+    out = {"code": code, "pos": cal_pos, "hit_pos": np.array([], dtype=np.int32),
            "hit_score": np.array([], dtype=np.float64), "hit_name": [],
            **{col: df[col].astype(float).to_numpy()[idx] for col in PRICE_COLUMNS}}
     if len(df) < 2:
@@ -99,11 +109,11 @@ def _scan_one(code: str) -> dict | None:
     hits: list[int] = []
     scores: list[float] = []
     names: list[str] = []
-    for i in idx:
+    for i, day_index in zip(idx, cal_pos):
         hit = strategy.signal_at(values.iloc[max(0, i - rows + 1):i + 1].reset_index(drop=True))
         if hit is None:
             continue
-        hits.append(int(pos[i]))
+        hits.append(int(day_index))
         scores.append(float(hit.score) if hit.score is not None else float("nan"))
         # KernelStrategy 只在命中体没名字时回填当日名称，这里按它的口径存
         names.append(hit.name if hit.name else str(df["name"].iloc[i]))

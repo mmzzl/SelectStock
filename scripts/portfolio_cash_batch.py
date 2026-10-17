@@ -1,15 +1,27 @@
-"""批次 E 跑数：基准（reserve 0）+ 6 格现金调度，账户层六道门槛同屏判定。
+"""批次 E3 跑数：基准 + 6 实验格 + 3 同档位纯躺平对照格，留出段一次性裁决。
 
-预注册真源在 `stock_selector_api/README.md` §6「组合层批次 E」。本脚本只做那件事：
-判据、出场、撮合全部不动，唯一变量是「今天能动用多少现金」。
+预注册真源在 `stock_selector_api/README.md` §6「批次 E3」。本脚本只做那件事：
+判据、出场、撮合全部不动，唯一变量是「今天能动用多少现金」，
+而最终裁决不看「跟旧基准比好不好」，只看 **Δ = 实验格 − 同档位躺平格**。
 
-三条实现口径按预注册写死，别在这里改：
-- E1 基准 = `cash_policy=None` 的现引擎行为，参数逐条取 `backtest_main.py` 默认；
-- E4 格子 = `reserve {10,20,30}% × tranches {2,3}`，跑前定死，台账记 6 次；
-- E5 判定用账户层六道门槛，逐笔盈亏只展示不判过（那是单票 α 的尺子）。
+五件事按预注册写死，别在这里改：
+- E3-1 窗：默认 `--window holdout`（2022-01-01→2026-09-30，`data/portfolio_holdout/` 的矩阵 +
+  `data/actions_holdout/market_state.parquet`）。`--window history` 只给接线冒烟用（E/E2 那套产物），
+  它的读数**不用于任何判定**，也**不记台账**——留出段只读一次这条不能从旁边绕过去。
+- E3-2 格子 = 6 实验格（`reserve {10,20,30}% × tranches {2,3}`，与 E/E2 完全同一口径）
+  + 对照格 C10/C20/C30（`tranches=0`：同样预留，但下限永不放松）。对照格不参与 ①–⑥，只用来算 Δ。
+  原预注册只写了 C10/C20，2026-10-17 在正式跑数之前补上 C30（Δ 三档单调性必须有 30% 档的同档对照），
+  裁决阈值、Δ 定义、窗、票池一字不动，台账由 8 次改记 9 次。
+- E3-3 裁决：20% 那一对里至少一格同时 `Δ年化 ≥ +1.0pp` 且 `Δ回撤改善 ≥ +1.0pp`。
+- E3-4 单调性：以 `reserve` 为轴，**用 Δ 序列**（不是原始指标——各档位的躺平基准本身不同，
+  原始值会被现金占用率干扰）判「20% 不低于两侧」，×2 与 ×3 两条轴各自成立；
+  另加机制列同号 ≥ 5/6。Δ 达标但单调性不过 ⇒ 判偶然命中，不采信。
+- E3-5 六道门槛：①–⑥ 原文照抄 E/E2，仍然全过才算账户层合格，但在 E3 里**只是必要条件**。
+- E3-6 台账：9 格 = 9 次，129,904 → 129,913；只有 holdout 窗跑满 9 格才记。
 
-七趟都读同一份信号矩阵（`scripts/portfolio_signal_matrix.py` 预计算并已做 200 点等价校验），
-所以基准与实验格之间不存在「取数不同源」这条退路。
+十趟都读同一份信号矩阵，基准、实验格、对照格之间不存在「取数不同源」这条退路。
+矩阵的窗边界缺陷（窗前历史行被 `searchsorted` 钉到日历第一天）已在 `scripts/portfolio_signal_matrix.py`
+的 `calendar_positions()` 修掉，并由 `tests/test_portfolio_signal_matrix.py` 锁住——E3 用的是修好之后重建的矩阵。
 """
 
 from __future__ import annotations
@@ -19,6 +31,7 @@ import json
 import logging
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -31,11 +44,12 @@ from scripts.portfolio_signal_matrix import (                     # noqa: E402
     DATE_FROM, DATE_TO, MATRIX_FILE, OUT_DIR, STRATEGY_NAME, CachedKernelStrategy,
     MatrixProvider, load_hit_names,
 )
-from stock_selector.backtest.cash_policy import CashPolicy, crash_dates   # noqa: E402
+from stock_selector.backtest.cash_policy import (                 # noqa: E402
+    MARKET_STATE as DEFAULT_MARKET_STATE, CashPolicy, crash_dates,
+)
 from stock_selector.backtest.engine import BacktestEngine                # noqa: E402
 from stock_selector.core.selector import create_strategy                 # noqa: E402
 
-KLINE_DIR = ROOT / "data" / "stock_kline"
 LOG_DIR = ROOT / "logs" / "portfolio"
 TRIAL_LEDGER = ROOT / "logs" / "profit_scan" / "trials.jsonl"
 
@@ -48,14 +62,37 @@ MAX_HOLD_DAYS = 10
 STOP_LOSS_PCT = 0.05
 TAKE_PROFIT_PCT = 0.0
 
-# E4 格子（跑之前定死，不许按读数增删）
+
+@dataclass(frozen=True)
+class Window:
+    """一套「矩阵 + 触发日历 + 判据窗」的三件套，必须整组换，不许混搭。"""
+
+    name: str
+    date_from: str
+    date_to: str
+    matrix_dir: Path
+    market_state: Path
+
+
+# E3-1：留出段是正式跑数；历史窗（E/E2 的产物）只用于验接线，读数不作数
+HOLDOUT = Window("holdout", "2022-01-01", "2026-09-30",
+                 ROOT / "data" / "portfolio_holdout",
+                 ROOT / "data" / "actions_holdout" / "market_state.parquet")
+HISTORY = Window("history", DATE_FROM, DATE_TO, OUT_DIR, DEFAULT_MARKET_STATE)
+WINDOWS = {w.name: w for w in (HOLDOUT, HISTORY)}
+
+# E3-2 格子（跑之前定死，不许按读数增删）
 RESERVES = (0.10, 0.20, 0.30)
 TRANCHES = (2, 3)
-CELLS = [(r, t) for r in RESERVES for t in TRANCHES]
+CONTROL_RESERVES = RESERVES            # 每档都要有同档位躺平对照，否则 Δ 单调性判不了（2026-10-17 补 C30）
+EXPERIMENTAL = [(r, t) for r in RESERVES for t in TRANCHES]
+CELLS = EXPERIMENTAL + [(r, 0) for r in CONTROL_RESERVES]
+N_CELLS = len(CELLS)
 
-# 批次标签与台账累计：E（仪器有缺陷，已判失效）= 129,892 → 129,898；E2（修复后重测）续到 129,904
-BATCH = "E2"
-LEDGER_EXPECT_BEFORE = 129_898
+# 批次标签与台账累计：E=129,892→129,898（仪器失效）、E2=129,898→129,904、
+# E3=129,904→129,913（9 格 = 6 实验格 + 3 躺平对照格）
+BATCH = "E3"
+LEDGER_EXPECT_BEFORE = 129_904
 
 # E5 六道门槛（单位：百分点）
 DD_IMPROVE_PP = 2.0
@@ -66,8 +103,30 @@ YEARLY_WORSEN_PP = 3.0
 MECHANISM_MIN_DAYS = 10
 # E2-2 前置校验：超限拒单占买单数的上限（整手/手续费边界残差，不是停摆）
 CAP_BLOCKED_RATIO_MAX = 0.01
+# E3-3 的硬指标阈值（跑数之前写死，读数之后不得回调）
+DELTA_PP = 1.0
+# E3-4 单调性要求的档位轴与机制同号比例
+MONOTONIC_PEAK = 20
+MECHANISM_SIGN_MIN = 5
 
 logger = logging.getLogger("cash_batch")
+
+
+def level(reserve_pct: float) -> int:
+    """档位用整数表示：0.1+0.2 之类的浮点误差不能让 20% 配到 C10 上去。"""
+    return int(round(100.0 * float(reserve_pct)))
+
+
+def control_name(reserve_pct: float) -> str:
+    return f"C{level(reserve_pct)}"
+
+
+def cell_name(reserve_pct: float, tranches: int) -> str:
+    if reserve_pct <= 0:
+        return "基准"
+    if tranches <= 0:
+        return control_name(reserve_pct)
+    return f"{level(reserve_pct)}%x{tranches}"
 
 
 def _calmar(annual: float, max_dd: float) -> float:
@@ -107,9 +166,12 @@ def _ratios(equity: list[dict]) -> tuple[float, float]:
 
 
 def run_cell(reserve_pct: float, tranches: int, provider: MatrixProvider,
-             hit_names: dict) -> dict:
+             hit_names: dict, window: Window) -> dict:
     """跑一格，返回判定要用的全部读数（含逐日净值，机制读数要从这里取次日价）。"""
-    policy = None if reserve_pct <= 0 else CashPolicy.build(reserve_pct, tranches)
+    # tranches=0 就是「下限永不放松」：CashPolicy 的日程循环 range(0) 不进，floor 恒等于 base，
+    # active_days 为空 ⇒ 机制列自动不适用。对照格不需要任何新通道代码。
+    policy = None if reserve_pct <= 0 else CashPolicy.build(reserve_pct, tranches,
+                                                            path=window.market_state)
     engine = BacktestEngine(
         CachedKernelStrategy(
             strategy=create_strategy(STRATEGY_NAME),
@@ -124,9 +186,9 @@ def run_cell(reserve_pct: float, tranches: int, provider: MatrixProvider,
         capital=CAPITAL,
         max_positions=MAX_POSITIONS,
         position_cap_pct=POSITION_CAP_PCT,
-        strategy_name=f"{STRATEGY_NAME}_reserve{int(reserve_pct * 100)}_t{tranches}",
+        strategy_name=f"{STRATEGY_NAME}_{cell_name(reserve_pct, tranches)}",
         params={"reserve_pct": reserve_pct, "tranches": tranches,
-                "window": [DATE_FROM, DATE_TO], "capital": CAPITAL,
+                "window": [window.date_from, window.date_to], "capital": CAPITAL,
                 "target_amount": TARGET_AMOUNT,
                 "exit": [MAX_HOLD_DAYS, STOP_LOSS_PCT, TAKE_PROFIT_PCT]},
         cash_policy=policy,
@@ -138,9 +200,10 @@ def run_cell(reserve_pct: float, tranches: int, provider: MatrixProvider,
     equity = result.equity
     ratios = _ratios(equity)
     row = {
-        "cell": "基准" if reserve_pct <= 0 else f"{int(reserve_pct * 100)}%x{tranches}",
+        "cell": cell_name(reserve_pct, tranches),
         "reserve_pct": reserve_pct,
         "tranches": tranches,
+        "kind": ("baseline" if reserve_pct <= 0 else "control" if tranches <= 0 else "experimental"),
         "total_return_pp": round(100.0 * m["total_return"], 4),
         "annual_return_pp": None if m["annual_return"] is None
                             else round(100.0 * m["annual_return"], 4),
@@ -171,7 +234,7 @@ def mechanism(cell: dict, baseline: dict, provider: MatrixProvider) -> dict:
     """E6 机制读数：本格在放弹日程里买进的票，它们的**次日**收益，绝对/相对两套口径。
 
     相对口径减的是「基准组合在同一天的全组合收益」，也就是剥掉当天大盘 β；
-    样本只有 30 个触发日，所以这里只判符号与前提，t 值不许当显著性证据（E6 原文）。
+    留出段只有 39 个触发日，所以这里只判符号与前提，t 值不许当显著性证据（E6 原文）。
     """
     policy = cell["_policy"]
     if policy is None:
@@ -217,9 +280,15 @@ def mechanism(cell: dict, baseline: dict, provider: MatrixProvider) -> dict:
 
 
 def judge(cell: dict, baseline: dict, mech: dict) -> dict:
-    """E5 六道门槛逐条判 + E6 机制单列（机制不是第 7 道门槛，别混进判定）。"""
-    if cell["reserve_pct"] <= 0:
+    """E5 六道门槛逐条判 + E6 机制单列（机制不是第 7 道门槛，别混进判定）。
+
+    E3-2：对照格（`tranches=0`）**不参与 ①–⑥**，只用来算 Δ；基准也不算。
+    """
+    if cell["kind"] == "baseline":
         return {}
+    if cell["kind"] == "control":
+        return {"gates": {}, "gates_passed": "—", "verdict": "对照",
+                "control_note": "E3-2：纯躺平对照格，不参与 ①–⑥ 判定，只作 Δ 的分母"}
     dd_improve = abs(baseline["max_drawdown_pp"]) - abs(cell["max_drawdown_pp"])
     yearly_worst_gap = max(
         abs(cell["yearly_dd_pp"][y]) - abs(baseline["yearly_dd_pp"][y])
@@ -252,10 +321,143 @@ def judge(cell: dict, baseline: dict, mech: dict) -> dict:
     }
 
 
-def record_trial(n_cells: int, cells: list[dict], verdicts: list[dict]) -> None:
-    """台账：试次累计必须与逐笔扫描共用一条线（换脚本就清零 = 同一批行情能重试）。"""
-    total = 0
-    last = None
+def delta(experimental: dict, control: dict) -> dict:
+    """Δ = 实验格 − **同档位**纯躺平对照格（E3-3）。跨档位配对在这里是硬错误。
+
+    两笔都算「相对同一条躺平基准的超额」：年化取差，回撤取「躺平格回撤 − 实验格回撤」
+    （正数＝实验格回撤更浅）。跟旧基准的差留给 ①–⑥，那只是必要条件。
+    """
+    if experimental["kind"] != "experimental":
+        raise ValueError(f"{experimental['cell']} 不是实验格，Δ 只能由实验格减对照格")
+    if control["kind"] != "control":
+        raise ValueError(f"{control['cell']} 不是纯躺平对照格（tranches 必须为 0）")
+    if level(experimental["reserve_pct"]) != level(control["reserve_pct"]):
+        raise ValueError(f"E3 硬规则：{experimental['cell']} 只能和 "
+                         f"{control_name(experimental['reserve_pct'])} 配对，"
+                         f"这里配到了 {control['cell']}（跨档位）")
+    return {
+        "cell": experimental["cell"],
+        "control": control["cell"],
+        "reserve_level": level(experimental["reserve_pct"]),
+        "tranches": experimental["tranches"],
+        "annual_pp": experimental["annual_return_pp"],
+        "control_annual_pp": control["annual_return_pp"],
+        "delta_annual_pp": round(experimental["annual_return_pp"] - control["annual_return_pp"], 4),
+        "max_drawdown_pp": experimental["max_drawdown_pp"],
+        "control_max_drawdown_pp": control["max_drawdown_pp"],
+        "delta_dd_improve_pp": round(abs(control["max_drawdown_pp"])
+                                      - abs(experimental["max_drawdown_pp"]), 4),
+    }
+
+
+def pair_deltas(rows: list[dict]) -> tuple[list[dict], list[str]]:
+    """按档位找同档对照格。找不到对照的档位（预注册没给 C30）列进 unpaired，不许拿别的档位凑。"""
+    controls = {level(r["reserve_pct"]): r for r in rows if r["kind"] == "control"}
+    paired: list[dict] = []
+    unpaired: list[str] = []
+    for row in rows:
+        if row["kind"] != "experimental":
+            continue
+        control = controls.get(level(row["reserve_pct"]))
+        if control is None:
+            unpaired.append(row["cell"])
+            continue
+        paired.append(delta(row, control))
+    return paired, unpaired
+
+
+def e33_decision(deltas: list[dict]) -> dict:
+    """E3-3：20% 那一对里至少一格同时 Δ年化 ≥ 1.0pp 且 Δ回撤改善 ≥ 1.0pp（都对 C20 比）。"""
+    pair_20 = [d for d in deltas if d["reserve_level"] == MONOTONIC_PEAK]
+    if not pair_20:
+        return {"verdict": "无法判定",
+                "reason": f"20% 档没有同档位对照格（{control_name(0.20)} 不在本次读数里）⇒ 按不采信处理",
+                "cells": []}
+    for d in pair_20:
+        d["e33_cell_pass"] = (d["delta_annual_pp"] >= DELTA_PP
+                              and d["delta_dd_improve_pp"] >= DELTA_PP)
+    hit = [d["cell"] for d in pair_20 if d["e33_cell_pass"]]
+    return {
+        "verdict": "过" if hit else "不过",
+        "threshold_pp": DELTA_PP,
+        "passed_cells": hit,
+        "reason": (f"{'、'.join(hit)} 相对 {pair_20[0]['control']} 同时做到 "
+                   f"Δ年化≥+{DELTA_PP}pp 且 Δ回撤改善≥+{DELTA_PP}pp"
+                   if hit else
+                   f"20% 那两格相对 {pair_20[0]['control']} 没有一格同时过 Δ年化≥+{DELTA_PP}pp "
+                   f"与 Δ回撤改善≥+{DELTA_PP}pp ⇒ 账户层的改善读不出「暴跌择时」的额外贡献"),
+    }
+
+
+def e34_decision(deltas: list[dict], unpaired: list[str], verdicts: list[dict]) -> dict:
+    """E3-4：Δ 序列的单调性（20% 为峰，两条 tranches 轴各自成立）+ 机制列同号 ≥ 5/6。
+
+    这里**只用 Δ**：三个档位的躺平基准各不相同，实验格的原始年化/原始回撤会被「少投了多少钱」
+    带着走，直接拿原始值排大小等于把 E3-3 想排除的那个混淆又请回来。
+    """
+    axes: dict[str, dict] = {}
+    all_ok = True
+    for t in TRANCHES:
+        series = {d["reserve_level"]: d for d in deltas if d["tranches"] == t}
+        if any(lvl not in series for lvl in (10, MONOTONIC_PEAK, 30)):
+            axes[f"tranches={t}"] = {"status": "无法判定",
+                                     "reason": f"Δ 序列缺档位（无同档对照：{', '.join(unpaired) or '—'}）"}
+            all_ok = False
+            continue
+        checks = {}
+        for metric, label in (("delta_annual_pp", "Δ年化"), ("delta_dd_improve_pp", "Δ回撤改善")):
+            peak, low, high = series[MONOTONIC_PEAK][metric], series[10][metric], series[30][metric]
+            checks[label] = {"10%": low, "20%": peak, "30%": high,
+                             "ok": peak >= low and peak >= high}
+            all_ok &= bool(checks[label]["ok"])
+        axes[f"tranches={t}"] = {"status": "过" if all(c["ok"] for c in checks.values()) else "不过",
+                                 "checks": checks}
+    signs = [v["mechanism"]["next_day_rel_pp"] for v in verdicts
+             if v.get("mechanism") and not np.isnan(v["mechanism"]["next_day_rel_pp"])]
+    pos = sum(1 for s in signs if s > 0)
+    neg = sum(1 for s in signs if s < 0)
+    mechanism_ok = max(pos, neg) >= MECHANISM_SIGN_MIN
+    all_ok &= mechanism_ok
+    return {
+        "verdict": "过" if all_ok else "不过",
+        "axes": axes,
+        "mechanism": {"n_cells": len(signs), "positive": pos, "negative": neg,
+                      "required": f"同号≥{MECHANISM_SIGN_MIN}/{len(EXPERIMENTAL)}",
+                      "ok": mechanism_ok},
+        "unpaired_cells": unpaired,
+        "note": "违反单调性 ⇒ 即使 E3-3 的 Δ 过线也判偶然命中，不采信、不铺开、不进卖出链设计（E3-4 原文）",
+    }
+
+
+def final_decision(e33: dict, e34: dict, n_gates_pass: int) -> dict:
+    """三条并判：E3-3（Δ 达标）+ E3-4（单调性）是充分性，E3-5 六门槛只是必要条件。"""
+    if e33["verdict"] != "过":
+        verdict, reason = "不采信", f"E3-3 不过：{e33['reason']}"
+    elif e34["verdict"] != "过":
+        verdict, reason = "不采信", f"E3-3 过线但 E3-4 单调性不过（{e34['verdict']}）⇒ 判偶然命中"
+    else:
+        verdict, reason = "采信", "E3-3 与 E3-4 同时成立"
+    return {"verdict": verdict, "reason": reason,
+            "e33": e33["verdict"], "e34": e34["verdict"],
+            "e35_gates_passed_cells": n_gates_pass,
+            "e8_action": ("按 E8 关掉组合层现金调度这条线，不回头加格子" if verdict == "不采信"
+                          else "才允许另开一条「这条机制怎么落到操作面」的新预注册（E3 本身不做设计）")}
+
+
+def ledger_record(n_cells: int, rows: list[dict], verdicts: list[dict], before: int,
+                  window: Window) -> dict:
+    """台账记录：`n_pass` 必须是「六道门槛判定为过」的格数（E3-7 的那笔债，单测锁住）。"""
+    return {"batch": BATCH, "chain": "portfolio_cash", "combos": n_cells,
+            "trials_total": before + n_cells, "dry_run": False,
+            "n_pass": sum(1 for v in verdicts if v.get("verdict") == "过"),
+            "window": [window.date_from, window.date_to], "strategy": STRATEGY_NAME,
+            "cells": [r["cell"] for r in rows],
+            "ledger_note": f"预注册 {LEDGER_EXPECT_BEFORE:,} → {LEDGER_EXPECT_BEFORE + n_cells:,}"}
+
+
+def ledger_before() -> int:
+    """台账累计试次：与逐笔扫描共用一条线（换脚本就清零 = 同一批行情能重试）。"""
+    total, last = 0, None
     if TRIAL_LEDGER.is_file():
         for line in TRIAL_LEDGER.read_text(encoding="utf-8").splitlines():
             try:
@@ -265,26 +467,20 @@ def record_trial(n_cells: int, cells: list[dict], verdicts: list[dict]) -> None:
             total += int(rec.get("combos") or 0)
             if rec.get("trials_total") is not None:
                 last = int(rec["trials_total"])
-    before = max(last or 0, total)
+    return max(last or 0, total)
+
+
+def record_trial(rows: list[dict], verdicts: list[dict], window: Window) -> None:
+    before = ledger_before()
     if before != LEDGER_EXPECT_BEFORE:
         logger.warning("台账累计试次是 %s，预注册写的是 %s——格子数没变，但请确认中间没插跑别的大规模扫描",
                        f"{before:,}", f"{LEDGER_EXPECT_BEFORE:,}")
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     rec = {"ts": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-           "batch": BATCH, "chain": "portfolio_cash", "combos": n_cells,
-           "trials_total": before + n_cells, "dry_run": False,
-           "n_pass": sum(1 for v in verdicts if v.get("verdict") == "过"),
-           "window": [DATE_FROM, DATE_TO], "strategy": STRATEGY_NAME,
-           "cells": [r["cell"] for r in cells],
-           "ledger_note": f"预注册 {LEDGER_EXPECT_BEFORE:,} → {LEDGER_EXPECT_BEFORE + n_cells:,}"}
+           **ledger_record(len(rows), rows, verdicts, before, window)}
     with TRIAL_LEDGER.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    logger.info("已记试次：%d 格 → 累计 %s", n_cells, f"{before + n_cells:,}")
-
-
-def _yearly_buy_counts(cell: dict) -> dict[str, int]:
-    return {y: sum(1 for t in cell["_trades"] if t["date"][:4] == y and t["side"] in ("buy", "add"))
-            for y in sorted({t["date"][:4] for t in cell["_trades"]})}
+    logger.info("已记试次：%d 格 → 累计 %s", len(rows), f"{rec['trials_total']:,}")
 
 
 def check_baseline_trades(baseline: dict, years: list[str]) -> None:
@@ -311,33 +507,38 @@ def check_baseline_trades(baseline: dict, years: list[str]) -> None:
                 counts, baseline["cap_blocked"], 100.0 * blocked_ratio)
 
 
-def print_table(rows: list[dict], verdicts: list[dict]) -> None:
-    cols = ["cell", "total_return_pp", "annual_return_pp", "max_drawdown_pp", "calmar_pp",
+def print_raw_layer(rows: list[dict], verdicts: list[dict]) -> None:
+    """第一层：所有格子的**原始**账户读数（含对照格），Δ 一个都不出现在这一层里。"""
+    cols = ["cell", "kind", "total_return_pp", "annual_return_pp", "max_drawdown_pp", "calmar_pp",
             "sharpe", "trade_count", "avg_deployed_ratio", "avg_position_ratio",
             "cash_floor_blocked", "cap_blocked"]
-    print("\n== E5 账户层读数（基准与六格同屏；判定只看六道门槛，逐笔口径只展示） ==")
-    print("   （cap_blocked = 被单票上限拒掉的买单数；批次 E 的病就是被这一列藏住的，"
-          "跑完必须是个位数级别的边界残差，不能成规模）")
-    table = pd.DataFrame([{c: r[c] for c in cols} for r in rows])
-    print(table.to_string(index=False))
+    print("\n== 第一层：原始账户读数（基准/实验格/对照格同屏；逐笔口径只展示） ==")
+    print("   （cap_blocked = 被单票上限拒掉的买单数；跑完必须是个位数级别的边界残差，不能成规模）")
+    print(pd.DataFrame([{c: r[c] for c in cols} for r in rows]).to_string(index=False))
 
-    print("\n== E5 六道门槛（每格逐条：过/不过（与基准的差）） ==")
-    gate_names = list(verdicts[1]["gates"]) if len(verdicts) > 1 else []
+    print("\n== E3-5 六道门槛（实验格逐条判；对照格按 E3-2 不参与判定） ==")
+    gate_names = next((list(v["gates"]) for v in verdicts if v.get("gates")), [])
     lines = []
     for row, v in zip(rows, verdicts):
-        if not v:
-            lines.append({"cell": row["cell"], "gates_passed": "基准", "verdict": "—"})
-            continue
-        entry = {"cell": row["cell"], "gates_passed": v["gates_passed"], "verdict": v["verdict"]}
-        for name in gate_names:
-            ok, gap = v["gates"][name]
-            entry[name] = ("过" if ok else "不过") + f"({gap:+.3f})"
-        lines.append(entry)
+        if row["kind"] == "baseline":
+            lines.append({"cell": row["cell"], "gates_passed": "基准", "verdict": "—",
+                          **{name: "—" for name in gate_names}})
+        elif not v.get("gates"):
+            lines.append({"cell": row["cell"], "gates_passed": "—",
+                          "verdict": v.get("verdict", "对照"),
+                          **{name: "不参与" for name in gate_names}})
+        else:
+            entry = {"cell": row["cell"], "gates_passed": v["gates_passed"], "verdict": v["verdict"]}
+            for name in gate_names:
+                ok, gap = v["gates"][name]
+                entry[name] = ("过" if ok else "不过") + f"({gap:+.3f})"
+            lines.append(entry)
     print(pd.DataFrame(lines).to_string(index=False))
     n_caveat = sum(1 for v in verdicts if v.get("calmar_caveat"))
     if n_caveat:
         print(f"   ②Calmar 读法：{n_caveat} 格与基准的年化同为负数 ⇒ ② 只作辅助参考，"
               f"必须与年化、绝对回撤一起人工看（E2-4 的口径注释）")
+    print("   E3-5：六道门槛全过只是「账户层合格」的必要条件，充分性看第二层的 E3-3 + E3-4")
 
     print("\n== E6 机制读数（暴跌日放子弹 → 那些票的次日收益；≥10 天才允许读） ==")
     mech_rows = []
@@ -356,7 +557,7 @@ def print_table(rows: list[dict], verdicts: list[dict]) -> None:
                           "止损线": v.get("e8_note", "")})
     print(pd.DataFrame(mech_rows).to_string(index=False) if mech_rows else "（无）")
 
-    print("\n== 逐年年内回撤 pp（2021 无触发日 = 只体现预留拖累的对照年） ==")
+    print("\n== 逐年年内回撤 pp ==")
     years = sorted({y for r in rows for y in r["yearly_dd_pp"]})
     print(pd.DataFrame([{"cell": r["cell"], **{y: r["yearly_dd_pp"].get(y) for y in years}}
                         for r in rows]).to_string(index=False))
@@ -375,75 +576,170 @@ def print_table(rows: list[dict], verdicts: list[dict]) -> None:
     print(pd.DataFrame(act).to_string(index=False))
 
 
+def print_delta_layer(deltas: list[dict], unpaired: list[str], e33: dict, e34: dict,
+                      final: dict, rows: list[dict]) -> None:
+    """第二层：只有 Δ 与三条裁决。原始指标不回这张表里混。"""
+    print("\n== 第二层：Δ = 实验格 − 同档位纯躺平对照格（E3-3 的唯一硬指标） ==")
+    if not deltas:
+        print("（没有任何一格配到同档位对照格 ⇒ 无法裁决）")
+    else:
+        cols = ["cell", "control", "tranches", "annual_pp", "control_annual_pp", "delta_annual_pp",
+                "max_drawdown_pp", "control_max_drawdown_pp", "delta_dd_improve_pp"]
+        table = pd.DataFrame([{c: d[c] for c in cols} for d in deltas])
+        table["E3-3单格"] = [d.get("e33_cell_pass", False) for d in deltas] if e33["verdict"] != "无法判定" else "—"
+        print(table.to_string(index=False))
+        print("   （Δ年化>0 = 比同档位躺平多赚；Δ回撤改善>0 = 比同档位躺平回撤更浅）")
+    if unpaired:
+        print(f"   无同档位对照、只有 ①–⑥ 的格子：{', '.join(unpaired)}"
+              f"（每档都必须有同档位躺平对照；跨档位配对是硬错误，这里不凑）")
+
+    print("\n== E3-4 单调性（用 Δ 序列判，不用原始指标） ==")
+    for axis, detail in e34["axes"].items():
+        print(f"   {axis}：{detail['status']}"
+              + (f" —— {detail.get('reason', '')}" if detail["status"] != "过" else ""))
+        for label, check in (detail.get("checks") or {}).items():
+            print(f"      {label}: 10%={check['10%']:+.3f} 20%={check['20%']:+.3f} "
+                  f"30%={check['30%']:+.3f} ⇒ {'20% 为峰' if check['ok'] else '20% 不是峰'}")
+    m = e34["mechanism"]
+    print(f"   机制列同号：{m['n_cells']} 格里 正{m['positive']}/负{m['negative']}，"
+          f"要求{m['required']} ⇒ {'成立' if m['ok'] else '不成立'}")
+
+    print("\n== 最终裁决（E3-3 充分性 + E3-4 单调性；E3-5 六门槛只是必要条件） ==")
+    print(f"   E3-3：{e33['verdict']} —— {e33['reason']}")
+    print(f"   E3-4：{e34['verdict']}")
+    print(f"   E3-5：六道门槛全过的实验格 {final['e35_gates_passed_cells']}/6")
+    print(f"   ⇒ 裁决：**{final['verdict']}**（{final['reason']}）")
+    print(f"   ⇒ 后续：{final['e8_action']}")
+    print(f"   说明：{e34['note']}")
+
+    if rows:
+        n_exp = sum(1 for r in rows if r["kind"] == "experimental")
+        print(f"\n   读法提醒：本次共 {len(rows)} 趟（基准 + 实验格 {n_exp} 个 + 对照格 "
+              f"{sum(1 for r in rows if r['kind'] == 'control')} 个）；"
+              f"2022+ 留出段只读这一次，读完当场结案（E3-6）")
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    parser = argparse.ArgumentParser(description="批次 E：组合层现金调度 7 趟跑数")
+    parser = argparse.ArgumentParser(description="批次 E3：组合层现金调度 10 趟跑数（基准 + 9 格）")
+    parser.add_argument("--window", choices=sorted(WINDOWS), default=HOLDOUT.name,
+                        help=f"{HOLDOUT.name}=留出段正式跑数（默认）；"
+                             f"{HISTORY.name}=只验接线，读数不作数、不记台账")
     parser.add_argument("--dry-run", action="store_true", help="只列格子与门槛，不跑数、不记台账")
-    parser.add_argument("--cells", default="", help="只跑指定格（如 10%x2,30%x3），基准始终跑；调通用")
-    parser.add_argument("--out", default=str(LOG_DIR / f"batch_{BATCH.lower()}_readout.json"))
+    parser.add_argument("--cells", default="", help="只跑指定格（如 10%x2,C20），基准始终跑；调通用")
+    parser.add_argument("--no-ledger", action="store_true", help="跑满 9 格也不记台账（冒烟专用）")
+    parser.add_argument("--out", default="")
     args = parser.parse_args()
 
-    triggers, _ = crash_dates()
-    logger.info("触发口径：mkt_med_pct ≤ -3.0 且 mkt_n ≥ 1500 → 窗内 %d 个触发日",
-                len([d for d in triggers if DATE_FROM <= d <= DATE_TO]))
+    window = WINDOWS[args.window]
+    out = Path(args.out or LOG_DIR / f"batch_{BATCH.lower()}_{'holdout' if window is HOLDOUT else 'smoke'}_readout.json")
+
+    triggers, _ = crash_dates(window.market_state)
+    in_window = [d for d in triggers if window.date_from <= d <= window.date_to]
+    logger.info("触发口径：mkt_med_pct ≤ -3.0 且 mkt_n ≥ 1500 → %s 窗内 %d 个触发日",
+                window.name, len(in_window))
+    if window is HOLDOUT and len(in_window) < MECHANISM_MIN_DAYS:
+        raise SystemExit(f"E3-1 前置不过：留出段窗内只有 {len(in_window)} 个触发日"
+                         f"（< {MECHANISM_MIN_DAYS}），机制读不出来，不许开跑")
 
     cells = CELLS
     if args.cells:
         wanted = {c.strip() for c in args.cells.split(",") if c.strip()}
-        cells = [(r, t) for (r, t) in CELLS if f"{int(r * 100)}%x{t}" in wanted]
-        logger.warning("只跑 %s —— 这不是预注册的 6 格，读数不得用于 E5 判定", wanted)
+        cells = [(r, t) for (r, t) in CELLS if cell_name(r, t) in wanted]
+        logger.warning("只跑 %s —— 这不是预注册的 9 格，读数不得用于 E3 判定", sorted(wanted))
 
     if args.dry_run:
-        print(json.dumps({"baseline": "基准(=现引擎, reserve 0)", "cells": [f"{int(r * 100)}%x{t}"
-                                                        for r, t in cells],
+        print(json.dumps({"window": [window.date_from, window.date_to], "window_name": window.name,
+                          "baseline": "基准(=现引擎, reserve 0)",
+                          "cells": [cell_name(r, t) for r, t in cells],
                           "gates": [f"回撤改善≥{DD_IMPROVE_PP}pp", "Calmar≥基准", "Sharpe≥基准",
                                     f"年化≥基准−{ANNUAL_TOLERANCE_PP}pp",
                                     f"成交笔数≥基准{TRADE_RATIO_MIN:.0%}",
                                     f"逐年回撤不恶化>{YEARLY_WORSEN_PP}pp"],
-                          "mechanism_min_days": MECHANISM_MIN_DAYS},
+                          "e33": {"pair": "20% 档 vs C20", "delta_pp": DELTA_PP},
+                          "e34": {"axis": "Δ 序列（非原始指标）", "peak": "20%",
+                                  "mechanism_sign_min": MECHANISM_SIGN_MIN},
+                          "mechanism_min_days": MECHANISM_MIN_DAYS,
+                          "ledger": f"{LEDGER_EXPECT_BEFORE:,} → {LEDGER_EXPECT_BEFORE + N_CELLS:,}"},
                          ensure_ascii=False, indent=2))
         return 0
 
-    provider = MatrixProvider(OUT_DIR / MATRIX_FILE)
-    hit_names = load_hit_names(OUT_DIR)
-    logger.info("矩阵就绪：%d 天 × %d 只", len(provider.dates()), len(provider.codes()))
+    provider = MatrixProvider(window.matrix_dir / MATRIX_FILE)
+    hit_names = load_hit_names(window.matrix_dir)
+    logger.info("矩阵就绪：%d 天 × %d 只（%s）", len(provider.dates()), len(provider.codes()),
+                window.matrix_dir)
 
     rows: list[dict] = []
     logger.info("跑 基准")
-    baseline = run_cell(0.0, 0, provider, hit_names)
+    baseline = run_cell(0.0, 0, provider, hit_names, window)
     rows.append(baseline)
     check_baseline_trades(baseline, sorted({d[:4] for d in provider.dates()}))
-    for reserve, tranches in list(cells):
-        logger.info("跑 %s × %d", f"{int(reserve * 100)}%", tranches)
-        rows.append(run_cell(reserve, tranches, provider, hit_names))
+    for reserve, tranches in cells:
+        logger.info("跑 %s（tranches=%d）", cell_name(reserve, tranches), tranches)
+        rows.append(run_cell(reserve, tranches, provider, hit_names, window))
+        # 边跑边落，留出段只读一次：中途机器出事不许从第一格重来
+        _dump(rows, window, out, None, None)
 
-    baseline = rows[0]
     verdicts = [judge(r, baseline, mechanism(r, baseline, provider)) for r in rows]
+    deltas, unpaired = pair_deltas(rows)
+    e33 = e33_decision(deltas)
+    e34 = e34_decision(deltas, unpaired, verdicts)
+    n_gates_pass = sum(1 for v in verdicts if v.get("verdict") == "过")
+    final = final_decision(e33, e34, n_gates_pass)
 
-    n_pass = sum(1 for v in verdicts[1:] if v.get("verdict") == "过")
-    logger.info("6 格里过 %d 格；按 E8：0 过就在 −3%% 触发口径下关掉这条线，不换阈值铺格子", n_pass)
-    print_table(rows, verdicts)
+    logger.info("E3-3 %s / E3-4 %s / 六门槛全过 %d 格 ⇒ 裁决 %s",
+                e33["verdict"], e34["verdict"], n_gates_pass, final["verdict"])
+    print_raw_layer(rows, verdicts)
+    print_delta_layer(deltas, unpaired, e33, e34, final, rows)
+    _dump(rows, window, out, verdicts, (deltas, unpaired, e33, e34, final))
 
-    if len(cells) == 6:
-        record_trial(len(cells), rows[1:], verdicts[1:])
+    experimental_rows = [r for r in rows if r["kind"] == "experimental"]
+    experimental_verdicts = [v for r, v in zip(rows, verdicts) if r["kind"] == "experimental"]
+    control_rows = [r for r in rows if r["kind"] == "control"]
+    if window is not HOLDOUT:
+        logger.warning("%s 窗只用于验接线：本次不记台账，读数不得用于 E3 判定", window.name)
+    elif len(experimental_rows) == len(EXPERIMENTAL) and len(control_rows) == len(CONTROL_RESERVES):
+        if args.no_ledger:
+            logger.warning("--no-ledger：跑满了 9 格但没记台账")
+        else:
+            record_trial(experimental_rows + control_rows, experimental_verdicts, window)
     else:
-        logger.warning("格子数不是 6，本次不记台账（预注册台账只认那一趟）")
+        logger.warning("格子数不是预注册的 9（实验 %d + 对照 %d），本次不记台账",
+                       len(experimental_rows), len(control_rows))
+    return 0
 
-    payload = {"window": [DATE_FROM, DATE_TO], "strategy": STRATEGY_NAME,
-               "pool_codes": len(provider.codes()), "calendar_days": len(provider.dates()),
-               "baseline": {k: v for k, v in baseline.items() if not k.startswith("_")},
-               "cells": [{**{k: v for k, v in r.items() if not k.startswith("_")},
-                          "judgement": verdicts[i]}
-                         for i, r in enumerate(rows) if i],
+
+def _dump(rows: list[dict], window: Window, out: Path, verdicts: list[dict] | None,
+          decision: tuple | None) -> None:
+    """读数落盘。跑数途中也调一次（verdicts/decision 还没算出来时只存原始层）。"""
+    clean = [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows]
+    baseline = clean[0]
+    payload = {"batch": BATCH, "window": [window.date_from, window.date_to],
+               "window_name": window.name,
+               "matrix_dir": str(window.matrix_dir),
+               "market_state": str(window.market_state),
+               "strategy": STRATEGY_NAME,
+               "cells": clean,
                "gates": {"dd_improve_pp": DD_IMPROVE_PP, "annual_tolerance_pp": ANNUAL_TOLERANCE_PP,
                          "trade_ratio_min": TRADE_RATIO_MIN, "yearly_worsen_pp": YEARLY_WORSEN_PP,
-                         "mechanism_min_days": MECHANISM_MIN_DAYS}}
-    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.out).write_text(json.dumps(payload, ensure_ascii=False, indent=2,
-                                         default=lambda o: None if isinstance(o, np.floating)
-                                         and np.isnan(o) else str(o)), encoding="utf-8")
-    logger.info("读数已落盘：%s", args.out)
-    return 0
+                         "mechanism_min_days": MECHANISM_MIN_DAYS},
+               "delta_threshold_pp": DELTA_PP,
+               "pairs": {r["cell"]: (control_name(r["reserve_pct"])
+                                     if r["kind"] == "experimental" else None) for r in clean}}
+    if verdicts is not None:
+        payload["judgements"] = {r["cell"]: v for r, v in zip(rows, verdicts) if r["kind"] != "baseline"}
+        payload["baseline"] = baseline
+    if decision is not None:
+        deltas, unpaired, e33, e34, final = decision
+        payload["layer2_delta"] = deltas
+        payload["layer2_unpaired"] = unpaired
+        payload["e33"] = e33
+        payload["e34"] = e34
+        payload["final"] = final
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2,
+                              default=lambda o: None if isinstance(o, np.floating)
+                              and np.isnan(o) else str(o)), encoding="utf-8")
 
 
 if __name__ == "__main__":
