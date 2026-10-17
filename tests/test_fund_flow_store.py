@@ -94,6 +94,28 @@ def test_missing_amount_is_a_different_reason_than_zero_amount():
     assert row["exclude_reason"] == store.REASON_NO_AMOUNT and pd.isna(row["main_ratio"])
 
 
+def test_interface_placeholder_dash_becomes_nan_and_stays_parquet_writable():
+    """接口对「此刻没有值」发的是字符串 '-'（北交所/基金/停牌票的 close 实测如此）。
+
+    2026-10-17 就栽在这里：`-'` 留在 close 列里整列变 object，`to_parquet` 抛
+    `Could not convert '-'`，一轮 60 页的全市场采集直接白跑。所以这里既断言转成 NaN，
+    也断言真的能落盘——「不抛异常」本身就是这条管线的验收面。
+    """
+    frame = store.normalize_and_flag(daily_rows(close="-", pct_change="-"),
+                                     data_ts="", collected_at="")
+    row = frame[frame["code"] == "000001"].iloc[0]
+    assert pd.isna(row["close"]) and pd.isna(row["pct_change"])
+    assert row["main_ratio"] == pytest.approx(-0.5)          # 有成交额，占比照算
+
+
+def test_dash_row_written_into_partition(tmp_daily):
+    frame = store.normalize_and_flag(daily_rows(close="-"), data_ts="t", collected_at="c")
+    written = store.write_partitions(tmp_daily, frame)
+    assert written[DAY] == 2
+    back = store.read_partition(store.partition_path(tmp_daily, DAY))
+    assert pd.isna(back[back["code"] == "000001"].iloc[0]["close"])
+
+
 def test_st_and_delisting_names_are_flagged_but_kept():
     """剔与不剔是读时选择：行必须留着，只打标记——否则截面票池有多大永远说不清。"""
     for name in ("ST摘帽", "*ST发展", "退市海润"):
@@ -280,6 +302,55 @@ def test_run_daily_max_pages_writes_a_partial_day(tmp_daily, monkeypatch):
                         lambda page, **kwargs: ([clist_row(code=f"{page:06d}")], 500))
     full = fetch.run_daily(force=True, sleeper=lambda *_: None)
     assert not full["partial"] and full["pages"] == 5
+
+
+# ---------------------------------------------------------------------------
+# 传输层与第 1 页的耐心重试
+# ---------------------------------------------------------------------------
+
+def test_transport_defaults_to_curl_cffi_and_reuses_one_session(monkeypatch):
+    """默认通道是 curl_cffi：2026-10-17 同一时间窗内交错 A/B，requests 0/16 全被掐断，
+    curl_cffi（Chrome TLS 指纹 + 复用连接）过了 7 次。这里只验「建哪条通道、只建一条」，
+    不发真请求——连接复用是关键：旧写法每翻一页重握手一次，等于每页重新过一次节流闸。
+    """
+    from curl_cffi import requests as cffi_requests
+
+    assert fetch.TRANSPORT == "cffi"
+    monkeypatch.setattr(fetch, "_SESSION", None)
+    session = fetch.http_session()
+    assert isinstance(session, cffi_requests.Session)
+    assert fetch.http_session() is session                       # 第二条连接不该被建出来
+    assert issubclass(cffi_requests.exceptions.ConnectionError, fetch._CATCH)
+
+
+def test_run_daily_page1_failure_waits_and_restarts_the_round(tmp_daily, monkeypatch):
+    """第 1 页取不到 = 这一天永久缺（批量接口只给当下），所以整轮要等分钟级再重来。
+    旧版和翻页共用 0.8/1.6/3.2 秒的梯子，6 秒内就放弃整天，而实测硬窗口是十几~几十分钟。
+    """
+    asked = []
+
+    def fake_page(page, **kwargs):
+        asked.append(page)
+        return None
+
+    monkeypatch.setattr(fetch, "fetch_daily_page", fake_page)
+    waits: list[float] = []
+    result = fetch.run_daily(sleeper=waits.append)
+    assert result["ok"] is False and result["reason"] == "page1_failed"
+    assert result["rounds"] == fetch.ROUND_RETRIES + 1
+    assert asked == [1] * (fetch.ROUND_RETRIES + 1)
+    assert waits == list(fetch.ROUND_WAIT_SECONDS)               # 最后一轮失败后不再白等
+    assert list(fetch.stored_dates(tmp_daily)) == []
+
+
+def test_run_daily_page1_recovers_on_a_later_round(tmp_daily, monkeypatch):
+    answers = iter([None, ([clist_row()], 100)])
+    monkeypatch.setattr(fetch, "fetch_daily_page", lambda page, **kwargs: next(answers))
+    waits: list[float] = []
+    result = fetch.run_daily(sleeper=waits.append)
+    assert result["ok"] and result["rows"] == 1
+    assert waits == [fetch.ROUND_WAIT_SECONDS[0]]
+    assert store.partition_rows(store.partition_path(tmp_daily, DAY)) == 1
 
 
 # ---------------------------------------------------------------------------

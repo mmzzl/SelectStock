@@ -38,6 +38,9 @@
     python scripts/fetch_fund_flow.py --days 45            # 自检窗口（默认 30 个交易日）
     python scripts/fetch_fund_flow.py --migrate-legacy     # 一次性：旧 individual/ 摊成日分区
     python scripts/fetch_fund_flow.py --no-alert           # 断采不推钉钉
+    python scripts/fetch_fund_flow.py --only daily --transport requests
+                                                              # 退回纯 requests 通道（默认 curl_cffi，
+                                                              # 换通道的原因与实测见 http_get 上方注释）
 """
 
 import argparse
@@ -88,6 +91,19 @@ MAX_RETRIES = 5            # akshare 通道（快照类，单次调用代价低�
 RETRY_BACKOFF = 2.0
 PAGE_RETRIES = 3           # 批量分页：实测约 1/3 请求被断连、但重试一次即恢复，不必多等
 PAGE_BACKOFF = 0.8
+# 第 1 页单独用慢梯子：批量接口只给「当下」，第 1 页拿不到就等于这一天永远缺（后面没法重取），
+# 所以这里值得等下去。旧版和翻页一样只等 0.8/1.6/3.2 秒（共 5.6s）就整轮放弃，而实测东财的
+# 节流窗口是「分钟级」——2026-10-17 22:25 与 23:04 两轮都在 6 秒内放弃，整天不写。
+# 这不是硬重试：间隔从 5s 涨到 30s，6 次共约 2 分钟，且只在第 1 页用（翻页缺几页只少些行）。
+PAGE1_RETRIES = 6
+PAGE1_BACKOFF = 5.0
+PAGE1_BACKOFF_MAX = 30.0
+# 整轮重来：第 1 页慢梯子跑完仍然拿不到时，等一段再重来（不是同一连接上硬重试）。
+# 间隔取 (5min, 15min) 是因为实测的硬窗口就是十几到几十分钟：2026-10-17 22:25 整轮失败、
+# 23:04 又失败、23:05~23:06 单发能过、23:07 起再次全断。最坏耗时 3 轮 × 约 2min(梯子)
+# + 20min(等待) ≈ 26min，16:30 起跑还来得及，且每轮都是幂等的（分区到水位就跳过）。
+ROUND_RETRIES = 2
+ROUND_WAIT_SECONDS = (300, 900)
 PAGE_SIZE = 100            # 东财 clist 单页上限
 PAGE_SLEEP = 0.3           # 页间间距；整轮 60 页约 40 秒，不留间距容易被限流
 PAGE_SLEEP_MAX = 5.0       # 连续失败时的降速上限：间隔再大就变成一天跑不完
@@ -120,13 +136,50 @@ _HEADERS = {
     "(KHTML, like Gecko) Chrome/122.0 Safari/537.36",
 }
 
+# 传输层：`cffi`（curl_cffi，Chrome TLS/HTTP2 指纹 + 复用连接，默认）或 `requests`。
+# 为什么换（2026-10-17 交错 A/B 实测，同一时间窗内轮流发同样的请求）：
+#   1) 软节流时段 curl_cffi 能过而 requests 全被掐：探针 1 是 4/8 对 0/8，
+#      探针 5（每 10s 一次、两臂交错各 8 次）是 3/8 对 0/8；合并 7/16 对 0/16。
+#      push2his 上也出现过「requests 断连、curl_cffi 同一秒 200」。
+#   2) 未被封锁时两臂都能过，但 cffi 更快（单页中位 115ms 对 162ms）。
+# 它**不是**免死金牌：IP 进入硬窗口时两臂一起 0/10，六个 push2 镜像域名（push2/1/33/92/
+# push2delay…）也在同一刻一起断连——说明这道闸按 IP 计，换域名轮换没用（实测过，别再做）。
+# 所以换传输层是为了少浪费配额、并把能拿到的日子拿到手，硬窗口只能靠「多个时段重试」兜。
+TRANSPORT = "cffi"
+_SESSION = None
+# 「一次失败请求长什么样」：随通道创建，重试循环据此决定是重试还是记失败。
+_CATCH: tuple = (requests.RequestException, ValueError)
+
+
+def http_session():
+    """进程内唯一的 GET 通道（连接复用）。分开写是为了能在不碰网络的情况下测出选的是哪条通道。"""
+    global _SESSION, _CATCH
+    if _SESSION is None:
+        if TRANSPORT == "cffi":
+            from curl_cffi import requests as cffi_requests
+
+            _SESSION = cffi_requests.Session(impersonate="chrome")
+            _SESSION.headers.update({"Referer": "https://quote.eastmoney.com/"})
+            _CATCH = (cffi_requests.exceptions.RequestException, ValueError)
+        else:
+            _SESSION = requests.Session()
+            _SESSION.headers.update(_HEADERS)
+            _CATCH = (requests.RequestException, ValueError)
+    return _SESSION
+
+
+def http_get(url: str, params: dict):
+    """走复用连接发请求。curl_cffi 通道只补 Referer，UA 交给 impersonate 保持一致的指纹。"""
+    return http_session().get(url, params=params, timeout=REQUEST_TIMEOUT)
+
 
 def now_iso() -> str:
     return datetime.now(TZ_CN).strftime("%Y-%m-%dT%H:%M:%S+08:00")
 
 
 def _get_json(url: str, params: dict, *, retries: int = PAGE_RETRIES,
-              backoff: float = PAGE_BACKOFF, sleeper=time.sleep) -> dict | None:
+              backoff: float = PAGE_BACKOFF, backoff_max: float = math.inf,
+              sleeper=time.sleep) -> dict | None:
     """GET 并取 `data` 节点；重试用尽返回 None（调用方把这一页记成失败，不中断整轮）。
 
     这里**不能**抛异常：一天 60 页里总有几页被掐，一页失败只该少这一页的行，
@@ -134,12 +187,12 @@ def _get_json(url: str, params: dict, *, retries: int = PAGE_RETRIES,
     """
     for attempt in range(retries + 1):
         try:
-            resp = requests.get(url, params=params, headers=_HEADERS, timeout=REQUEST_TIMEOUT)
+            resp = http_get(url, params)
             resp.raise_for_status()
             body = resp.json()
-        except (requests.RequestException, ValueError) as exc:
+        except _CATCH as exc:
             if attempt < retries:
-                sleeper(backoff * (2 ** attempt))
+                sleeper(min(backoff * (2 ** attempt), backoff_max))
                 continue
             logger.warning("[daily] 第 %s 页最终失败: %s", params.get("pn"), exc)
             return None
@@ -148,7 +201,9 @@ def _get_json(url: str, params: dict, *, retries: int = PAGE_RETRIES,
     return None
 
 
-def fetch_daily_page(page: int, *, sleeper=time.sleep) -> tuple[list[dict], int] | None:
+def fetch_daily_page(page: int, *, sleeper=time.sleep, retries: int = PAGE_RETRIES,
+                     backoff: float = PAGE_BACKOFF,
+                     backoff_max: float = math.inf) -> tuple[list[dict], int] | None:
     """抓一页全市场资金流，返回 `(行, total)`；失败返回 None。
 
     `fid=f12` 固定按代码排序：翻页期间列表顺序必须稳定，否则同一只票可能被翻到两次
@@ -161,7 +216,8 @@ def fetch_daily_page(page: int, *, sleeper=time.sleep) -> tuple[list[dict], int]
         "fields": CLIST_FIELDS,
         "_": int(time.time() * 1000),
     }
-    data = _get_json(CLIST_URL, params, sleeper=sleeper)
+    data = _get_json(CLIST_URL, params, retries=retries, backoff=backoff,
+                     backoff_max=backoff_max, sleeper=sleeper)
     if data is None:
         return None
     diff = data.get("diff")
@@ -231,10 +287,25 @@ def run_daily(*, limit_pages: int = 0, max_pages: int = 0, page_sleep: float | N
     known = stored_dates(daily_dir) if known is None else known
     today = datetime.now(TZ_CN).strftime("%Y-%m-%d")
 
-    first = fetch_daily_page(1)
+    first = None
+    for round_no in range(ROUND_RETRIES + 1):
+        first = fetch_daily_page(1, sleeper=sleeper, retries=PAGE1_RETRIES,
+                                 backoff=PAGE1_BACKOFF, backoff_max=PAGE1_BACKOFF_MAX)
+        if first is not None:
+            break
+        if round_no < ROUND_RETRIES:
+            wait = ROUND_WAIT_SECONDS[round_no]
+            # 值得等：批量接口只给「最后一个快照」，同一个晚上等多久都还是同一个交易日，
+            # 而过了夜里再想取这一天就没通道了（逐只接口慢且只留 124 天）。
+            logger.warning("[daily] 第 %d 轮第 1 页取不到（梯子已用尽），%ds 后整轮重来",
+                           round_no + 1, wait)
+            sleeper(wait)
     if first is None:
-        logger.error("[daily] 第 1 页就失败，整天不写（自检会把它算成断档）")
-        return {"ok": False, "reason": "page1_failed", "trade_date": ""}
+        logger.error("[daily] 第 1 页经 %d 轮 × 慢梯子（间隔涨到 %.0fs）仍失败，整天不写；"
+                     "自检会把它算成断档，这一天之后只能靠逐只补抓",
+                     ROUND_RETRIES + 1, PAGE1_BACKOFF_MAX)
+        return {"ok": False, "reason": "page1_failed", "trade_date": "",
+                "rounds": ROUND_RETRIES + 1}
     rows, total = first
     trade_date, data_ts = trading_day_of(rows, fallback=today)
     line = water_line(known)
@@ -329,7 +400,7 @@ def fetch_individual_history(code: str, *, retries: int = 2) -> pd.DataFrame:
     }
     for attempt in range(retries + 1):
         try:
-            resp = requests.get(url, params=params, headers=_HEADERS, timeout=REQUEST_TIMEOUT)
+            resp = http_get(url, params)
             resp.raise_for_status()
             data = (resp.json() or {}).get("data") or {}
             klines = data.get("klines") or []
@@ -345,7 +416,7 @@ def fetch_individual_history(code: str, *, retries: int = 2) -> pd.DataFrame:
             frame["code"] = code
             frame["name"] = data.get("name")
             return frame
-        except (requests.RequestException, ValueError) as exc:
+        except _CATCH as exc:
             if attempt < retries:
                 time.sleep(RETRY_BACKOFF * (2 ** attempt))
             else:
@@ -853,6 +924,7 @@ def setup_logging() -> None:
 
 
 def main() -> None:
+    global TRANSPORT
     parser = argparse.ArgumentParser(
         description="资金流采集：全市场单日批量 + 日分区落盘 + 断档自检")
     parser.add_argument("--only", choices=["daily", "rank", "industry"], default=None,
@@ -881,7 +953,11 @@ def main() -> None:
                         help="即使当日分区看起来完整也重抓")
     parser.add_argument("--no-alert", action="store_true", help="断采不推钉钉")
     parser.add_argument("--alert-dry-run", action="store_true", help="告警只打日志")
+    parser.add_argument("--transport", choices=["requests", "cffi"], default=TRANSPORT,
+                        help="HTTP 通道：cffi=curl_cffi（浏览器 TLS 指纹+复用连接，默认）；"
+                             "requests=只复用连接。选通道前先读 http_get 上方的实测记录")
     args = parser.parse_args()
+    TRANSPORT = args.transport
 
     setup_logging()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

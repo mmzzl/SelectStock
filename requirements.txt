@@ -28,3 +28,7 @@ lightgbm>=4.3
 
 # 盘中实时链路 scripts/quote_service.py（redis 作消息队列与行情缓存）
 redis>=5.0
+
+# 资金流采集 scripts/fetch_fund_flow.py 的默认 HTTP 通道（浏览器 TLS 指纹 + 复用连接，
+# 实测软节流时段能过而 requests 全被掐；换通道前先看该文件 http_session 上方的 A/B 记录）
+curl_cffi>=0.7
