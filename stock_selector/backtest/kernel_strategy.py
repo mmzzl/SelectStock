@@ -64,6 +64,20 @@ class KernelStrategy:
     def _codes(self) -> list[str]:
         return self.universe if self.universe is not None else self.provider.codes()
 
+    def _order_amount(self) -> float:
+        """单笔金额随当前总资产收缩：`min(目标金额, 总资产 × 单票上限比例)`。
+
+        固定金额是个仪器缺陷（批次 E 的基准就是这么废掉的）：`_check_single_stock_cap` 的上限是
+        `总资产 × position_cap_pct`，账户从 100k 缩水到 49k 后上限只剩 9,886 < 固定 20,000，
+        于是**每一笔买单都被超限拒掉**，而引擎 `except ValueError` 静默跳过——基准 2021 全年 0 笔、
+        净值死住，整条对照基准变成「一个停盘的策略」。这里用与那条校验同一个
+        `total_present_value({})` 口径，所以新票建仓一定落在上限内，长窗回测不会后半段冻死。
+        """
+        if self.broker is None:
+            return self.target_amount
+        cap_value = self.broker.total_present_value({}) * self.broker.position_cap_pct
+        return min(self.target_amount, cap_value)
+
     def propose_buys(self, date: str, cash: float, prices: dict) -> list[Order]:
         """当日全市场候选买入，按信号强度降序排（引擎按仓位上限从头成交，排序即选股优先级）。"""
         held = set(self.broker.positions) if self.broker is not None else set()
@@ -81,8 +95,9 @@ class KernelStrategy:
                 continue
             scored.append((hit.score if hit.score is not None else 0.0, code, hit))
         scored.sort(key=lambda item: (-item[0], item[1]))
+        amount = self._order_amount()
         return [
-            Order(code=code, amount=self.target_amount, name=hit.name or "")
+            Order(code=code, amount=amount, name=hit.name or "")
             for _, code, hit in scored
         ]
 

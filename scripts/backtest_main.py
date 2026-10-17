@@ -188,11 +188,13 @@ def main() -> None:
         args.capital = args.start_capital
 
     if args.strategy and args.target_amount >= args.capital * args.position_cap_pct:
-        # 单票上限按总资产校验，贴边的参数会在净值一旦回撤后静默拒掉所有买入，看起来像"没有信号"
+        # 单票上限按总资产校验，贴边的参数会在净值一旦回撤后拒掉买入，看起来像"没有信号"
         print(
-            f"警告: --target-amount {args.target_amount:.0f} ≥ 单票上限 "
-            f"{args.capital * args.position_cap_pct:.0f}（capital × position_cap_pct），"
-            f"净值回落后成交会被上限拒绝而大幅减少，请把单笔金额调到该上限以下。",
+            f"提示: --target-amount {args.target_amount:.0f} ≥ 初始单票上限 "
+            f"{args.capital * args.position_cap_pct:.0f}（capital × position_cap_pct）。"
+            f"策略模式（--strategy）下单笔金额会自动收缩到当前上限以内（KernelStrategy._order_amount），"
+            f"只是越跌越买得少；规则模式（缺省，RulesStrategy）仍按固定金额下单，"
+            f"净值回落后买单会被单票上限拒掉而大幅减少，请把单笔金额调到该上限以下。",
             file=sys.stderr,
         )
 

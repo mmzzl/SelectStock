@@ -115,9 +115,70 @@ class TestKernelSignal:
         class _Pos:
             positions = {"000001": None}
             trades = []
+            position_cap_pct = 1.0
+
+            def total_present_value(self, prices):
+                return 100_000.0
 
         k.attach_broker(_Pos())
         assert [o.code for o in k.propose_buys("2026-01-10", 100000, {})] == ["000002"]
+
+
+class TestOrderSizing:
+    """单笔金额必须跟着总资产收缩（批次 E 的仪器修复，README §6 缺陷 1）。
+
+    固定 target_amount 配「总资产×20%」的单票上限，会在账户缩水后让每笔买单超限，
+    而引擎静默跳过 —— 基准因此 2021 全年 0 笔、整条对照失效。
+    """
+
+    def _strategy(self, tmp_path, broker, target_amount=20_000.0, cap_pct=0.2):
+        write_stock(tmp_path, "000001", [12] * 6)
+        k = KernelStrategy(BandStrategy(), ParquetProvider(tmp_path),
+                           target_amount=target_amount)
+        broker.position_cap_pct = cap_pct
+        k.attach_broker(broker)
+        return k
+
+    def test_order_amount_capped_by_equity_not_by_target(self, tmp_path):
+        from stock_selector.backtest.broker import Broker
+
+        k = self._strategy(tmp_path, Broker(capital=49_430, max_positions=5))
+        orders = k.propose_buys("2026-01-10", 49_430, {})
+        assert orders[0].amount == pytest.approx(49_430 * 0.2)     # 9,886 < 固定 20,000
+
+    def test_order_amount_stays_at_target_when_account_is_full(self, tmp_path):
+        from stock_selector.backtest.broker import Broker
+
+        k = self._strategy(tmp_path, Broker(capital=100_000, max_positions=5))
+        assert k.propose_buys("2026-01-10", 100_000, {})[0].amount == 20_000.0
+
+    def test_shrunken_account_still_gets_filled(self, tmp_path):
+        """缩水的账户要能买到票，而不是被单票上限静默拒单 —— 这一条直接钉住 E 的病根。"""
+        from stock_selector.backtest.broker import Broker
+
+        broker = Broker(capital=49_430, max_positions=5)
+        k = self._strategy(tmp_path, broker)
+        order = k.propose_buys("2026-01-10", broker.cash, {})[0]
+        shares = broker.buy(order.code, "测试股", "2026-01-10", 12.0, order.amount)
+        assert shares >= Broker.LOT
+        assert broker.positions["000001"].cost <= broker.total_present_value({}) * 0.2
+        assert broker.cap_blocked == 0
+
+    def test_fixed_oversize_order_is_still_rejected_and_counted(self, tmp_path):
+        """规则模式仍按用户给的固定金额下单：超限照旧拒，但要计进 cap_blocked，不许静默。"""
+        from stock_selector.backtest.broker import Broker
+
+        broker = Broker(capital=49_430, max_positions=5)
+        with pytest.raises(ValueError, match="单票仓位上限"):
+            broker.buy("000001", "测试股", "2026-01-10", 12.0, 20_000.0)
+        assert broker.cap_blocked == 1
+        assert broker.positions == {}
+
+    def test_without_broker_target_amount_is_used_verbatim(self, tmp_path):
+        """未挂账户（如实盘选股侧只问信号）时不猜规模，沿用 target_amount。"""
+        write_stock(tmp_path, "000001", [12] * 6)
+        k = KernelStrategy(BandStrategy(), ParquetProvider(tmp_path), target_amount=20_000.0)
+        assert k.propose_buys("2026-01-10", 100_000, {})[0].amount == 20_000.0
 
 
 class TestKernelExits:

@@ -34,6 +34,7 @@ class BacktestEngine:
         end_date: str | None = None,
         progress_cb=None,
         params: dict | None = None,
+        cash_policy=None,
     ) -> None:
         self.strategy = strategy
         self.data = data
@@ -51,6 +52,8 @@ class BacktestEngine:
         self.strategy_name = strategy_name or type(strategy).__name__
         self.params = dict(params or {})
         self.progress_cb = progress_cb
+        # 组合层现金调度（批次 E）：None = 完全不干预，与现行为逐条相同
+        self.cash_policy = cash_policy
         self._initial_capital = float(capital)
         self.last_close: dict[str, float] = {}
         # 加仓指令只带代码，成交记录要名称，就在买入时把代码→名称记下来
@@ -129,6 +132,9 @@ class BacktestEngine:
 
             holdings = list(broker.positions)
             prices = self._valuation_prices(date, holdings)
+            if self.cash_policy is not None:
+                # 当天能动用多少现金，由组合层调度决定；判据、出场、撮合一概不碰
+                broker.cash_floor = self.cash_policy.floor(date, broker.total_present_value(prices))
             instructions = proxy.evaluate_holdings(date, holdings, prices)
 
             # ① 卖出：今天的指令先进队列，和之前押着待卖的一起按「当天卖不卖得掉」撮合
@@ -182,6 +188,11 @@ class BacktestEngine:
                     if px is None:
                         continue
                     self._names[o.code] = o.name
+                    # 买单被拒是静默的（只数进 cap_blocked/资金不足计数），历史上就静默掉过一整年：
+                    # 单笔金额固定 20,000 而单票上限是「总资产×20%」，账户缩水后每笔都超限，
+                    # 基准于是 2021 全年 0 笔、净值死住，任何多年窗的回测都会踩这个坑
+                    # （线上回测页面走的是同一份代码， sizing 已在 KernelStrategy 修好；
+                    # 规则模式仍按用户给的固定金额下单，超限会记进 cap_blocked，读数时必须看这一列）。
                     try:
                         broker.buy(o.code, o.name, date, px, o.amount)
                     except ValueError:
@@ -217,6 +228,8 @@ class BacktestEngine:
             trades=[self._trade_dict(t) for t in broker.trades],
             equity=[p.to_dict() for p in equity_points],
             executability={**self._exec, "reasons": dict(self._exec_reasons),
+                           "cash_floor_blocked": self.broker.floor_blocked,
+                           "cap_blocked": self.broker.cap_blocked,
                            "sell_pending": {c: w for c, (_, w) in sorted(self._want_sell.items())}},
         )
 

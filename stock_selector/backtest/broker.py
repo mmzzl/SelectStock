@@ -55,6 +55,13 @@ class Broker:
         self.commission_rate = commission_rate
         self.commission_min = commission_min
         self.stamp_tax_rate = stamp_tax_rate
+        # 组合层现金下限（批次 E）：这部分现金今天不许用来买/加。默认 0 = 现有行为。
+        # 由引擎逐日设置，只卡买入与加仓，从不因为下限而强制卖。
+        self.cash_floor = 0.0
+        self.floor_blocked = 0
+        # 被单票仓位上限拒掉的单数。以前超限只 raise、引擎 `except ValueError` 静默跳过，
+        # 于是批次 E 的基准在净值缩水后整年买不动也没人报警——这个计数就是那件事的探针。
+        self.cap_blocked = 0
         self.positions: dict[str, Position] = {}
         self.trades: list[Trade] = []
 
@@ -65,13 +72,33 @@ class Broker:
     def stamp_tax(self, amount: float) -> float:
         return amount * self.stamp_tax_rate
 
+    def available_cash(self) -> float:
+        """扣掉预留下限后今天真正能动用的现金。"""
+        return max(0.0, self.cash - self.cash_floor)
+
     # ---- 校验 ----
+    def _check_cash(self, code: str, total_need: float) -> None:
+        """钱够不够：先看扣掉预留下限之后能动用的，再看账面现金。
+
+        「本来买得起、是被预留挡下来的」单独计数——批次 E 要知道少买的那些笔
+        到底是没钱还是被调度拦住的，不然「预留」和「没子弹」在两笔账上混成一团。
+        """
+        available = self.available_cash()
+        if total_need <= available:
+            return
+        if total_need <= self.cash:
+            self.floor_blocked += 1
+            raise ValueError(f"{code} 动用预留下限外现金: 需 {total_need:.2f}, "
+                             f"可动用 {available:.2f}（现金 {self.cash:.2f}，下限 {self.cash_floor:.2f}）")
+        raise ValueError(f"{code} 资金不足: 需 {total_need:.2f}, 可用 {available:.2f}")
+
     def _check_single_stock_cap(self, code: str, add_value: float) -> None:
         """校验加仓/买入后该票成本不超单票仓位上限（按当前总资产口径）。"""
         current = self.positions.get(code, Position()).cost
         total = self.total_present_value({})
         cap_value = total * self.position_cap_pct
         if current + add_value > cap_value:
+            self.cap_blocked += 1
             raise ValueError(
                 f"{code} 超出单票仓位上限 {cap_value:.2f}"
             )
@@ -85,8 +112,7 @@ class Broker:
         gross = shares * price
         fee = self.commission(gross)
         total_need = gross + fee
-        if total_need > self.cash:
-            raise ValueError(f"{code} 资金不足: 需 {total_need:.2f}, 可用 {self.cash:.2f}")
+        self._check_cash(code, total_need)
         if code not in self.positions and len(self.positions) >= self.max_positions:
             raise ValueError(f"已达持仓只数上限 {self.max_positions}")
         self._check_single_stock_cap(code, gross)
@@ -115,8 +141,7 @@ class Broker:
         gross = shares * price
         fee = self.commission(gross)
         total_need = gross + fee
-        if total_need > self.cash:
-            raise ValueError(f"{code} 资金不足: 需 {total_need:.2f}, 可用 {self.cash:.2f}")
+        self._check_cash(code, total_need)
         self._check_single_stock_cap(code, gross)
 
         pos = self.positions[code]
