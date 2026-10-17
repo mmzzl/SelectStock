@@ -94,6 +94,11 @@ def normalize_and_flag(rows: pd.DataFrame, *, data_ts: str, collected_at: str) -
 
     amount = pd.to_numeric(df.get(AMOUNT_COLUMN), errors="coerce")
     df[AMOUNT_COLUMN] = amount
+    # 接口对「此刻没有值」给的是字符串 '-'（北交所/基金/停牌票的 close 实测就是 '-'）。
+    # 价格两列必须一起转 NaN：留着 '-' 会让整列变 object，落 parquet 直接抛
+    # `Could not convert '-' ... tried to convert to double`，一整天的采集就白跑。
+    for column in ("close", "pct_change"):
+        df[column] = pd.to_numeric(df.get(column), errors="coerce")
     for tier in TIERS:
         net = pd.to_numeric(df.get(f"{tier}_net_inflow"), errors="coerce")
         df[f"{tier}_net_inflow"] = net
