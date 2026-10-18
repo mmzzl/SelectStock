@@ -22,3 +22,6 @@ venv/
 # Agent 会话/工具缓存（不入版本库）
 .superpowers/
 .cospowers/
+
+# qlib/LightGBM 实验跟踪落盘（本地跑数产物，不入库）
+mlruns/
