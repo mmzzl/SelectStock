@@ -220,3 +220,35 @@ def test_load_column_rejects_unknown_column(tmp_path):
     assert pair.load_column("arm", "spearman_test", tmp_path).iloc[0] == pytest.approx(0.1)
     with pytest.raises(KeyError, match="ls_spread"):
         pair.load_column("arm", "ls_spread", tmp_path)
+
+
+# ---------- 留出段守卫与命令行口径 ----------
+
+def test_holdout_ok_requires_strictly_later_segments():
+    assert run.holdout_ok("2026-07-01", "2026-07-01", "2026-06-30") is True
+    # 起点等于训练末尾 = 第一天就是背过的数据，不能算留出
+    assert run.holdout_ok("2026-06-30", "2026-07-01", "2026-06-30") is False
+    assert run.holdout_ok("2026-07-01", "2026-06-01", "2026-06-30") is False
+    # 训练吃到日历末尾：valid/test 必然落在里面
+    assert run.holdout_ok("2026-10-01", "2026-10-01", "2026-10-16") is False
+
+
+def test_pool_file_and_pool_end_are_mutually_exclusive(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["qlib_run.py", "--pool-file", "p.txt",
+                                      "--pool-end", "2026-03-31"])
+    with pytest.raises(SystemExit, match="别两个一起给"):
+        run.main()
+
+
+def test_fixed_trees_must_be_positive(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["qlib_run.py", "--fixed-trees", "0"])
+    with pytest.raises(SystemExit, match="至少 1 棵"):
+        run.main()
+
+
+def test_export_without_write_live_model_refuses_before_training(monkeypatch, tmp_path):
+    """指向 data/qlib/model 就等于当场换线上：必须在训练**之前**拒绝，别烧完 5 分钟才报错。"""
+    monkeypatch.setenv("QLIB_MODEL_DIR", str(tmp_path / "live_model"))
+    monkeypatch.setattr(sys, "argv", ["qlib_run.py", "--export-model"])
+    with pytest.raises(SystemExit, match="实盘模型目录"):
+        run.main()

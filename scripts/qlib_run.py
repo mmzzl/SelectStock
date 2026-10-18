@@ -173,6 +173,15 @@ def as_series(frame) -> pd.Series:
     return dt_inst(frame.iloc[:, 0] if isinstance(frame, pd.DataFrame) else frame)
 
 
+def holdout_ok(valid_beg: str, test_beg: str, train_end: str) -> bool:
+    """评估段起点必须**严格晚于**训练段末尾，否则算出来的 IC 是模型背过的数据。
+
+    为什么要单独摆一个函数：上线臂要「训练吃到日历末尾」，末尾之后根本没有可留的日子，
+    这时 valid/test 与 train 重叠，逐日表/五分档全都能算出一个像模像样的数，而它们是假的。
+    """
+    return valid_beg > train_end and test_beg > train_end
+
+
 def daily_ic_frame(pred: pd.Series, label: pd.Series, min_names: int = 30) -> pd.DataFrame:
     """逐日横截面相关**序列**（以前只回聚合值，配对检验就没有输入可算）。
 
@@ -388,12 +397,19 @@ def main() -> int:
                          "别覆盖线上实盘那份")
     ap.add_argument("--seed", type=int, default=None,
                     help="LightGBM 种子。滚动臂之间要配对就得消除抽样噪声，缺省不设=与历史批次同口径")
+    ap.add_argument("--pool-end", default="",
+                    help="重挑票池用的流动性窗右端；缺省=--train-end。上线臂要把「训练吃到日历末尾」和"
+                         "「池按某个已收口时点的流动性挑」分开时用它（两者捆在一起会同时改两件事，说不清）")
     ap.add_argument("--train-beg", default="2016-01-01")
     ap.add_argument("--train-end", default="2021-12-31")
     ap.add_argument("--valid-beg", default="2022-01-01")
     ap.add_argument("--valid-end", default="2022-12-31")
     ap.add_argument("--test-beg", default="2023-01-01")
     ap.add_argument("--test-end", default="2026-10-16")
+    ap.add_argument("--fixed-trees", type=int, default=None,
+                    help="关掉早停、恰好长 N 棵树。训练段吃到日历末尾时验证段必然落在训练段之内，"
+                         "早停等于在自家数据上挑轮数；此时树数必须由人定，且应对齐已上线那份的实测棵数，"
+                         "否则「换了更新的数据」和「换了模型大小」会混在一起")
     ap.add_argument("--smoke", action="store_true", help="200 只 + 短窗，只验管道")
     ap.add_argument("--backtest", action="store_true")
     ap.add_argument("--topk", type=int, default=30)
@@ -416,6 +432,13 @@ def main() -> int:
     if args.smoke:
         args.universe, args.train_beg, args.train_end = 120, "2019-01-01", "2020-12-31"
         args.valid_beg, args.valid_end, args.test_beg, args.test_end = "2021-01-01", "2021-06-30", "2021-07-01", "2021-12-31"
+    if args.pool_file and args.pool_end:
+        raise SystemExit("--pool-file 已经把池定死了，--pool-end 会被无声忽略，别两个一起给")
+    if args.pool_end:
+        # 归一化成 YYYY-MM-DD：流动性窗要和日历字符串比大小，写成 2026/3/31 会静默挑出错的窗
+        args.pool_end = str(pd.Timestamp(args.pool_end).date())
+    if args.fixed_trees is not None and args.fixed_trees < 1:
+        raise SystemExit(f"--fixed-trees 至少 1 棵，给了 {args.fixed_trees}")
     run_id = args.run_id or pd.Timestamp.now().strftime("%Y%m%d-%H%M%S")
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -445,15 +468,16 @@ def main() -> int:
     calendar = [str(d)[:10] for d in qlib.data.D.calendar()]
     print(f"qlib 日历 {len(calendar)} 天：{calendar[0]} → {calendar[-1]}")
 
-    liquid_end = min(args.train_end, calendar[-1])
+    train_end_eff = min(args.train_end, calendar[-1])
+    pool_end_eff = min(args.pool_end or args.train_end, calendar[-1])
     if args.pool_file:
         pool = read_pool_file(Path(args.pool_file))
         print(f"票池：{len(pool)} 只（冻结自 {args.pool_file}，本次不重挑）")
     else:
         symbols = stock_symbols()
         print(f"面板里的股票（剔基金/指数/B股/北交所）：{len(symbols)} 只")
-        pool = liquid_universe(symbols, args.train_beg, liquid_end, args.universe)
-        print(f"票池：{len(pool)} 只（{args.train_beg}→{liquid_end} 日均成交额前 {args.universe}）")
+        pool = liquid_universe(symbols, args.train_beg, pool_end_eff, args.universe)
+        print(f"票池：{len(pool)} 只（{args.train_beg}→{pool_end_eff} 日均成交额前 {args.universe}）")
     inst_file = write_instruments(Path(args.qlib_dir), args.inst_name or f"liq{len(pool)}", pool)
     print(f"票池 → {inst_file}")
 
@@ -463,16 +487,42 @@ def main() -> int:
         "test": (args.test_beg, args.test_end),
     }
     # 用落盘文件的实际名（已小写），不要用传进来的 --inst-name 原样
-    dataset = build_dataset(qlib, inst_file.stem, liquid_end, segments)
+    # fit_end 必须是**训练段**末尾（稳健标准化统计的拟合窗），不能跟着 --pool-end 走
+    dataset = build_dataset(qlib, inst_file.stem, train_end_eff, segments)
 
     from qlib.contrib.model.gbdt import LGBModel
 
     gbdt_kwargs = {} if args.seed is None else {"seed": args.seed}
+    # 早停在 qlib 侧是构造参数（默认 rounds=50、num_boost_round=1000），不吃 n_estimators
+    round_kwargs = ({"num_boost_round": args.fixed_trees} if args.fixed_trees else {})
+    if args.fixed_trees:
+        print(f"树数固定 {args.fixed_trees} 棵（绕开 qlib 的早停回调，见下方注释）")
     model = LGBModel(loss="mse", learning_rate=0.04, num_leaves=128, max_depth=-1,
                      colsample_bytree=0.6, subsample=0.7, reg_alpha=10.0, reg_lambda=10.0,
-                     n_estimators=600, num_thread=4, verbose=-1, **gbdt_kwargs)
+                     n_estimators=600, num_thread=4, verbose=-1, **gbdt_kwargs, **round_kwargs)
     print(f"训练 {segments['train']} / 验证 {segments['valid']} / 测试 {segments['test']}")
-    model.fit(dataset)
+    if args.fixed_trees:
+        import lightgbm as lgb
+
+        # `LGBModel.fit` **无条件**挂 `lgb.early_stopping`，而 lightgbm≥4 在训练收尾时把 booster
+        # 裁到 best_iteration：把 patience 设成 10 亿也照样裁（冒烟实测要 20 棵只留 12 棵）。
+        # 固定树数就是为了让两臂容量相同，裁完的树数由验证集曲线决定 ⇒ 等于没固定。
+        # 所以这里自己调 lgb.train、不挂早停回调；predict 走的仍是 LGBModel 那份 self.model。
+        ds_pair = model._prepare_data(dataset)
+        ds, names = list(zip(*ds_pair))
+        # `LGBModel(**kwargs)` 把 kwargs 原样塞进 `self.params`，而 lightgbm 的参数别名表里
+        # `n_estimators`/`num_boost_round` 都映射到 `num_iterations`：params 里的 600 会**盖掉**
+        # 我们传的 num_boost_round（冒烟实测长到 600 棵）。所以先把这几个键摘掉再训。
+        params = {k: v for k, v in model.params.items()
+                  if k not in ("n_estimators", "num_boost_round", "num_iterations", "num_iteration")}
+        model.model = lgb.train(params, ds[0], num_boost_round=args.fixed_trees,
+                                valid_sets=ds, valid_names=names)
+        got = int(model.model.num_trees())
+        if got != args.fixed_trees:
+            raise SystemExit(f"--fixed-trees 要 {args.fixed_trees} 棵，实际 {got} 棵：容量没钉住，两臂不可比")
+        print(f"树数校验通过：{got} 棵")
+    else:
+        model.fit(dataset)
 
     if export_dest is not None:
         # 插件进程只加载最近 130 天，归一化统计必须从这次训练里带出来：
@@ -487,6 +537,8 @@ def main() -> int:
             "universe": args.universe,
             "pool_size": len(pool),
             "pool_file": args.pool_file,
+            "pool_end": pool_end_eff,
+            "fixed_trees": args.fixed_trees,
             "seed": args.seed,
             "qlib_version": getattr(qlib, "__version__", ""),
             "source": "scripts/qlib_run.py",
@@ -501,39 +553,51 @@ def main() -> int:
     label_valid = as_series(dataset.prepare("valid", col_set="label", data_key=DataHandlerLP.DK_L))
     pred_test = dt_inst(model.predict(dataset, segment="test"))
     pred_valid = dt_inst(model.predict(dataset, segment="valid"))
-    ic_valid = daily_ic_frame(pred_valid, label_valid)
-    ic_test = daily_ic_frame(pred_test, label_test)
+    # 没有留出段就一个数都不出：段内 IC 算得出像模像样的数字，而它是模型背过的数据
+    holdout = holdout_ok(args.valid_beg, args.test_beg, train_end_eff)
+    if holdout:
+        ic_valid, ic_test = daily_ic_frame(pred_valid, label_valid), daily_ic_frame(pred_test, label_test)
+    else:
+        ic_valid = ic_test = None
+        print(f"⚠ 无留出段（train→{train_end_eff} / valid={segments['valid']} / test={segments['test']}）："
+              "本臂不产出 IC、五分档与逐日序列，只用于导出模型")
     report = {
         "run_id": run_id,
         "config": {k: v for k, v in vars(args).items() if k not in ("run_id",)},
         "pool_size": len(pool),
         "pool_file": args.pool_file,
+        "pool_end": pool_end_eff,
+        "fixed_trees": args.fixed_trees,
+        "holdout": holdout,
         "label_formula": LABEL,
-        "ic_valid": ic_summary(ic_valid),
-        "ic_test": ic_summary(ic_test),
+        "ic_valid": ic_summary(ic_valid) if ic_valid is not None else None,
+        "ic_test": ic_summary(ic_test) if ic_test is not None else None,
     }
-    print(json.dumps(report["ic_valid"], indent=2, ensure_ascii=False))
-    print(json.dumps(report["ic_test"], indent=2, ensure_ascii=False))
+    if holdout:
+        print(json.dumps(report["ic_valid"], indent=2, ensure_ascii=False))
+        print(json.dumps(report["ic_test"], indent=2, ensure_ascii=False))
+        fwd = forward_returns(qlib, pool, args.test_beg, args.test_end)
+        table, spread = quintile_table(pred_test, fwd)
+        report["ic_daily_file"] = str(dump_ic_daily(REPORT_DIR, run_id, ic_valid, ic_test, spread))
+        report["pred_file"] = str(dump_predictions(REPORT_DIR, run_id, pred_test))
+        print(f"逐日序列落盘：{report['ic_daily_file']} / {report['pred_file']}")
+        if not table.empty:
+            report["quintile_test"] = table.round(5).to_dict("index")
+            report["quintile_long_short_pooled_t"] = float(
+                (table.loc[4, "mean"] - table.loc[0, "mean"]) /
+                ((table.loc[4, "std"] / np.sqrt(table.loc[4, "count"])) +
+                 (table.loc[0, "std"] / np.sqrt(table.loc[0, "count"]))))
+            report["quintile_long_short_daily_mean_pct"] = round(float(spread.mean() * 100), 4)
+            report["quintile_long_short_paired_t"] = t_stat(spread)
+            print("五分档真实 5 日收益（档位 0=预测最差 → 4=预测最好）：")
+            print(table)
+            print(f"最好档 − 最差档：合并 t {report['quintile_long_short_pooled_t']:.2f} / "
+                  f"同日配对 t {report['quintile_long_short_paired_t']:.2f}"
+                  f"（逐日均值 {report['quintile_long_short_daily_mean_pct']:.3f}%，"
+                  f"{len(spread)} 天）")
 
-    fwd = forward_returns(qlib, pool, args.test_beg, args.test_end)
-    table, spread = quintile_table(pred_test, fwd)
-    report["ic_daily_file"] = str(dump_ic_daily(REPORT_DIR, run_id, ic_valid, ic_test, spread))
-    report["pred_file"] = str(dump_predictions(REPORT_DIR, run_id, pred_test))
-    print(f"逐日序列落盘：{report['ic_daily_file']} / {report['pred_file']}")
-    if not table.empty:
-        report["quintile_test"] = table.round(5).to_dict("index")
-        report["quintile_long_short_pooled_t"] = float(
-            (table.loc[4, "mean"] - table.loc[0, "mean"]) /
-            ((table.loc[4, "std"] / np.sqrt(table.loc[4, "count"])) +
-             (table.loc[0, "std"] / np.sqrt(table.loc[0, "count"]))))
-        report["quintile_long_short_daily_mean_pct"] = round(float(spread.mean() * 100), 4)
-        report["quintile_long_short_paired_t"] = t_stat(spread)
-        print("五分档真实 5 日收益（档位 0=预测最差 → 4=预测最好）：")
-        print(table)
-        print(f"最好档 − 最差档：合并 t {report['quintile_long_short_pooled_t']:.2f} / "
-              f"同日配对 t {report['quintile_long_short_paired_t']:.2f}"
-              f"（逐日均值 {report['quintile_long_short_daily_mean_pct']:.3f}%，"
-              f"{len(spread)} 天）")
+    if args.backtest and not holdout:
+        raise SystemExit("没有留出段（训练段吃到末尾）就不许跑回测：那是在已见过的数据上撮合")
 
     if args.backtest:
         # 回测是最容易整段崩掉的一步，先把已达门槛 A 的读数落一次盘，别一起丢
