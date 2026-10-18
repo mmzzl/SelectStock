@@ -42,3 +42,5 @@ class SelectResultCreate(BaseModel):
     # adx14 闸门留痕：当日全市场分位（0~100）与 pass/reject。空 = 闸门没开或分位取不到。
     adx14_pct: float | None = None
     adx14_gate: str = Field(default="", max_length=8)
+    # 引擎显式声明算不出来的字段名，逗号分隔（qlib 插件给；自研内核不给）。
+    na_fields: str = Field(default="", max_length=128)

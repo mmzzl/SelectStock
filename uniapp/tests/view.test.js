@@ -4,8 +4,8 @@ import { toHoldingRow, toTradeRow, toPnlView, toSelectionJobRow, toSelectionResu
          toMessageRow, toDiagRow, toPreviewRow, toUpgradeInfo, fmtTime,
          priceStampText, convictionText, convictionHead, convictionLevelText, convictionLevelClass,
          convictionNote, hasConviction, takeProfitText, gameText,
-         riskText, riskClass, sortByRiskDesc, buyLevelText, sellTriggerText,
-         orderPlanText, riskAdjustText, posteriorText, gateText } from "../src/logic/view.js";
+         riskText, riskClass, isNa, sortByRiskDesc, buyLevelText, sellTriggerText,
+         orderPlanText, riskAdjustText, posteriorText, gateText, dayRankText } from "../src/logic/view.js";
 
 test("时间格式化：naive UTC 转本地、压到分钟；带时区/非法值不崩", async () => {
   const { execFileSync } = await import("node:child_process");
@@ -246,7 +246,7 @@ test("选股结果行：字段映射透传", () => {
     // 判据后验：后端没给这三列时必须是空串/null（页面据此显示「未标定」）
     posteriorVerdict: "", posteriorExcess: null, posteriorN: null,
     // adx14 闸门留痕：闸门没开时是 null/空串（页面整句不显示，不能印「分位 0」）
-    adx14Pct: null, adx14Gate: "",
+    adx14Pct: null, adx14Gate: "", naFields: [],
   });
 });
 
@@ -305,12 +305,30 @@ test("买点文案：判据里有几个位就说几个，都没有就整行不�
   assert.equal(buyLevelText({ buyRef: 10.3, buyInvalid: null }), "买入参考 10.30");
   assert.equal(buyLevelText({ buyRef: null, buyInvalid: null }), "");
   assert.equal(buyLevelText({}), "");
+  // 引擎声明不算买点（qlib 没有均线/箱沿这类判据）时这行必须说话，
+  // 因为「没有失效位」看着像"这笔买入不会错"，实际是"没人给你算过"
+  assert.equal(buyLevelText({ buyRef: null, buyInvalid: null, naFields: ["buy_ref_price"] }),
+               "买点参考位/失效位 · 不适用（该引擎不出价位）");
+  // 有数字时不适用让位给数字（同一引擎不会既不算又算出来）
+  assert.equal(buyLevelText({ buyRef: 10.3, naFields: ["buy_ref_price"] }), "买入参考 10.30");
+});
+
+test("行解析：na_fields 逗号串拆成数组，缺列拆成空数组", () => {
+  const row = toSelectionResultRow({ code: "600000", na_fields: "risk_ex10_pp,buy_ref_price" });
+  assert.deepEqual(row.naFields, ["risk_ex10_pp", "buy_ref_price"]);
+  assert.deepEqual(toSelectionResultRow({ code: "600000" }).naFields, []);
+  assert.equal(isNa(row, "risk_ex10_pp"), true);
+  assert.equal(isNa(row, "adx14_pct"), false);
 });
 
 test("风险分展示：缺值给占位符而不是 0，正负分别红绿", () => {
   assert.equal(riskText(null), "—");      // 闸门没判出来 ≠ 预测跑平全市场
   assert.equal(riskText(undefined), "—");
   assert.equal(riskText(NaN), "—");
+  // 「引擎不算」和「算了没判出来」是两句话：前者必须写不适用，后者才用「—」
+  assert.equal(riskText(null, true), "不适用");
+  assert.equal(riskClass(null, true), "");
+  assert.equal(riskText(0.5, true), "+0.50pp");   // 有数就用数，声明不该盖掉真值
   assert.equal(riskText(-0.213), "-0.21pp");
   assert.equal(riskText(0), "0.00pp");
   assert.equal(riskText(0.5), "+0.50pp");
@@ -333,6 +351,10 @@ test("依据文案：显示判据级 verdict，缺失时显式说未标定而不
   assert.equal(posteriorText({}), "依据 · 未标定（判据后验表还没建）");
   assert.equal(posteriorText({ posteriorVerdict: "  " }), "依据 · 未标定（判据后验表还没建）");
   assert.equal(posteriorText(undefined), "依据 · 未标定（判据后验表还没建）");
+  // qlib 引擎根本没有「判据」这个东西，沿用上句等于给了一句解释不成立的话：
+  // 后验表是建好了的，只是这个引擎不产 verdict。
+  assert.equal(posteriorText({ naFields: ["posterior_verdict"] }),
+               "依据 · 不适用（该引擎只出排序分，没有判据后验）");
   // 只有 verdict、没有数字时不编造数字
   assert.equal(posteriorText({ posteriorVerdict: "分格样本不足（单格上涨概率区间>2pp），不定论" }),
                "依据 · 分格样本不足（单格上涨概率区间>2pp），不定论");
@@ -462,4 +484,27 @@ test("风险条目按读取层整形后的样子渲染：标题一行、没有�
     category: "", direction: "risk", score: -8, reason: "" });
   assert.deepEqual([r.name, r.reason, r.category, r.scoreText],
     ["IPO欺诈调查可能导致茶百道上市失败或严重推迟", "", "", "-8"]);
+});
+
+test("当日榜内名次：有名次就说名次，拿不到就说原因，绝不补一个猜的名次", () => {
+  const meta = { supported: true, date: "2026-10-19", pool_size: 300, universe: 299, exit_rank: 100 };
+  // 榜内 + 还在卖出线内
+  assert.equal(dayRankText({ code: "600000", in_pool: true, rank: 7, universe: 299 }, meta),
+    "榜内名次 · 第 7 名 / 共 299 只 · 还在卖出线（前 100 名）内");
+  // 榜内但已跌出卖出线（卖出线是回测 band 的那条，不是页面自己写的数）
+  assert.equal(dayRankText({ code: "600000", in_pool: true, rank: 138, universe: 299 }, meta),
+    "榜内名次 · 第 138 名 / 共 299 只 · 已跌出卖出线（前 100 名）");
+  // 池外的持仓：模型从没给这只打过分，说清楚它不是"排在池子后面"
+  assert.equal(dayRankText({ code: "510300", in_pool: false, rank: null, universe: 299 }, meta),
+    "榜内名次 · 不在当前 300 只候选池里，模型没给这只打过分");
+  // 在池里但当日没行情 ⇒ 不能说"跌出榜外"，那是会让人卖票的一句话
+  assert.equal(dayRankText({ code: "600001", in_pool: true, rank: null, universe: 299 }, meta),
+    "榜内名次 · 在候选池里，但当日没有可打分的行情（停牌或日线断档）");
+  // 名次是列表之后异步补的：还没到就整行不显示（页头会写失败原因，这里不编）
+  assert.equal(dayRankText(undefined, meta), "");
+  assert.equal(dayRankText({ code: "600000", in_pool: true, rank: 3 }, null), "");
+  // 字符串名次（接口给的可能是 "7"）一样能用；缺 universe/exit_rank 就少说一截，不编
+  assert.equal(dayRankText({ code: "600000", in_pool: true, rank: "3", universe: 299 },
+    { supported: true, pool_size: 300, universe: 0, exit_rank: null }),
+    "榜内名次 · 第 3 名");
 });

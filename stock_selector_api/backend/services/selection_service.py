@@ -5,11 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timezone
 
 import httpx
 
 from config import settings
+# band 纪律的卖出线（exit_rank）只有一个出处：回测参数缺省表。持仓页要的「还在榜内吗」
+# 必须和回测用的是同一条线，否则页面上的判断和回测结论对不上。
+from core.backtest_params import DEFAULTS as BACKTEST_DEFAULTS
 from core.exceptions import BizError, NotFoundError
 from repositories import select_jobs_repo, select_results_repo
 from services import inbox_notify
@@ -18,6 +22,11 @@ logger = logging.getLogger("selection_service")
 
 # 进程内单飞表：DB 状态查询与后台任务间存在调度间隙，内存判定保证确定性
 _inflight: dict[str, str] = {}
+
+_RANK_MAX_CODES = 60
+# 第一次查名次（或刚重启过）会让引擎给整个票池打一遍分，比名单查询慢一个量级；
+# 命中当日缓存后是毫秒级。取 120 秒给冷缓存留余量，又不至于把连接占死。
+_RANK_TIMEOUT = 120
 
 
 async def list_strategies() -> list[str]:
@@ -52,6 +61,81 @@ async def list_strategy_details() -> list[dict]:
             body = resp.json()
         return list(body.get("data") or [])
     return _MOCK_STRATEGY_DETAILS
+
+
+async def day_ranks(codes: list[str]) -> dict:
+    """持仓页要的「当日榜内名次」：薄代理选股引擎的 /api/selector/rank，后端不做任何排名。
+
+    红线：名次只能来自引擎当日对**整个票池**的打分。引擎没有这条路由时（自研内核 8002 会 404，
+    它的强度分只在那一批名单里唯一，不是全票池名次）返回 supported=false + 一句原因，
+    前端显示「该引擎不提供榜内名次」。这里绝不退化成拿 select_results.rank_no 凑一个数：
+    那个 rank_no 只在本次 topk（默认 30）行内唯一，和 qlib 的 300 只全池名次不是一个口径，
+    把 7 放进两个口径里读出来的是两件不同的事。
+    """
+    if settings.selection_plugin_mode != "http":
+        return _no_rank("选股插件未启用（mock 模式），没有当日榜可查")
+    url = settings.selector_url + "/api/selector/rank"
+    async with httpx.AsyncClient(timeout=_RANK_TIMEOUT) as client:
+        resp = await client.get(url, params={"codes": ",".join(codes)})
+    if resp.status_code == 404:
+        return _no_rank(f"当前选股引擎（{settings.selector_url}）不提供榜内名次")
+    if resp.status_code != 200:
+        # 引擎报错时不能说「都没上榜」：那会让持仓票看起来像集体跌出榜单，
+        # 而真实原因是查询失败。抛业务错，页面显示失败原因。
+        raise BizError(f"榜内名次查询失败：HTTP {resp.status_code}")
+    data = resp.json().get("data") or {}
+    return {
+        "supported": True,
+        "date": str(data.get("date") or ""),
+        "pool_size": int(data.get("pool_size") or 0),
+        "universe": int(data.get("universe") or 0),
+        # 卖出线：回测 band 纪律用的同一个缺省值，前端拿它判「还在榜内 / 已跌出榜外」，
+        # 不在前端写死 100
+        "exit_rank": int(BACKTEST_DEFAULTS["exit_rank"]),
+        "message": "",
+        "items": [{
+            "code": str(it.get("code") or ""),
+            "in_pool": bool(it.get("in_pool")),
+            # 给不出名次就是 None，不能填 0/999 之类的哨兵值：那是个假名次
+            "rank": _num(it.get("rank"), integer=True),
+            "universe": int(it.get("universe") or 0),
+            "score_raw": _num(it.get("score_raw")),
+            "note": str(it.get("note") or ""),
+        } for it in (data.get("items") or [])],
+    }
+
+
+def _no_rank(message: str) -> dict:
+    """引擎不提供名次时的统一形状：字段齐全、items 空、带一句原因。
+
+    形状保持一致是为了前端不用分支就能读到 message；supported 显式给 False 而不是
+    靠「items 为空」推断——空名单在 qlib 引擎下另有含义（持仓全不在池里）。
+    """
+    return {"supported": False, "date": "", "pool_size": 0, "universe": 0,
+            "exit_rank": int(BACKTEST_DEFAULTS["exit_rank"]), "message": message, "items": []}
+
+
+def split_codes(raw: str) -> list[str]:
+    """查询串 → 去重的 6 位代码表，保持给出顺序。
+
+    两处硬失败而不是宽容跳过：格式认不出来的代码（说明前端或数据脏了）和超过 60 只。
+    超限必须报错——插件那边是 `[:60]` 静默截断，截断后的持仓页少显示几只票的名次，
+    看起来像「那几只没上榜」，而那其实是根本没去查。
+    """
+    out: list[str] = []
+    for part in str(raw or "").split(","):
+        token = part.strip()
+        if not token:
+            continue
+        match = re.search(r"\d{6}", token)
+        if not match:
+            raise BizError(f"代码格式不对：{token}（要 6 位数字代码）")
+        code = match.group(0)
+        if code not in out:
+            out.append(code)
+    if len(out) > _RANK_MAX_CODES:
+        raise BizError(f"榜内名次一次最多查 {_RANK_MAX_CODES} 只，当前 {len(out)} 只")
+    return out
 
 
 async def _default_strategies() -> list[str]:
@@ -131,7 +215,17 @@ async def _http_run(strategies: list[str]) -> list[dict]:
         # 0 分位是「当日全市场最弱」这个事实，而 reject 可能是分位 83.4 被剔的。
         "adx14_pct": _num((it.get("extra") or {}).get("adx14_pct")),
         "adx14_gate": str((it.get("extra") or {}).get("adx14_gate") or "")[:8],
+        # 引擎自己声明「这一项我不算」的字段清单。不能由「那列是空」反推：空值有两种成因
+        # （引擎压根不算 / 引擎算了但这只判不出），前端要区分的就是前者。
+        "na_fields": _na_fields((it.get("extra") or {}).get("na_fields")),
     } for it in items if it.get("code")]
+
+
+def _na_fields(value) -> str:
+    """插件给的名单收敛成逗号串；给不出清单就返回空串（= 没声明，不等于「声明了零项」）。"""
+    if not isinstance(value, (list, tuple)):
+        return ""
+    return ",".join(str(v).strip() for v in value if str(v).strip())[:128]
 
 
 def _sp(it: dict) -> dict:

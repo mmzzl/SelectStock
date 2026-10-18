@@ -167,3 +167,22 @@ test("App 上传诊断串：probe 随 multipart 上去；base64 通道走 JSON",
   assert.deepEqual(a.calls[2].data, { file_b64: "JVBERg==", filename: "电子对账单.pdf",
                                       password: "138016", probe: "通道=base64" });
 });
+
+test("timeout 可按接口放宽，缺省仍是 20 秒", async () => {
+  const a = fakeAdapter();
+  const c = createClient({ adapter: a, getToken: () => "T1" });
+  await c.get("/api/v1/holdings");
+  assert.equal(a.calls[0].timeout, 20000);
+  await c.get("/api/v1/selection/rank", { query: { codes: "600000" }, timeout: 60000 });
+  assert.equal(a.calls[1].timeout, 60000);
+  assert.match(a.calls[1].url, /\/api\/v1\/selection\/rank\?codes=600000/);
+});
+
+test("榜内名次查询：走 rank 路由、60 秒超时（冷缓存实测 34.5 秒，默认 20 秒每天第一次必失败）", async () => {
+  const { selectionApi } = await import("../src/api/selection.js");
+  const seen = [];
+  const fake = { get: (p, o) => { seen.push([p, o]); return Promise.resolve({ supported: true, items: [] }); } };
+  const out = await selectionApi(fake).rank({ codes: "600000,510300" });
+  assert.deepEqual(seen, [["/api/v1/selection/rank", { query: { codes: "600000,510300" }, timeout: 60000 }]]);
+  assert.equal(out.supported, true);
+});

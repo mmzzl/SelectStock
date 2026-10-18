@@ -75,8 +75,9 @@ async def test_strategies_mock():
 
 
 class _StubResponse:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code=200):
         self._payload = payload
+        self.status_code = status_code
 
     def raise_for_status(self):
         pass
@@ -173,6 +174,36 @@ async def test_http_run_maps_gate_absent_as_unlabeled(monkeypatch):
     assert row["risk_verdict"] == "allow"          # 别的字段照常映射
 
 
+async def test_http_run_keeps_engine_na_declaration(monkeypatch):
+    """引擎显式声明「这一项我不算」的清单必须原样落库。
+
+    那些数值列本身空着分不出两种成因（引擎压根不算 / 算了但这只判不出），
+    而 App 显示的是「—」还是「不适用」完全靠这份清单——把它丢了，qlib 名单上的
+    「预期 10 日超额」空白就会被读成「预测跑平大盘」，等于把没测说成没事。
+    """
+    class _QlibClient(_StubClient):
+        async def post(self, url, json=None):
+            return _StubResponse({"code": 0, "data": [{
+                "code": "600000", "signal": "预期5日收益排名", "strategy": "qlib_alpha158",
+                "extra": {"na_fields": ["risk_ex10_pp", "buy_ref_price",
+                                        "buy_invalid_price", "posterior_verdict"]}}]})
+
+    monkeypatch.setattr(selection_service.httpx, "AsyncClient", _QlibClient)
+    row = (await selection_service._http_run([]))[0]
+    assert row["na_fields"] == "risk_ex10_pp,buy_ref_price,buy_invalid_price,posterior_verdict"
+    assert row["risk_ex10_pp"] is None and row["buy_ref_price"] is None
+
+    # 清单不是列表（老插件给字符串/None）→ 必须是空串：
+    # 「没声明」和「声明了全部不适用」在页面上是两种完全不同的话。
+    class _BadClient(_StubClient):
+        async def post(self, url, json=None):
+            return _StubResponse({"code": 0, "data": [{
+                "code": "600001", "extra": {"na_fields": "risk_ex10_pp"}}]})
+
+    monkeypatch.setattr(selection_service.httpx, "AsyncClient", _BadClient)
+    assert (await selection_service._http_run([]))[0]["na_fields"] == ""
+
+
 async def test_http_run_tolerates_missing_enriched_fields(monkeypatch):
     """老插件/别的实现不给富化字段时，落库必须是 None 而不是把整个任务打挂。"""
     class _BareClient(_StubClient):
@@ -190,6 +221,7 @@ async def test_http_run_tolerates_missing_enriched_fields(monkeypatch):
     assert row["risk_shares"] is None and row["risk_amount"] is None
     assert row["risk_fill_price"] is None and row["risk_slippage_bp"] is None
     assert row["strategy"] == "" and row["asof"] == ""
+    assert row["na_fields"] == ""                   # 没声明 ≠ 声明了不适用
 
 
 async def test_mock_run_failure_notifies(monkeypatch):
@@ -282,3 +314,100 @@ def test_age_minutes_treats_naive_timestamps_as_utc():
     job = {"created_at": naive.isoformat(), "updated_at": naive.isoformat()}
     assert -1 <= selection_service._age_minutes(job) <= 1
     assert selection_service._age_minutes({}) == float("inf")
+
+
+# ── 持仓的「当日榜内名次」：薄代理，后端不排名、不补名次 ──────────────────────────
+
+class _RankClient:
+    """替掉 httpx.AsyncClient 的 GET。记录请求参数，好验「代码原样传给引擎」这条。"""
+
+    seen: dict = {}
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, url, params=None):
+        type(self).seen = {"url": url, "params": params}
+        return _StubResponse({"code": 0, "data": {
+            "date": "2026-10-19", "pool_size": 300, "universe": 299, "items": [
+                {"code": "600000", "in_pool": True, "rank": "7", "universe": 299,
+                 "score_raw": 0.0312},
+                # 池外的持仓：引擎给的就是 rank=null + 一句原因，代理不许给它编一个数
+                {"code": "510300", "in_pool": False, "rank": None, "universe": 299,
+                 "note": "不在当前 300 只候选池里，模型没给这只打过分"},
+            ]}})
+
+
+async def test_day_ranks_passes_through_without_inventing(monkeypatch):
+    monkeypatch.setattr(selection_service.settings, "selection_plugin_mode", "http")
+    monkeypatch.setattr(selection_service.httpx, "AsyncClient", _RankClient)
+    out = await selection_service.day_ranks(["600000", "510300"])
+    assert _RankClient.seen["params"] == {"codes": "600000,510300"}
+    assert _RankClient.seen["url"].endswith("/api/selector/rank")
+    assert (out["supported"], out["date"], out["pool_size"], out["universe"]) == (
+        True, "2026-10-19", 300, 299)
+    # 卖出线和回测 band 用的是同一个缺省值：页面说的"跌出榜外"必须和回测的卖点是同一条线
+    assert out["exit_rank"] == selection_service.BACKTEST_DEFAULTS["exit_rank"]
+    by_code = {it["code"]: it for it in out["items"]}
+    assert by_code["600000"]["rank"] == 7            # 字符串名次收敛成整数
+    assert by_code["510300"]["rank"] is None         # 池外必须是 None，不是 0/301/999
+    assert by_code["510300"]["in_pool"] is False
+    assert "候选池" in by_code["510300"]["note"]
+
+
+async def test_day_ranks_404_is_explicitly_unsupported(monkeypatch):
+    """自研内核（8002）没有这条路由：必须说「这个引擎不提供名次」，不能退化成空名单。
+
+    空名单在前端和「持仓全都没上榜」长得一样，那会把"没这个功能"说成"你的票全跌出去了"，
+    而后者是会让人卖票的结论。
+    """
+    class _Missing(_RankClient):
+        async def get(self, url, params=None):
+            return _StubResponse({"detail": "Not Found"}, status_code=404)
+
+    monkeypatch.setattr(selection_service.settings, "selection_plugin_mode", "http")
+    monkeypatch.setattr(selection_service.httpx, "AsyncClient", _Missing)
+    out = await selection_service.day_ranks(["600000"])
+    assert out["supported"] is False and out["items"] == []
+    assert "不提供榜内名次" in out["message"]
+
+
+async def test_day_ranks_error_raises_instead_of_empty_board(monkeypatch):
+    """引擎 5xx 时报业务错，让页面显示查询失败——返回空 items 会被读成「都没上榜」。"""
+    class _Broken(_RankClient):
+        async def get(self, url, params=None):
+            return _StubResponse({"detail": "qlib 名次查询失败"}, status_code=502)
+
+    monkeypatch.setattr(selection_service.settings, "selection_plugin_mode", "http")
+    monkeypatch.setattr(selection_service.httpx, "AsyncClient", _Broken)
+    with pytest.raises(BizError):
+        await selection_service.day_ranks(["600000"])
+
+
+async def test_day_ranks_without_plugin_is_unsupported(monkeypatch):
+    """mock 模式没有真引擎，名次这一项就是没有——supported=False 而不是造两行假名次。"""
+    monkeypatch.setattr(selection_service.settings, "selection_plugin_mode", "mock")
+    out = await selection_service.day_ranks(["600000"])
+    assert out["supported"] is False and out["items"] == []
+    assert out["exit_rank"] == selection_service.BACKTEST_DEFAULTS["exit_rank"]
+
+
+def test_split_codes_rules():
+    """代码串的口径：认市场前缀、去重保序、认不出就报错、超 60 只报错。
+
+    超限必须是错误而不是截断：插件那侧是 [:60] 静默截断，截断后的持仓页少显示几只票的
+    名次，看起来像「那几只没上榜」，而实际是根本没去查。
+    """
+    assert selection_service.split_codes("600000, SH510300 ,600000,") == ["600000", "510300"]
+    assert selection_service.split_codes("600519.SH") == ["600519"]
+    assert selection_service.split_codes("") == []
+    with pytest.raises(BizError):
+        selection_service.split_codes("600000,平安银行")
+    with pytest.raises(BizError):
+        selection_service.split_codes(",".join(f"60{i:04d}" for i in range(61)))

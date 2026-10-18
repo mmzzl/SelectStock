@@ -155,12 +155,16 @@ def score_frame(art: artifacts.Artifacts, beg: str | None = None,
     return pred.reorder_levels(["datetime", "instrument"]).sort_index()
 
 
-def latest_scores(topk: int = DEFAULT_TOPK, refresh: bool = False) -> list[dict]:
-    """最近一个交易日的选股名单（含价格、分位分、原始分）。同一天内命中缓存。"""
+def day_ranking(refresh: bool = False) -> list[dict]:
+    """最近一个交易日**整个票池**的分数与名次（不含价格）。同一天内命中缓存。
+
+    名次是分数降序的位次，所以「今日名单」= 前 topk 条、「某只票排第几」= 在这张表里查一行，
+    两者共用同一次打分。以前缓存键里带着 topk，名单和查名次会各算一遍全池因子。
+    """
     art = artifacts.load()
     init_qlib()
     date = calendar()[-1]
-    key = (art.run_id, date, topk)
+    key = (art.run_id, date)
     with _cache_lock:
         if not refresh and _cache.get("key") == key:
             return list(_cache["rows"])
@@ -170,29 +174,62 @@ def latest_scores(topk: int = DEFAULT_TOPK, refresh: bool = False) -> list[dict]
     if not (pred.index.get_level_values("datetime") == day).any():
         raise RuntimeError(f"{date} 票池里没有可打分的股票（日线断档或票池过期）")
     tail = pred.xs(day, level="datetime").sort_values(ascending=False)
-    top = tail.head(topk)
-    closes = _closes(list(top.index), date)
-    rows = []
-    # score 是给页面排序用的 0~1 分位，用「整只票池里的位置」而不是「名单内的名次」，
-    # 否则 topk 一改分位数就变，前后两批结果没法比
     total = len(tail)
-    for position, (inst, raw) in enumerate(top.items()):
-        rows.append({
-            "code": str(inst)[2:],
-            "qlib_symbol": str(inst),
-            "date": date,
-            "score_raw": float(raw),
-            "score": float((total - position) / total),
-            "rank": position + 1,
-            "price": closes.get(str(inst)),
-            "universe": len(tail),
-        })
+    rows = [{
+        "code": str(inst)[2:],
+        "qlib_symbol": str(inst),
+        "date": date,
+        "score_raw": float(raw),
+        # score 是给页面排序用的 0~1 分位，用「整只票池里的位置」而不是「名单内的名次」，
+        # 否则 topk 一改分位数就变，前后两批结果没法比
+        "score": float((total - position) / total),
+        "rank": position + 1,
+        "universe": total,
+    } for position, (inst, raw) in enumerate(tail.items())]
     with _cache_lock:
         _cache["key"] = key
         _cache["rows"] = rows
-    logger.info("qlib 打分 %s：%d/%d 只，耗时 %.1f 秒", date, len(rows), len(tail),
-                time.time() - started)
+    logger.info("qlib 打分 %s：%d 只，耗时 %.1f 秒", date, total, time.time() - started)
     return rows
+
+
+def latest_scores(topk: int = DEFAULT_TOPK, refresh: bool = False) -> list[dict]:
+    """最近一个交易日的选股名单（前 topk 只，补上基准日收盘价）。"""
+    rows = [dict(row) for row in day_ranking(refresh)[:topk]]
+    if rows:
+        closes = _closes([row["qlib_symbol"] for row in rows], rows[0]["date"])
+        for row in rows:
+            row["price"] = closes.get(row["qlib_symbol"])
+    return rows
+
+
+def ranks_by_code(codes: list[str]) -> dict:
+    """按 6 位代码查「当日榜内名次」，给持仓页用。
+
+    红线：票池外的代码**不编名次**。持仓里没进候选池的票（基金、ST、上市太新、成交额太薄）
+    模型从来没给它们打过分，硬排一个"第 301 名"就是把猜测说成结论。
+    在池里但当日没有可打分行情（停牌/日线断档）也照样不给名次，只说原因。
+    """
+    art = artifacts.load()
+    rows = day_ranking()
+    by_code = {row["code"]: row for row in rows}
+    pool_codes = {str(symbol)[2:] for symbol in art.pool}
+    universe = rows[0]["universe"] if rows else 0
+    pool_size = len(art.pool)
+    items = []
+    for code in codes:
+        hit = by_code.get(code)
+        if hit is not None:
+            items.append({"code": code, "in_pool": True, "rank": hit["rank"],
+                          "universe": universe, "score_raw": round(hit["score_raw"], 6)})
+        elif code in pool_codes:
+            items.append({"code": code, "in_pool": True, "rank": None, "universe": universe,
+                          "note": f"在 {pool_size} 只候选池里，但当日没有可打分的行情（停牌或日线断档）"})
+        else:
+            items.append({"code": code, "in_pool": False, "rank": None, "universe": universe,
+                          "note": f"不在当前 {pool_size} 只候选池里，模型没给这只打过分"})
+    return {"date": rows[0]["date"] if rows else calendar()[-1], "pool_size": pool_size,
+            "universe": universe, "items": items}
 
 
 def _closes(symbols: list[str], date: str) -> dict[str, float]:

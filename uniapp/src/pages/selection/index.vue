@@ -3,7 +3,7 @@
 import { computed, ref } from "vue";
 import { onShow, onUnload } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
-import { toSelectionResultRow, toStrategyOption, riskText, riskClass, sortByRiskDesc, buyLevelText, orderPlanText, riskAdjustText, posteriorText, gateText } from "../../logic/view.js";
+import { toSelectionResultRow, toStrategyOption, riskText, riskClass, isNa, sortByRiskDesc, buyLevelText, orderPlanText, riskAdjustText, posteriorText, gateText } from "../../logic/view.js";
 
 const { selection } = useClient();
 const strategies = ref([]);        // [{ name, label, desc }]
@@ -92,7 +92,10 @@ const fixed3 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) 
         按「预期 10 日超额」从高到低排列；框内数字是策略规则名次，不代表优先级。
         该超额为买入风险模型的预测值：经验证的是「低于阈值的剔除」，高分不等于必涨；
         显示「—」的表示模型没能判分（多为场内基金），排在最后。
-        「买入参考/跌破失效」是策略判据里的日均线位（收盘口径），只用来对照盘面，不是实时挂单价。
+        显示「不适用」的表示**当前选股引擎根本不算这项**（qlib 只出横截面排序分），
+        它和「—」（算了但没判出来）是两回事，更不能读成「预测为零/没有风险」。
+        「买入参考/跌破失效」是策略判据里的日均线位（收盘口径），只用来对照盘面，不是实时挂单价；
+        引擎不出价位时那一句直接写「不适用」。
         「建议股数/预估成交/预估滑点」是风控层给的下单口径：涨停买不进、盘子太薄、超过单票上限的信号
         已经在风控这一步被剔除，不会出现在列表里；橙色一句表示风控改过建议下单量。
         灰色一句「依据」说的是**这条判据本身**历史上值多少钱（T+10 相对当日全样本的超额，
@@ -107,7 +110,7 @@ const fixed3 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) 
         <view class="kv3">
           <view class="k"><text class="n">{{ fixed2(r.price) }}</text><text class="l">基准价</text></view>
           <view class="k"><text class="n">{{ fixed3(r.score) }}</text><text class="l">信号强度</text></view>
-          <view class="k"><text class="n date" :class="riskClass(r.risk)">{{ riskText(r.risk) }}</text><text class="l">预期10日超额</text></view>
+          <view class="k"><text class="n date" :class="riskClass(r.risk, isNa(r, 'risk_ex10_pp'))">{{ riskText(r.risk, isNa(r, 'risk_ex10_pp')) }}</text><text class="l">预期10日超额</text></view>
           <view class="k"><text class="n date">{{ r.asof || "—" }}</text><text class="l">基准交易日</text></view>
         </view>
         <text v-if="buyLevelText(r)" class="levels">{{ buyLevelText(r) }}</text>

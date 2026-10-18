@@ -58,3 +58,8 @@ class SelectResult(Base, IdMixin, TimestampMixin):
     # 闸门没开或分位取不到时两列都是空——shadow 模式本来就不拦，落空是正常状态。
     adx14_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
     adx14_gate: Mapped[str] = mapped_column(String(8), default="")
+    # 引擎显式声明「这一项我算不出来」的字段名（逗号分隔，来自插件 extra.na_fields）。
+    # 空串 = 引擎没做这个声明（自研内核走的就是这条：它那些列本来就有值）。
+    # 为什么要有这一列：上面那些数值列的空值分不出「引擎根本不算」和「算了但这只判不出」，
+    # 而 App 把空白渲染成「—」，用户会读成「没有风险」——这两件事在 qlib 引擎下必须分开说。
+    na_fields: Mapped[str] = mapped_column(String(128), default="")

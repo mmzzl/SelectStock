@@ -154,6 +154,38 @@ export function gameText(r) {
   return parts.length ? `博弈参考 · ${parts.join(" · ")}` : "";
 }
 
+/** 持仓总览页的「当日榜内名次」一行话。
+ *
+ *  名次来自选股引擎对**当天整个票池**的打分，和选股名单里的 rank_no 不是一个口径：
+ *  后者只在那一批返回的 topk 行里唯一（默认 30 行），前者是 300 只池子里的位次。
+ *  诊断明细页不接这一行：那是历史某一次的诊断，和"当日"名次放一起会把两个日期混成一句。
+ *
+ *  页头另有一句口径说明，负责两种整批情况：引擎不提供名次（自研内核没有全池榜）、查询失败。
+ *  这里只管一只票三种情况，而且**都不补猜测名次**（写不出「99+」「约 301 名」这种东西）：
+ *  1. 不在候选池（基金、ST、上市太新、成交额太薄）：模型从没给这只打过分，不是它排在池子后面；
+ *  2. 在池里但当日没有可打分的行情（停牌/日线断档）：**最容易被读成「跌出榜外该卖了」**，
+ *     所以要把"没行情"说明白；
+ *  3. entry 还没到（名次是列表之后异步补的）：返回空串，这一行先不显示。
+ */
+export function dayRankText(entry, meta) {
+  if (!entry || !meta) return "";
+  const pool = num(meta.pool_size);
+  if (entry.in_pool === false) {
+    return `榜内名次 · 不在当前${pool ? ` ${pool} 只` : ""}候选池里，模型没给这只打过分`;
+  }
+  const rank = num(entry.rank);
+  if (rank === null) {
+    return "榜内名次 · 在候选池里，但当日没有可打分的行情（停牌或日线断档）";
+  }
+  const total = num(meta.universe);
+  const parts = [`第 ${rank} 名${total ? ` / 共 ${total} 只` : ""}`];
+  const exit = num(meta.exit_rank);
+  // 卖出线来自回测的 band 纪律（同一个缺省值），所以页面能说"要不要按这条线卖"，
+  // 但这是参照不是结论：线本身还没经过样本外确认
+  if (exit !== null) parts.push(rank <= exit ? `还在卖出线（前 ${exit} 名）内` : `已跌出卖出线（前 ${exit} 名）`);
+  return `榜内名次 · ${parts.join(" · ")}`;
+}
+
 export function toPnlRow(s) {
   return {
     code: s.code, name: s.name || s.code,
@@ -219,14 +251,28 @@ export function toSelectionResultRow(s) {
     posteriorVerdict: s.posterior_verdict || "",
     posteriorExcess: num(s.posterior_excess_pp), posteriorN: num(s.posterior_n),
     adx14Pct: num(s.adx14_pct), adx14Gate: s.adx14_gate || "",
+    // 引擎显式声明「这一项我不算」的字段名清单（qlib 插件给，自研内核给空）。
+    // 空值本身分不出「不算」和「算了但判不出」，而这两件事在页面上必须分开说。
+    naFields: String(s.na_fields || "").split(",").map((x) => x.trim()).filter(Boolean),
   };
 }
 
-/** 依据一行话（与诊断页 `可信度 · …` 同一措辞风格）。后验表还没建时必须显式说「未标定」，
- *  不能整行消失——用户看到"没有这一行"会理解成"没问题"，而实际是"还没测"。 */
+/** 这一行的这个指标是不是「引擎压根不算」。 */
+export function isNa(r, field) {
+  return Array.isArray(r?.naFields) && r.naFields.includes(field);
+}
+
+/** 依据一行话（与诊断页 `可信度 · …` 同一措辞风格）。缺 verdict 时不能整行消失——
+ *  用户看到"没有这一行"会理解成"没问题"，而实际是"还没测"。
+ *  「还没测」又分两种：判据后验表没建（自研内核），和这个引擎根本没有判据（qlib 只出排序分），
+ *  后者若沿用前者的措辞等于给了一句话不成立的解释。 */
 export function posteriorText(r) {
   const verdict = (r?.posteriorVerdict || "").trim();
-  if (!verdict) return "依据 · 未标定（判据后验表还没建）";
+  if (!verdict) {
+    return isNa(r, "posterior_verdict")
+      ? "依据 · 不适用（该引擎只出排序分，没有判据后验）"
+      : "依据 · 未标定（判据后验表还没建）";
+  }
   const parts = [`依据 · ${verdict}`];
   const excess = num(r?.posteriorExcess);
   if (excess !== null) parts.push(`10日超额 ${excess > 0 ? "+" : ""}${excess.toFixed(2)}pp`);
@@ -269,27 +315,32 @@ export function riskAdjustText(r) {
   return r?.riskVerdict === "adjust" ? (r.riskReason || "") : "";
 }
 
-/** 买点文案：两个位都来自策略自己的判据，缺哪个就不说哪个；都没有就整行不显示。 */
+/** 买点文案：两个位都来自策略自己的判据，缺哪个就不说哪个；都没有就整行不显示。
+ *  例外是引擎显式声明不算买点（qlib 没有均线/箱沿这类判据）——那时必须显示一句不适用，
+ *  因为「没有失效位」看起来像"这笔买入不会错"，而实际是"没人给你算过"。 */
 export function buyLevelText(r) {
   const ref = num(r?.buyRef);
   const stop = num(r?.buyInvalid);
   const parts = [];
   if (ref !== null) parts.push(`买入参考 ${ref.toFixed(2)}`);
   if (stop !== null) parts.push(`跌破 ${stop.toFixed(2)} 失效`);
+  if (!parts.length && isNa(r, "buy_ref_price")) return "买点参考位/失效位 · 不适用（该引擎不出价位）";
   return parts.join(" · ");
 }
 
 /** 买入风险分的展示文本（百分点，带符号）。没值给占位符——0 是"预测跑平当日全市场"，
- *  和"闸门没判出来"是两回事，不能拿 0 当缺省。 */
-export function riskText(v) {
-  if (v === null || v === undefined || Number.isNaN(Number(v))) return "—";
+ *  和"闸门没判出来"是两回事，不能拿 0 当缺省。
+ *  na=true 是引擎声明「这个数我不算」，得写成「不适用」而不是「—」：
+ *  前者说"这里没有预测"，后者看着像"预测约等于零"。 */
+export function riskText(v, na = false) {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return na ? "不适用" : "—";
   const n = Number(v);
   return `${n > 0 ? "+" : ""}${n.toFixed(2)}pp`;
 }
 
-/** 红涨绿跌（A 股习惯）：预测超额为正给 .up，为负给 .down，缺值不给颜色。 */
-export function riskClass(v) {
-  if (v === null || v === undefined || Number.isNaN(Number(v))) return "";
+/** 红涨绿跌（A 股习惯）：预测超额为正给 .up，为负给 .down，缺值/不适用不给颜色。 */
+export function riskClass(v, na = false) {
+  if (na || v === null || v === undefined || Number.isNaN(Number(v))) return "";
   return Number(v) >= 0 ? "up" : "down";
 }
 

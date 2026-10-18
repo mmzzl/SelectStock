@@ -70,7 +70,7 @@ function handle({ statusCode, data }, { onUnauthorized }) {
 export function createClient({ adapter, getToken, onUnauthorized, baseUrl = "" } = {}) {
   const ad = adapter || defaultAdapter();
   return {
-    async request(method, path, { query, body, header, silentUnauthorized } = {}) {
+    async request(method, path, { query, body, header, silentUnauthorized, timeout } = {}) {
       const qs = query ? toQuery(query) : "";
       const token = getToken ? getToken() : "";
       // 登录接口自己的 401 是「用户名或密码错误」，不是「会话失效」。走全局处理会
@@ -81,7 +81,9 @@ export function createClient({ adapter, getToken, onUnauthorized, baseUrl = "" }
         url: `${baseUrl}${path}${qs}`,
         method,
         data: body,
-        timeout: GET_TIMEOUT_MS,
+        // 默认 20 秒够用；调用方可以按接口放宽（见 api/selection.js 的 rank：
+        // 引擎冷缓存时那一次要给整个票池打分，实测 34.5 秒）
+        timeout: timeout || GET_TIMEOUT_MS,
         header: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...header },
       };
       // 公网隧道（Cloudflare 边缘 + 移动网络）首包能到 1.5s 以上，偶发一次失败就让页面

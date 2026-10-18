@@ -4,12 +4,14 @@ import { ref, computed } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
 import { convictionHead, convictionLevelClass, convictionLevelText, convictionNote,
-         gameText, hasConviction, priceStampText, sellTriggerText, takeProfitText,
+         dayRankText, gameText, hasConviction, priceStampText, sellTriggerText, takeProfitText,
          toHoldingRow, toPnlView } from "../../logic/view.js";
 
 const rows = ref([]); const loading = ref(false); const err = ref("");
 const summary = ref(null);           // 来自 /holdings/pnl 的 summary，前端不做加总
-const { holdings } = useClient();
+const rankMeta = ref(null);          // /selection/rank 的整表元信息（date/pool/universe/卖出线）
+const rankErr = ref("");             // 名次查询失败的原因，和持仓列表的失败分开说
+const { holdings, selection } = useClient();
 const today = () => new Date().toISOString().slice(0, 10);
 
 onShow(async () => {
@@ -20,7 +22,37 @@ onShow(async () => {
     // 汇总条与列表分开取：插件不可用时只降级掉汇总，不影响持仓列表
     try { summary.value = toPnlView(await holdings.pnl({ natural_day: today() })); } catch { summary.value = null; }
   } catch (e) { err.value = e.message; } finally { loading.value = false; }
+  // 名次不挂在 loading 上：引擎冷缓存时这一次要给整个票池打分（300 只 × 130 天因子），
+  // 比持仓列表慢一个量级。先让列表出来，名次到了再填，取不到就只说名次失败。
+  loadRanks();
 });
+
+async function loadRanks() {
+  const codes = rows.value.map((r) => r.code).filter(Boolean);
+  if (!codes.length) { rankMeta.value = null; rankErr.value = ""; return; }
+  if (codes.length > 60) {
+    // 接口一次最多 60 只（超过会报错）。这里不悄悄丢掉多出来的持仓：
+    // 少查几只票的名次，看起来像「那几只没上榜」，而实际是根本没去查。
+    rankMeta.value = null; rankErr.value = `榜内名次一次最多查 60 只，当前持仓 ${codes.length} 只`;
+    return;
+  }
+  rankErr.value = "";
+  try {
+    rankMeta.value = await selection.rank({ codes: codes.join(",") });
+  } catch (e) { rankMeta.value = null; rankErr.value = e.message || "网络请求失败"; }
+}
+
+const ranksByCode = computed(() => new Map((rankMeta.value?.items || []).map((it) => [it.code, it])));
+// 引擎根本不提供名次时（自研内核），这句话在页头说一次就够，不必每行重复
+const rankSupported = computed(() => Boolean(rankMeta.value?.supported));
+const rankHead = computed(() => {
+  const m = rankMeta.value;
+  if (!m) return rankErr.value ? `榜内名次没取到：${rankErr.value}` : "";
+  if (!m.supported) return `榜内名次 · ${m.message || "当前选股引擎不提供榜内名次"}`;
+  return `榜内名次是 ${m.date} 收盘后引擎对 ${m.pool_size} 只候选池的排序`
+    + `（当日打得分出 ${m.universe} 只）· 卖出线取回测同一条：前 ${m.exit_rank} 名`;
+});
+const rankLine = (code) => (rankSupported.value ? dayRankText(ranksByCode.value.get(code), rankMeta.value) : "");
 
 const GROUPS = [
   { key: "sell", label: "建议卖出" },
@@ -54,6 +86,8 @@ const goTrades = () => uni.navigateTo({ url: "/pages/trades/index" });
         <view>
           <view class="bt">持仓总览</view>
           <view class="bs">共 {{ rows.length }} 只 · 建议与现价由诊断插件返回</view>
+          <!-- 名次的口径必须写在旁边：没有这句，「第 7 名」会被读成选股名单里的那个 rank -->
+          <view v-if="rankHead" class="bs">{{ rankHead }}</view>
         </view>
         <button class="band-btn" @click="goImport">导入交割单</button>
       </view>
@@ -96,6 +130,8 @@ const goTrades = () => uni.navigateTo({ url: "/pages/trades/index" });
             <text class="d">现价 {{ r.latestPrice ?? "—" }}{{ stamp(r) }} · 成本 {{ r.cost ?? "—" }} · {{ r.shares ?? "—" }} 股</text>
             <text class="n">{{ r.name }}（{{ r.code }}）</text>
             <text v-if="r.actionReason" class="sub">{{ r.actionReason }}</text>
+            <!-- 当日榜内名次（引擎给整个票池排序）：名次取不到时这一行给的是原因，不是猜的名次 -->
+            <text v-if="rankLine(r.code)" class="sub">{{ rankLine(r.code) }}</text>
             <text v-if="r.agg && r.agg.realizedPnl" class="sub acc">已实现 {{ signed(r.agg.realizedPnl) }} · 含已实现合计 {{ signed(r.agg.totalPnl) }}</text>
             <view v-if="hasConviction(r)" class="conv">
               <view class="conv-top">

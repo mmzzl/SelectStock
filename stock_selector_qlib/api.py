@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -37,6 +37,10 @@ class RunRequest(BaseModel):
     topk: int | None = Field(default=None, ge=1, le=200, description="取前 N 只，缺省读 QLIB_TOPK")
 
 
+# qlib 只出横截面排序分：风险剔除层、判据买点、判据后验都在自研内核里，这里没有对应计算。
+# 必须显式声明而不是留 null：null 到 App 上是「—」或整行消失，使用者会把空白读成「没有风险」。
+_NA_FIELDS = ("risk_ex10_pp", "buy_ref_price", "buy_invalid_price", "posterior_verdict")
+
 _STRATEGY_DETAIL = {
     "name": STRATEGY,
     "description": "qlib Alpha158 因子 + LightGBM：预测未来 5 日横截面收益，按分数排名出名单",
@@ -45,6 +49,8 @@ _STRATEGY_DETAIL = {
     "required_columns": ["date", "open", "high", "low", "close", "volume"],
     "required_rows": serving.WARMUP_DAYS,
     "params": {"universe": 300, "warmup_days": serving.WARMUP_DAYS, "label": "Ref($close,-5)/Ref($close,-1)-1"},
+    # 本引擎不产这几项，逐条随名单一起声明（口径见 _NA_FIELDS）
+    "na_fields": list(_NA_FIELDS),
 }
 
 
@@ -96,9 +102,27 @@ def selector_run(req: RunRequest):
                 "model_id": art.run_id,
                 "universe": row["universe"],
                 "feature_count": art.meta.get("feature_count"),
+                "na_fields": list(_NA_FIELDS),
             },
         ).to_dict())
     return {"code": 0, "data": out}
+
+
+@app.get("/api/selector/rank")
+def selector_rank(codes: str = Query(default="", description="逗号分隔的 6 位代码，最多 60 只")):
+    """持仓页要的「当日榜内名次」：名次来自当日全票池打分，池外的票不给名次。
+
+    这条路由不在 8002 的三条契约里，是 qlib 独有的读接口（自研内核没有"榜"这个概念）。
+    池外持仓返回 `in_pool=false` + 一句原因，绝不返回一个补出来的名次。
+    """
+    picked = [c.strip() for c in codes.split(",") if c.strip()][:60]
+    if not picked:
+        return {"code": 0, "data": {"date": "", "pool_size": 0, "universe": 0, "items": []}}
+    try:
+        return {"code": 0, "data": serving.ranks_by_code(picked)}
+    except Exception as exc:  # noqa: BLE001 - 查不到名次必须报错，不能返回「都没上榜」
+        logger.exception("qlib 名次查询失败")
+        raise HTTPException(status_code=502, detail=f"qlib 名次查询失败：{exc}") from exc
 
 
 @app.post("/api/admin/refresh")

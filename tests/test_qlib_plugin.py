@@ -123,6 +123,11 @@ def test_api_contract_matches_backend_consumption(art_dir, monkeypatch):
     assert item["code"] == "600000" and item["name"] == "浦发银行"
     assert item["asof"] == "2026-10-16" and item["rank"] == 1
     assert item["extra"]["score_raw"] == 1.234
+    # 本引擎算不出来的指标必须**逐条显式声明**（detail 里一份、每行一份）：
+    # 留 null 到 App 上是「—」或整行消失，使用者会读成「没有风险」「不用设止损」。
+    assert detail["na_fields"] == list(api._NA_FIELDS)
+    assert item["extra"]["na_fields"] == list(api._NA_FIELDS)
+    assert "risk_ex10_pp" in item["extra"]["na_fields"]
 
     # 别的策略名不该出 qlib 的票
     assert client.post("/api/selector/run", json={"strategies": ["trend_rebound"]}).json()["data"] == []
@@ -215,3 +220,59 @@ def test_band_plan_is_deterministic_on_ties():
     for _ in range(3):
         assert band_plan(scores, [], topk=2, entry_rank=3, exit_rank=3) == first
     assert first == ([], ["X", "Y"])
+
+
+# ── 当日榜内名次查询（持仓页用）：池外的票绝不给名次 ────────────────────────────
+
+def _ranking_rows():
+    """票池 2 只（art_dir 的 SH600000/SZ000001），当日只有 1 只打得分出分。"""
+    return [{"code": "600000", "qlib_symbol": "SH600000", "date": "2026-10-16",
+             "score_raw": 1.234, "score": 1.0, "rank": 1, "universe": 1}]
+
+
+def test_ranks_by_code_never_invents_a_rank(art_dir, monkeypatch):
+    """名次只能来自当天真的打过分的那批票。
+
+    池外的持仓（基金、ST、上市太新、成交额太薄）模型从来没给它们算过，
+    硬排一个「第 301 名」就是把猜测说成结论；在池里但当日没行情（停牌/断档）也一样，
+    而且这一种最容易被读成「跌出榜外该卖了」，所以要把原因写进 note。
+    """
+    monkeypatch.setattr(artifacts, "MODEL_DIR", art_dir)
+    monkeypatch.setattr(serving, "day_ranking", lambda refresh=False: _ranking_rows())
+    out = serving.ranks_by_code(["600000", "000001", "510300"])
+    assert (out["date"], out["pool_size"], out["universe"]) == ("2026-10-16", 2, 1)
+    by_code = {it["code"]: it for it in out["items"]}
+    assert by_code["600000"] == {"code": "600000", "in_pool": True, "rank": 1,
+                                 "universe": 1, "score_raw": 1.234}
+    # 在池里但当日没有可打分的行情 ⇒ 没名次 + 说清是"没行情"不是"排后面"
+    assert by_code["000001"]["rank"] is None and by_code["000001"]["in_pool"] is True
+    assert "没有可打分的行情" in by_code["000001"]["note"]
+    # 池外 ⇒ 没名次 + 说清模型没给这只打过分
+    assert by_code["510300"]["rank"] is None and by_code["510300"]["in_pool"] is False
+    assert "不在当前 2 只候选池里" in by_code["510300"]["note"]
+
+
+def test_rank_route_shape_and_failure_is_not_empty_board(art_dir, monkeypatch):
+    """路由形状与后端 day_ranks 取的键一致；打分挂了要报 5xx，不能回空 items。
+
+    空 items 到持仓页上就是「你持有的票一只都没上榜」，而真实原因是查询失败。
+    """
+    from fastapi.testclient import TestClient
+
+    from stock_selector_qlib import api
+
+    monkeypatch.setattr(artifacts, "MODEL_DIR", art_dir)
+    monkeypatch.setattr(serving, "day_ranking", lambda refresh=False: _ranking_rows())
+    client = TestClient(api.app)
+
+    data = client.get("/api/selector/rank?codes=600000,510300").json()
+    assert data["code"] == 0
+    assert {it["code"] for it in data["data"]["items"]} == {"600000", "510300"}
+    # 没给代码就是空查询，不去打分（持仓页会先判有没有票再调）
+    assert client.get("/api/selector/rank").json()["data"]["items"] == []
+
+    def _boom(refresh=False):
+        raise RuntimeError("面板里没有 2026-10-16")
+
+    monkeypatch.setattr(serving, "day_ranking", _boom)
+    assert client.get("/api/selector/rank?codes=600000").status_code == 502

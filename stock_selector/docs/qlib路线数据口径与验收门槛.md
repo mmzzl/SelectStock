@@ -732,3 +732,153 @@ position_cap_pct / target_amount / universe` 都按 `defaults` 预填并提交�
    `.env` 切 8003 是 12:22、对照臂起跑 13:09:57（`logs/qlib_batchI_ctl.log` 第一行）、
    实盘产物导出 13:13:22（`data/qlib/model/meta.json`）。预注册线写于 13:08，仍在两趟跑数之前，
    **结论不受影响**，但「线写在读数之前」这种话必须拿时间戳证明，所以记在这里。
+
+## 13. 批次 J：切引擎后 App 上那三行不能留空白（2026-10-18 13:49–13:57 落地）
+
+### 13.1 问题
+
+17:30 的选股切到 qlib（§11）之后，`select_results` 里 qlib 那批的
+`risk_ex10_pp` / `buy_ref_price` / `buy_invalid_price` / `posterior_verdict` 四列**全空**
+（实测今天三批 30 行×3 批，四列非空计数都是 0；而 2026-10-17 自研内核那批 234 行里分别是
+229 / 234 / 234 / 234 行有值）。这四列不是"这只票没风险"，而是 **qlib 引擎根本不产它们**：
+风险剔除层、买点参考位、判据后验都在自研内核里。
+
+App 拿到的空值显示成「—」或者整行不显示（`buyLevelText` 返回空串就没有那一行），
+而使用者会把它读成「没有风险」「不用设止损」。**把"没测"说成"没事"是这版最要命的误读**，
+所以不能只做"在页面上标一下数据日"这种退一步的处理。
+
+### 13.2 做法（方案 b：引擎显式返回不适用）
+
+| 层 | 改动 | 落点 |
+|---|---|---|
+| 8003 插件 | `_NA_FIELDS` 声明本引擎不产的四项，`/api/strategy/detail` 和每行 `extra.na_fields` 各带一份 | `stock_selector_qlib/api.py`（mtime 13:50:50） |
+| 后端 | 新增列 `select_results.na_fields`（逗号串），`_http_run` 把插件给的清单原样搬运；清单不是列表就是空串——**"没声明"不等于"声明了全部不适用"** | `db/sql/selection.py` + `db/__init__.py` 的幂等 ALTER + `services/selection_service.py`（13:49:21） |
+| App | `toSelectionResultRow` 拆出 `naFields`，`isNa()` 判定；「预期10日超额」格子显示**不适用**而不是「—」，买点那行显示「不适用（该引擎不出价位）」，「依据」那行不再谎称「判据后验表还没建」 | `uniapp/src/logic/view.js`（13:51:48）+ `pages/selection/index.vue` |
+
+`—` 与「不适用」的分工就此固定：**「—」= 算了但没判出来**（多为场内基金），
+**「不适用」= 这个引擎压根不算这项**。两者都不能落成 0（0 是"预测跑平当日全市场"，是一项评价）。
+
+### 13.3 今天顺手删掉的三批测试批次
+
+今天手动直连 8003 试跑留下三批 `source='manual'` 的 qlib 批次（12:24 / 12:53 / 13:25，各 30 行），
+它们会把"最新 done 批次"顶掉——盘中池和 App 首屏都按最新 done 取，盘中看的人会以为那就是今天的名单。
+已按批删除（`select_jobs` 3 行 + `select_results` 90 行），删前校验过：
+库里除这两张表以外没有任何 job_id 引用它们，删完「最新 done」回到 2026-10-17 的定时批次。
+备份在 `/tmp/selectstock_app.db.20261018-135704.bak`。
+
+### 13.4 周一（2026-10-19）首跑核对清单
+
+改动要重启才生效：**8003**（插件代码）和 **8010**（后端代码 + 启动时那次幂等 ALTER 补 `na_fields` 列）。
+重启窗口避开 17:30 选股与 18:20 持仓诊断。下面每条都给了判据，不要"看起来正常"。
+
+1. **16:00 增量更新**：`logs/`（scheduler 那份）里 `qlib_update_bin` 这一条 rc=0，
+   且它自己会调 8003 的 `/api/admin/refresh`；面板末日必须前进到 2026-10-19：
+   `python3 -c "import pandas as p;print(p.read_pickle('/data/work/qlib_data/cn/calendars/day.pkl')[-1])"`
+2. **17:30 选股落库**：`select_jobs` 最新一条是 `scheduled` + `["qlib_alpha158"]` + `status='done'`，
+   `result_count=30`（`QLIB_TOPK` 缺省 30）；`select_results` 这批 30 行的 `asof` **全部 = 2026-10-19**
+   ——`asof` 停在上一交易日就是 16:00 那步没成，qlib 不报错，只是继续出旧名单（§11 里最难发现的一种坏法）。
+3. **不适用标识（本批新增，重点核对）**：这批 30 行的 `na_fields` 必须**非空**，
+   内容含 `risk_ex10_pp,buy_ref_price,buy_invalid_price,posterior_verdict`；
+   同时 `risk_ex10_pp` / `buy_ref_price` 仍是 NULL——**列有 NULL 是对的，清单丢了才是错的**。
+   ```bash
+   python3 - <<'PY'
+   import sqlite3
+   c = sqlite3.connect('file:/data/work/SelectStock/stock_selector_api/data/app.db?mode=ro')
+   j = c.execute("select job_id from select_jobs where status='done' order by created_at desc limit 1").fetchone()[0]
+   print(c.execute("select count(*), sum(na_fields<>''), sum(risk_ex10_pp is not null) "
+                   "from select_results where job_id=?", (j,)).fetchone(),
+         c.execute("select max(asof) from select_results where job_id=?", (j,)).fetchone())
+   PY
+   ```
+   三个数应该是 `(30, 30, 0)`，`max(asof)` 是 2026-10-19。App 上对应：「预期10日超额」写**不适用**、
+   买点那行写「不适用（该引擎不出价位）」、「依据」那行写「不适用（该引擎只出排序分，没有判据后验）」。
+4. **8003 打分日与面板末日一致**：`curl http://172.17.0.1:8003/api/health` 的 `model.train_end`
+   不变（实盘臂 2024-12-31），名单 `asof` = 面板末日。
+5. **盘中池切到当日名单**：`selectstock-quote-service` / `intraday-engine` 换日会自己重取，
+   日志里池子数量应等于当日批次的命中数（qlib 出 30 只 + 持仓），**不是**周五那批的 234 只；
+   若还是旧数量，先查它读的那条「最新 done」是不是被别的批次顶掉了。
+6. **不动的东西**：#186 其余预处理 cron（`build_kline_features` 等）**一个都不停**——
+   盘中告警、持仓诊断、板块热力图都在读 parquet 的特征列，qlib 只替掉了"谁出名单"这一件事。
+7. **榜内名次（批次 K，本批新增）**：拿一只持仓查一次，池内要给名次、池外要明确说不在池：
+   ```bash
+   curl -s "http://172.17.0.1:8003/api/selector/rank?codes=600000,510300" | python3 -m json.tool
+   ```
+   判据：`date` = 面板末日（2026-10-19）、`pool_size=300`、`universe` 是当日真打分出来的只数
+   （10-16 实测 299，缺的那只是 601059 断档）；`600000` 那条 `in_pool=true` 且 `rank` 是 1..299 的整数；
+   `510300` 那条必须是 `in_pool=false` + `rank=null` + note 里有「不在当前 300 只候选池里」。
+   **`rank=null` 出现在池外票上是正确形状，不是 bug**；反过来如果 510300 拿到了名次，就是有人在链路里
+   编了一个假名次凑数（§14.3），当场把链路查回来。第一次查会等 30 多秒（冷打分，见 §14.2），不是卡死。
+
+## 14. 批次 K：持仓页的「当日榜内名次」（2026-10-18 14:05–14:25 落地）
+
+用户拍板的 B 类第一优先：持仓页要能看到「我手里这只票今天在候选池里排第几」，
+并且**池外的票必须明确返回「不在当前 300 只候选池」，绝对不能编一个假名次凑数**。
+
+### 14.1 链路（三层，每层只做一件事）
+
+```
+8003  GET /api/selector/rank?codes=...          ← 名次唯一出处：当日全池打分排序
+   └─ serving.ranks_by_code() → day_ranking()   ← 和 17:30 选股用的是同一份当日打分
+8010  GET /api/v1/selection/rank?codes=...      ← 薄代理：拆码、去重、超限报错、把引擎形状翻给 App
+   └─ selection_service.day_ranks()            ← 不重算、不兜底、不拿 select_results.rank_no 凑
+App   持仓总览每一行「榜内名次 · …」+ 页头口径一句
+   └─ logic/view.js::dayRankText()             ← 只翻译，不参与判断
+```
+
+`day_ranking()` 的缓存键是 `(model.run_id, 打分日)`，**topk 不在键里**：17:30 出名单和持仓页查名次
+是同一次全池打分的两个视图，不是两趟计算。这样「第 8 名」和「进了前 30」永远不会互相打脸。
+
+卖出线 `exit_rank` 从后端 `core/backtest_params.DEFAULTS["exit_rank"]`（=100）取，随接口下发给 App。
+只有一个出处：band 纪律的回测参数改了，页面上「还在卖出线内 / 已跌出卖出线」的门槛跟着改，
+不出现「回测按前 100 名卖、页面按另一个数提示」的两套口径。
+
+### 14.2 实测延迟（决定了超时怎么设）
+
+14:20 用真面板只读跑了一次（`--to-mongo` 没开，不落任何数据）：
+
+| 场景 | 实测 | 口径 |
+|---|---|---|
+| 冷缓存第一次查名次 | **34.5 秒 / 299 只** | 其中 qlib 自己 `Loading data Done 32.614s`；即给整个票池补 130 天因子 + 打分 |
+| 热缓存再查 | **0.03 秒** | 命中 `(run_id, date)` 缓存，只查表 |
+| 当日打分只数 | 299 / 300 | 缺的是 SH601059（已知的日线断档，不是 bug） |
+| 当日第 1 名 | 000938，`score_raw=0.3216` | 实盘臂 `live2024`，打分日 2026-10-16 |
+| 当日最后一名 | 000066，rank 299 | — |
+
+34.5 秒 > App 统一的 GET 超时 20 秒 ⇒ 每天第一次查名次必然超时，而超时在页面上长得很像"没名次"。
+所以给这一条请求单独放宽到 **60 秒**（`src/api/client.js` 支持按次传 `timeout`，缺省仍是 20 秒），
+后端侧 `_RANK_TIMEOUT=120` 给冷打分留余量。两个数都有测试钉住。
+
+### 14.3 「没有名次」的四种话术，一种都不许退化成假名次
+
+名次这件事，"查不到"和"没上榜"在页面上必须能分开说——把前者写成后者，使用者会以为
+自己手里那只票被模型看不上，从而做出卖出决定。四种情况：
+
+1. **池外**（比如指数 ETF `510300`）：`in_pool=false` + `rank=null` +
+   note「不在当前 300 只候选池里，模型没给这只打过分」。这是原话要求的那句。
+2. **在池但当日无行情**（停牌/日线断档，如 601059）：`rank=null` +
+   note「在 300 只候选池里，但当日没有可打分的行情（停牌或日线断档）」——
+   它是有资格上榜的，只是今天算不出来。
+3. **引擎根本不提供名次**（选指回自研内核、或插件未启用/mock）：整表 `supported=false` +
+   message，页头说一句「当前选股引擎不提供榜内名次」，每行不再重复；
+   8003 那边 404 就是这一类的成因，后端把 404 明确翻成这句话，而不是翻成空榜。
+4. **查询失败**（5xx、数据盘没挂、代理报错）：后端 `BizError` → 页头「榜内名次没取到：<原因>」。
+   **数据盘没挂时 qlib 是抛异常不是返回空表**，所以这条链路的失败形状是报错；
+   如果哪天它变成"榜是空的"，那才是有人偷偷兜了底。
+
+代码上的三个硬约束：`split_codes()` 超过 60 只直接 `BizError`（多出来的持仓绝不静默丢弃——
+静默丢会看起来像"那几只没上榜"）；`rank_no`（选股批次内的序号）**不参与**名次计算；
+`day_ranks()` 里没有任何 `or 0` / 默认名次之类的兜底。
+
+持仓明细页（`pages/diag/detail.vue`）**不接这一行**：那是历史某一次的诊断结果，和"当日"名次放一起
+会把两个日期混成一句误导的话，所以只在总览页展示。
+
+### 14.4 测试与验收
+
+- `tests/test_qlib_plugin.py`：`ranks_by_code` 的命中行逐字段相等（不许多给字段）、两种 note 分支、
+  `/api/selector/rank` 的形状、`day_ranking` 抛异常时必须是 **502**（不能返回空榜）——13 passed。
+- `stock_selector_api/backend/tests/test_selection_service.py`：透传不臆造、404→「不提供榜内名次」、
+  5xx→BizError、mock 模式→不支持、`split_codes` 规则——全量 325 passed。
+- `uniapp/tests/`：`dayRankText` 五种输入（线内/线外/池外/池内无行情/无数据）+ 60 秒超时与路由——83 passed；
+  `npm run build:h5` 通过。
+- **8003 / 8010 都还没重启，线上 `/api/selector/rank` 此刻仍 404**（跑的是批次 J 之前的代码）。
+  端到端验证必须等重启窗口（避开 17:30 / 18:20），核对方法就是 §13.4 第 7 条。

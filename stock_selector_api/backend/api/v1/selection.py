@@ -34,6 +34,12 @@ async def runs(user: CurrentUserDep, page: int = Query(1, ge=1), size: int = Que
     return ok(paged(data["items"], data["total"], page, size))
 
 
+@router.get("/rank", summary="持仓的当日榜内名次（薄代理选股引擎）")
+async def rank(user: CurrentUserDep, codes: str = Query(
+        "", max_length=700, description="逗号分隔的 6 位代码，最多 60 只")):
+    return ok(await selection_service.day_ranks(selection_service.split_codes(codes)))
+
+
 @router.get("/runs/{job_id}", summary="任务详情与结果")
 async def run_detail(user: CurrentUserDep, job_id: str):
     return ok(await selection_service.run_status(user.id, job_id))
