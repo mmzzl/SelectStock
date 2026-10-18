@@ -1965,6 +1965,156 @@ sudo systemctl enable --now llama-server   # 端口 18080
 已 `--vacuum-size=500M` 一次性清过（清掉 3.4 GB）。**没有**设永久上限，日志会慢慢再涨回去。
 要长期封顶就加 drop-in `SystemMaxUse=500M` 后重启 `systemd-journald`（这一步当时没批，没做）。
 
+## qlib 模型训练手册（以后自己跑一遍的完整步骤）
+
+一句话：**训练 = `scripts/qlib_run.py` 一条命令**；线上打分服务（8003）**只读磁盘上的模型文件**，
+不参与训练，也不需要重启就能认新模型。改模型的完整动作就是「训练到别的目录 → 拷进
+`data/qlib/model/` → 调一次 refresh」。
+
+口径真源是 `stock_selector/docs/qlib路线数据口径与验收门槛.md`（标签、票池、成本、验收门槛、
+每批预注册与读数都在那里）。本节只讲**怎么把一次训练跑出来并换上线**，不重复讲口径。
+
+### 1. 前置条件（30 秒自查，全过才开始）
+
+| 检查 | 命令 | 期望 |
+|---|---|---|
+| Python + qlib + lightgbm | `/usr/bin/python3 -c "import qlib,lightgbm;print(qlib.__version__, lightgbm.__version__)"` | `0.9.7 4.7.0`（qlib 装在 `~/.local/lib/python3.10/site-packages`） |
+| bin 面板存在 | `ls /data/work/qlib_data/cn/calendars` | 有 `day.txt` |
+| **面板更到最新交易日** | `/usr/bin/python3 -c "import qlib;qlib.init(provider_uri='/data/work/qlib_data/cn',kernels=1);print(qlib.data.D.calendar()[-1])"` | 最后一个日历日 = 最近一个交易日 |
+| 内存够 | `free -g \| awk 'NR==2{print $7}'` | ≥ 5（GB available） |
+| 没有在跑的同类任务 | `pgrep -af qlib_run` | 只匹配到自己那条 |
+
+**面板没更到最新**是最常见的坏法：训练会照样跑完、IC 也照样出一个数，只是那段「留出」根本没有数据。
+补面板：16:00 定时任务 `scripts/qlib_update_bin.py`（`config/inputs.conf`），手动补一次就
+`/usr/bin/python3 -u scripts/qlib_update_bin.py --check-plugin`（约 40 秒，跑完自动通知 8003 清缓存）。
+
+`MLFLOW_ALLOW_FILE_STORE=true` 不用手动设，脚本里 `setdefault` 了；不设的话新版 mlflow 会拒绝文件型
+backend，训练直接抛异常。
+
+### 2. 先冒烟，确认管道通（约 1 分钟）
+
+```bash
+cd /data/work/SelectStock
+/usr/bin/python3 -u scripts/qlib_run.py --smoke --run-id smoke_$(date +%H%M)
+```
+
+`--smoke` 只是把池压到 120 只、窗口换成 2019→2021，跑的是**同一条链**。它红了就先修环境，别急着跑正式臂。
+峰值约 670 MB。
+
+### 3. 正式训练：命令与每个参数的含义
+
+批次 M 实际用过的那两条命令就是标准跑法（原样可抄，只需换名字和日期）：
+
+```bash
+# 上线臂：重挑池 + 训练截止 2026-06-30 + 树数钉死
+/usr/bin/python3 -u scripts/qlib_run.py --pool-end 2026-03-31 --inst-name live2026jun \
+  --run-id live2026jun --seed 7 --fixed-trees 141 \
+  --train-beg 2016-01-01 --train-end 2026-06-30 \
+  --valid-beg 2026-07-01 --valid-end 2026-07-31 --test-beg 2026-07-01 --test-end 2026-10-16 \
+  --export-model data/qlib/model_live2026jun
+
+# 参照臂：读上线臂的池、同样树数，只差 train_end（两臂配对才做得成）
+/usr/bin/python3 -u scripts/qlib_run.py --pool-file data/qlib/model_live2026jun/pool.txt \
+  --inst-name batchM_ref --run-id batchM_ref --seed 7 --fixed-trees 141 \
+  --train-beg 2016-01-01 --train-end 2024-12-31 \
+  --valid-beg 2026-07-01 --valid-end 2026-07-31 --test-beg 2026-07-01 --test-end 2026-10-16
+```
+
+| 参数 | 作用 | 要注意什么 |
+|---|---|---|
+| `--train-beg/--train-end` | 训练窗 | `train_end` 一挪，**票池也会换血**（批次 I 实测 59/300 只不同），所以要么冻结池要么两臂同池 |
+| `--valid-beg/--valid-end` | 验证段 | 用 `--fixed-trees` 时它不参与选轮数，所以可以故意和 test 重叠，把留出段一天不浪费 |
+| `--test-beg/--test-end` | 测试段（= 样本外读数从哪来） | 起点必须**严格晚于** train_end，否则 `holdout_ok` 判无留出段：IC/逐日读数一个都不出，`--backtest` 直接退出 |
+| `--universe` | 按训练段日均成交额挑前 N 只 | **默认 300 是内存上限**：实测每行样本 ~3.65 KB，300 只 × 10 年 ≈ 3.2 GB；抬高之前按这个单价重算 |
+| `--pool-end` | 重挑池用的流动性窗右端 | 缺省 = `--train-end`。想把「训练吃到最新」和「池按某个已收口时点挑」分开时才给；**与 `--pool-file` 互斥**，两个一起给会直接报错 |
+| `--pool-file` | 冻结票池（一行一个 symbol，也吃 instruments 的三列格式） | 滚动重训必带，读上一臂产出的 `pool.txt` |
+| `--inst-name` | 写 `instruments/<name>.txt` 的名字，缺省 `liq<池大小>` | **跑研究臂务必另起名**，缺省名会覆盖线上实盘那份 |
+| `--seed` | LightGBM 种子 | 缺省不设 = 与历史批次同口径；要做配对检验就给同一个值 |
+| `--fixed-trees` | 关掉早停、恰好长 N 棵树 | 训练段吃到日历末尾时，早停等于在自家数据上挑轮数。**数值要对齐现役模型的真实棵数**：`/usr/bin/python3 -c "import lightgbm as lgb;print(lgb.Booster(model_file='data/qlib/model/model.txt').num_trees())"`（现在 = 141）。别用 `grep -c Tree` 数，那个数不准 |
+| `--export-model DIR` | 训练完落盘 booster + 归一化 mean/std/列序 + 票池 | 不带 DIR = 写 `data/qlib/model`，那是**线上目录**，会被第 8 节第 3 条的闸门拦下 |
+| `--write-live-model` | 明确允许写线上目录 | 单独用它不会写，只是放行；正常流程建议**总是写到别的目录**，上线走第 6 节的拷贝 |
+| `--backtest` `--topk` `--n-drop` `--benchmark` | 附带跑 TopkDropout 回测 | 基准只能是 `SH510300`（面板里唯一贯穿 2015→2026 的大盘代理，399xxx 只有 2025 年之后的数据）。回测读数**必须看净值 `report["account"]`，不是 `report["return"]`**（后者是扣成本前的毛利，差 8 个百分点/年） |
+| `--to-mongo` | 名单写进 Mongo `qlib_top_stocks` | **缺省关**。这是共享状态，手测时不要开 |
+| `--run-id` | 产物文件的名字 | 落盘名都带它，起个能认出的名字 |
+
+**成本**：固定 141 棵一臂约 **100 秒**，带早停约 **5 分钟**；峰值内存 **~2.9 GB** ⇒ **两臂必须串行跑**，
+并发会触发 earlyoom 去杀别的进程。放后台就把日志落盘：`... > /tmp/arm_x.log 2>&1 &`。
+
+### 4. 产物在哪
+
+| 文件 | 内容 |
+|---|---|
+| `data/qlib/run_<run_id>.json` | 聚合读数：IC / ICIR / Q5−Q1 / 票池 / 段划分 / `holdout` / `fixed_trees` / `pool_end` |
+| `data/qlib/ic_daily_<run_id>.parquet` | **逐日**宽表（秩相关、Pearson、横截面只数、Q5−Q1 日差）——配对检验的输入，没有它每次滚动重训只能报点估计 |
+| `data/qlib/pred_<run_id>.parquet` | 测试段逐日逐票打分 |
+| `<export DIR>/model.txt` `norm.npz` `pool.txt` `meta.json` | 8003 只读这四份；`meta.json` 里有 `run_id`/`train_end`/`pool_size` |
+
+### 5. 读数怎么看（三条都会翻结论的规则）
+
+1. **逐日 t 要 ÷√5**：标签是 `Ref($close,-5)/Ref($close,-1)-1`，相邻 5 天共用同一段涨跌，
+   普通 t 会系统性高估显著性。配对脚本已经自动除了。
+2. **不同窗口的绝对 IC 不能横着比**：批次 M 里参照臂在 67 天窗上 IC 0.093，而它自己 309 天窗上只有 0.0487
+   ——这段日子对**所有**臂都容易。要比就同一天配对相减。
+3. **点数不等于显著**：见下一节。
+
+### 6. 两臂配对检验（判断「换训练窗」有没有用，只有这一件事算数）
+
+```bash
+/usr/bin/python3 -u scripts/qlib_ic_pair.py live2026jun batchM_ref          # 主读数：逐日秩相关
+/usr/bin/python3 -u scripts/qlib_ic_pair.py live2026jun batchM_ref --column ls_spread   # 分层价差
+```
+
+差 = 第一个臂 − 第二个臂。输出看 `days_paired`（**< 60 天就只能当点估计，别写成结论**）、
+`mean_diff`、`t_adjusted`（已 ÷√5）、`corr_ab`（两臂逐日读数相关性，越高说明差异越可能是抖动）。
+
+批次 M 的读数留在这儿当参照尺：同池同树数下，训到 2026-06-30 比训到 2024-12-31 **低** 0.0356，
+`t_adjusted = −1.79`（不显著），67 天里 61% 的日子旧臂更好，两臂相关性 0.904。
+⇒ 所以线上现在还是 `live2024`（`train_end=2024-12-31`，导出时刻 2026-10-18 13:13:22）。
+
+### 7. 把训好的模型换上线（4 步，随时可回滚）
+
+```bash
+cd /data/work/SelectStock
+# ① 先备份当前线上那份（回滚就靠它）
+cp -r data/qlib/model data/qlib/model_backup_$(date +%m%d_%H%M)
+# ② 覆盖线上目录（只覆盖四个文件，别 rm 目录）
+cp data/qlib/model_live2026jun/{model.txt,norm.npz,pool.txt,meta.json} data/qlib/model/
+# ③ 让 8003 清进程内缓存（qlib 把日历缓存一小时，不刷它它坚持说「今天还不是交易日」）
+curl -s -X POST http://172.17.0.1:8003/api/admin/refresh
+# ④ 直连 8003 验打分（第一个请求要给 300 只池补 130 天因子，实测 34.5 秒；热了 0.03 秒）
+curl -s -X POST http://172.17.0.1:8003/api/selector/run -H 'Content-Type: application/json' -d '{"topk":30}'
+curl -s http://172.17.0.1:8003/api/health | python3 -m json.tool   # model 段应显示新 run_id
+```
+
+六条硬规矩：
+
+- **地址写 `172.17.0.1` 不写 `localhost`**——8003 没监听 127.0.0.1。
+- **④ 只能直连 8003**，绝不要走后端 `start_run`：那会推真实钉钉「本次选股命中 30 只」。
+- **时间避开 17:30（选股）和 18:20（持仓诊断）**，换模型在 **17:35 之后**动手。
+- 面板换了新池之后，16:00 的 `qlib_update_bin.py` 会自动读产物里的 `pool.txt` 跟着新池更新，不用另改。
+- 回滚 = 把备份目录的四个文件再 `cp` 回去 + 再调一次 refresh。
+- `data/qlib/model` 里的名字（`liq300.txt` 等 instruments）别当备份用，实盘池那份会被覆盖；
+  要留旧池就单独存（例：`instruments/liq300_trainend2021.txt`）。
+
+### 8. 四个会把结果静默作废的坑（都踩过）
+
+1. **`--fixed-trees` 给 20 却长出 12 棵**：qlib 的 `LGBModel.fit` 无条件挂 `lgb.early_stopping`，
+   lightgbm ≥ 4 收尾会把 booster 裁到 `best_iteration`。脚本的修法是绕过 `fit` 直接 `lgb.train`，
+   并在训完**断言真实棵数**，对不上就 `SystemExit`。
+2. **接着又变成 600 棵**：`n_estimators` 是 lightgbm `num_iterations` 的别名，会**盖掉**
+   `num_boost_round`。现在构造参数里会把 `n_estimators/num_boost_round/num_iterations` 全部剔掉再训。
+   顺带一句：`n_estimators=600` 也把批次 L 的早停封顶在 600 轮，那批读数不受影响。
+3. **`--export-model` 不带 DIR 就等于当场换线上模型**（8003 每次调用重读磁盘）。所以训练**之前**就拦：
+   指向 `data/qlib/model` 而没给 `--write-live-model` 直接退出，不会白花五分钟再拒绝。
+4. **`--pool-file` 与 `--pool-end` 一起给**：池已经定死，`--pool-end` 会被无声忽略 ⇒ 直接报错，不给两可。
+
+### 9. 想加一条「滚动重训」的定时任务之前
+
+先想清楚这两件事，缺一件就只能出点估计、不能出结论：
+① 池要么冻结要么两臂同池；② 逐日 IC 必须落盘（现在默认落）。
+滚动重训的正确做法是**跑两臂（新窗 + 现役窗）再配对**，单跑新窗得到的那个 IC 数字没法归因。
+另外本机内存只够串行，两次训练不能同时跑。
+
 ## session-context：跨会话上下文维护
 
 开发过程中由 AI 维护两层知识，断线/重开对话后不丢上下文：
