@@ -12,9 +12,17 @@
   const FIELDS = [
     { key: 'start', label: '起始日期', type: 'date' },
     { key: 'end', label: '结束日期', type: 'date' },
+    { key: 'engine', label: '回测引擎（qlib 只按分数排序建仓，不读止损/规则集那套参数）', type: 'engine' },
     { key: 'strategy', label: '策略来源', type: 'select' },
     { key: 'rule_set_id', label: '规则集判据（留空=用 MongoDB trading_rules；与策略来源二选一）', type: 'rule_set' },
     { key: 'capital', label: '初始资金', type: 'number', step: '1000' },
+    // ↓ 只有 engine=qlib 读；哪些键该藏、该不收，由 /backtest/options 的 engine_excludes 决定
+    { key: 'topk', label: 'qlib 持仓只数', type: 'number' },
+    { key: 'hold_rule', label: 'qlib 持仓纪律', type: 'hold_rule' },
+    { key: 'n_drop', label: '每天强制换掉的只数（仅 TopkDropout）', type: 'number' },
+    { key: 'entry_rank', label: '买入候选＝当日分数前 N 名（仅 band）', type: 'number' },
+    { key: 'exit_rank', label: '跌出前 N 名才卖（仅 band）', type: 'number' },
+    // ↓ 只有自研内核读
     { key: 'max_positions', label: '持仓只数上限', type: 'number' },
     { key: 'position_cap_pct', label: '单票仓位上限（0~1）', type: 'number', step: '0.01' },
     { key: 'target_amount', label: '单笔买入金额（需小于初始资金×单票上限）', type: 'number', step: '100' },
@@ -26,6 +34,16 @@
     { key: 'commission_min', label: '最低佣金', type: 'number', step: '0.5' },
     { key: 'stamp_tax_rate', label: '卖出印花税率', type: 'number', step: '0.0001' },
   ];
+
+  // 引擎/纪律叫什么，页面负责念；有哪些、谁看不懂哪些键，只从后端 options 拿，不在这里抄一份
+  const ENGINE_LABELS = {
+    self: '自研内核（读 MongoDB 日线 + 规则判据）',
+    qlib: 'qlib（读 bin 面板 + Alpha158/LightGBM 分数）',
+  };
+  const HOLD_RULE_LABELS = {
+    dropout: 'TopkDropout：每天换掉分数最低的 n_drop 只',
+    band: 'band：还在前 exit_rank 名就继续拿，空位从前 entry_rank 名补',
+  };
 
   let opts = null;
   let curPage = 1;
@@ -98,10 +116,32 @@
       esc(job.stage || '') + '</span>';
   }
 
+  /** 当前引擎+纪律下「内核读不到」的键。渲染时藏起来、提交时不收——
+   *  两处都用这一个函数，避免出现「看得见但白填」或「看不见却提交上去被后端 400」。
+   *  entry_rank/exit_rank 后端不算 qlib 的非法键（qlib 进程认得），但 hold_rule=dropout 时
+   *  它同样不读，所以在这里按 band 专属处理。
+   *  n_drop 反过来：它只在 dropout 下生效，band 收着会被后端 400（「band 不看 n_drop」），
+   *  而表单里它是带缺省值的数字框，不藏就等于每次选 band 都提交失败。 */
+  function hiddenKeys(engine, holdRule) {
+    const skip = new Set(((opts || {}).engine_excludes || {})[engine] || []);
+    if (engine !== 'qlib') return skip;
+    if (holdRule !== 'band') {
+      skip.add('entry_rank');
+      skip.add('exit_rank');
+    } else {
+      skip.add('n_drop');
+    }
+    return skip;
+  }
+
   function formHtml(sets, prefillId) {
     const d = opts.defaults || {};
     const strategyOptions = [{ value: '', label: '规则回测（MongoDB trading_rules）' }]
       .concat((opts.strategies || []).map((s) => ({ value: s, label: '选股策略同源：' + s })));
+    const engineOptions = (opts.engines || ['self']).map((e) =>
+      ({ value: e, label: ENGINE_LABELS[e] || e }));
+    const holdOptions = (opts.hold_rules || ['dropout']).map((h) =>
+      ({ value: h, label: HOLD_RULE_LABELS[h] || h }));
     const ruleSetOptions = [{ value: '', label: '不用规则集（按 MongoDB trading_rules 判定）' }]
       .concat((sets || []).map((s) => ({ value: s.id, label: s.name + (s.is_active ? '（生效中）' : '') })));
     if (prefillId && !ruleSetOptions.some((o) => o.value === prefillId)) {
@@ -117,6 +157,12 @@
       if (f.type === 'select') {
         return AppUI.fSelect(f.key, f.label, strategyOptions, value);
       }
+      if (f.type === 'engine') {
+        return AppUI.fSelect(f.key, f.label, engineOptions, value || 'self');
+      }
+      if (f.type === 'hold_rule') {
+        return AppUI.fSelect(f.key, f.label, holdOptions, value || 'dropout');
+      }
       const limit = (opts.numeric || {})[f.key] || {};
       const range = (limit.min !== null && limit.min !== undefined ? ' min="' + limit.min + '"' : '') +
         (limit.max !== null && limit.max !== undefined ? ' max="' + limit.max + '"' : '');
@@ -128,9 +174,25 @@
       '<label for="no-save" style="margin:0">仅试跑，不写回测结果库</label></div>';
   }
 
+  /** 按当前下拉值收放字段：所有控件都留在 DOM 里（提交体由 collect() 负责不含被藏的键），
+   *  这里只改可见性，切换引擎时不用重排表单、也不会把已填的值丢掉。 */
+  function applyEngine(mask) {
+    const engine = (mask.querySelector('[data-field=engine]') || {}).value || 'self';
+    const holdRule = (mask.querySelector('[data-field=hold_rule]') || {}).value || 'dropout';
+    const skip = hiddenKeys(engine, holdRule);
+    FIELDS.forEach((f) => {
+      const el = mask.querySelector('[data-field="' + f.key + '"]');
+      if (!el) return;
+      const row = el.closest('.frow') || el.parentElement;
+      if (row) row.style.display = skip.has(f.key) ? 'none' : '';
+    });
+  }
+
   function collect(form) {
     const params = {};
+    const skip = hiddenKeys(form.engine || 'self', form.hold_rule || 'dropout');
     FIELDS.forEach((f) => {
+      if (skip.has(f.key)) return;
       const raw = form[f.key];
       if (raw === '' || raw === null || raw === undefined) return;
       params[f.key] = (f.type === 'number') ? Number(raw) : raw;
@@ -152,6 +214,15 @@
       AppUI.toast('回测任务已投递：' + data.job_id, 'success');
       await loadJobs();
     });
+    const mask = document.getElementById('modal-mask');
+    if (mask) {
+      // openForm 是同步建 DOM 的，这里挂在它的容器上做事件委托，页面不碰 AppUI 内部实现
+      mask.addEventListener('change', (e) => {
+        const key = e.target && e.target.dataset && e.target.dataset.field;
+        if (key === 'engine' || key === 'hold_rule') applyEngine(mask);
+      });
+      applyEngine(mask);
+    }
   }
 
   function sparkline(points) {
@@ -236,6 +307,11 @@
     { label: '创建时间', width: '150px', render: (r) => esc(fmtTime(r.created_at)) },
     { label: '策略', width: '140px', render: (r) => {
       const p = r.params || {};
+      // qlib 回测既没有 strategy 也没有规则集，不标引擎就会渲染成「规则回测」，
+      // 而它跑的其实是 LightGBM 分数排序——两者结论完全不能互认
+      if (p.engine === 'qlib') {
+        return esc('qlib · ' + (p.hold_rule || 'dropout') + ' topk' + (p.topk || '-'));
+      }
       if (p.strategy) return esc(p.strategy);
       // 规则集回测和裸规则回测必须看得出区别，否则「用这套规则跑出来的结果」没法对账
       return p.rule_set_id ? esc('规则集 ' + String(p.rule_set_id).slice(0, 8)) : '规则回测';
