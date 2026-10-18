@@ -18,6 +18,14 @@
 4. **成本与不可成交**：买入 0.0005、卖出 0.0015（含千1印花税）、最低 5 元；
    `limit_threshold=0.095` 让涨跌停当日买不进/卖不掉。这条对 30x/68x（20% 涨跌幅）偏严，
    也就是宁可少赚也不给自己造假成交。
+5. **滚动重训必须冻结票池**（`--pool-file`）：票池按训练段流动性重挑一次，`train_end` 一挪就换血
+   （批次 I 实测 59/300），于是「第 8 名」「跌出前 100 才卖」在不同臂之间比的不是同一批票。
+   冻结池之后，滚动只推进训练窗，横截面的定义不变，两臂的逐日 IC 才能按日配对。
+
+产物除了聚合读数，还落两份**逐日**序列（批次 L 的仪器，缺了就每次滚动重训只能报点估计）：
+`data/qlib/ic_daily_<run_id>.parquet`（逐日秩相关/Pearson/横截面只数/Q5−Q1 日差）与
+`data/qlib/pred_<run_id>.parquet`（测试段逐日逐票打分）；两臂配对检验用
+`scripts/qlib_ic_pair.py`，5 日重叠标签 ⇒ 逐日 t 要 ÷√5 才是接近真实的读数。
 
 内存约束：实测每行样本约 3.65 KB（冒烟：120 只 × 2019-2021 = 87,600 行 → 峰值 670 MB，
 扣掉 Python+qlib+pandas 的 ~350 MB 底板）。本机只剩 ~5.5G，800 只 × 10 年 ≈ 210 万行 ≈ 8G
@@ -27,6 +35,13 @@
     python3 scripts/qlib_run.py --smoke                    # 小池短窗，几分钟，验管道
     python3 scripts/qlib_run.py --universe 300 --backtest   # 初版全跑
     python3 scripts/qlib_run.py --to-mongo                  # 额外把名单写进 qlib_top_stocks
+
+滚动重训（批次 L 起的标准跑法：池冻结、票池文件不覆盖线上那份、给种子让两臂可比）:
+    python3 scripts/qlib_run.py --pool-file data/qlib/model/pool.txt \\
+        --inst-name roll_2026_06_30 --seed 7 --train-end 2026-06-30 \\
+        --valid-beg 2026-07-01 --valid-end 2026-07-31 \\
+        --test-beg 2026-08-01 --test-end 2026-10-16 \\
+        --export-model data/qlib/model_roll_2026H2
 """
 
 from __future__ import annotations
@@ -80,14 +95,42 @@ def liquid_universe(symbols: list[str], beg: str, end: str, top: int) -> list[st
     return ranked.head(top)["symbol"].tolist()
 
 
+def read_pool_file(path: Path) -> list[str]:
+    """冻结票池：一行一个 symbol，也接受 qlib instruments 的 `SYMBOL\\t起\\t止` 三列格式。
+
+    为什么要有这一条：`--universe` 每次按训练段重挑，`train_end` 一挪池就换血，
+    两臂的「第几名」比的不是同一批票，逐日 IC 也就没法按日配对。
+    顺序保留（不按字典序排）是为了让「同一个池文件 = 同一批票」这件事肉眼可查。
+    """
+    out, seen = [], set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        sym = line.split("\t")[0].strip().upper()
+        if not sym or sym.startswith("#"):
+            continue
+        if sym not in seen:
+            seen.add(sym)
+            out.append(sym)
+    if len(out) < 30:
+        raise ValueError(f"冻结票池 {path} 只有 {len(out)} 只：少于 30 只算不出横截面 IC")
+    bad = [s for s in out if not (s[:2] in ("SH", "SZ", "BJ") and s[2:4] in STOCK_PREFIX)]
+    if bad:
+        raise ValueError(f"冻结票池 {path} 里有非 A 股代码（{bad[:5]}），池文件被写坏了")
+    return out
+
+
 def write_instruments(qlib_dir: Path, name: str, symbols: list[str]) -> Path:
-    """写 instruments/<name>.txt，起止日沿用 all.txt 里每只票自己的区间。"""
+    """写 instruments/<name>.txt，起止日沿用 all.txt 里每只票自己的区间。
+
+    文件名一律转小写：qlib 的 Instrument 在查表前会把名字 `lower()`，
+    写成 `batchL_ctrl.txt` 就会报 `instrument not exists: .../batchl_ctrl.txt`
+    ——文件明明在盘上，却永远读不到（批次 L 第一次起跑就是这么死的）。
+    """
     spans = {}
     for line in (qlib_dir / "instruments" / "all.txt").read_text().splitlines():
         parts = line.split("\t")
         if len(parts) >= 3:
             spans[parts[0].strip().upper()] = (parts[1].strip(), parts[2].strip())
-    path = qlib_dir / "instruments" / f"{name}.txt"
+    path = qlib_dir / "instruments" / f"{name.lower()}.txt"
     lines = [f"{s}\t{spans[s][0]}\t{spans[s][1]}" for s in symbols if s in spans]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
@@ -130,20 +173,28 @@ def as_series(frame) -> pd.Series:
     return dt_inst(frame.iloc[:, 0] if isinstance(frame, pd.DataFrame) else frame)
 
 
-def daily_ic(pred: pd.Series, label: pd.Series) -> dict:
-    """逐日横截面相关：秩相关是主读数（模型排名字 vs 真实收益排名字），Pearson 一起给。"""
+def daily_ic_frame(pred: pd.Series, label: pd.Series, min_names: int = 30) -> pd.DataFrame:
+    """逐日横截面相关**序列**（以前只回聚合值，配对检验就没有输入可算）。
+
+    一天不足 `min_names` 只就不进序列：十几只票的秩相关噪声极大，留着等于让那几天
+    以同等权重拉动整段均值。列名/索引名是落盘格式的一部分，改动会让历史 parquet 读不了。
+    """
     frame = pd.concat([dt_inst(pred).rename("score"), dt_inst(label).rename("label")],
                       axis=1).dropna()
-    if frame.empty:
-        return {}
     rows = []
     for day, grp in frame.groupby(level="datetime"):
-        if len(grp) < 30:
+        if len(grp) < min_names:
             continue
-        pear = grp["score"].corr(grp["label"], method="pearson")
-        spear = grp["score"].corr(grp["label"], method="spearman")
-        rows.append((day, len(grp), pear, spear))
-    ic = pd.DataFrame(rows, columns=["day", "n", "pearson", "spearman"]).set_index("day")
+        rows.append((day, len(grp),
+                     grp["score"].corr(grp["label"], method="pearson"),
+                     grp["score"].corr(grp["label"], method="spearman")))
+    return pd.DataFrame(rows, columns=["day", "n", "pearson", "spearman"]).set_index("day")
+
+
+def ic_summary(ic: pd.DataFrame) -> dict:
+    """聚合读数。**键名与历史 `run_*.json` 完全一致**，否则新旧批次没法放进一张表比。"""
+    if ic.empty:
+        return {}
     s = ic["spearman"]
     return {
         "days": int(len(ic)),
@@ -155,6 +206,34 @@ def daily_ic(pred: pd.Series, label: pd.Series) -> dict:
         "pearson_ic_mean": float(ic["pearson"].mean()),
         "share_days_positive": float((s > 0).mean()),
     }
+
+
+def daily_ic(pred: pd.Series, label: pd.Series) -> dict:
+    """逐日横截面相关的聚合值（秩相关是主读数，Pearson 一起给）。"""
+    return ic_summary(daily_ic_frame(pred, label))
+
+
+def dump_ic_daily(dest: Path, run_id: str, ic_valid: pd.DataFrame, ic_test: pd.DataFrame,
+                  spread: pd.Series) -> Path:
+    """逐日读数落盘成一张宽表：配对检验拿它当输入，不需要重新训练任何一方。"""
+    frame = pd.DataFrame(index=sorted(set(ic_valid.index) | set(ic_test.index)))
+    for seg, ic in (("valid", ic_valid), ("test", ic_test)):
+        frame[f"spearman_{seg}"] = ic["spearman"]
+        frame[f"pearson_{seg}"] = ic["pearson"]
+        frame[f"n_{seg}"] = ic["n"]
+    frame["ls_spread"] = spread if len(spread) else np.nan
+    frame.index.name = "day"
+    frame.to_parquet(dest / f"ic_daily_{run_id}.parquet")
+    return dest / f"ic_daily_{run_id}.parquet"
+
+
+def dump_predictions(dest: Path, run_id: str, pred: pd.Series) -> Path:
+    """测试段逐日逐票的原始打分。有了它，任何新窗口/新分档口径都能离线重算，不必再花 5 分钟
+    和 2.9G 内存重训一遍——这是滚动臂攒样本的前提。"""
+    frame = dt_inst(pred).rename("score").reset_index()
+    frame["datetime"] = pd.to_datetime(frame["datetime"]).dt.strftime("%Y-%m-%d")
+    frame.to_parquet(dest / f"pred_{run_id}.parquet", index=False)
+    return dest / f"pred_{run_id}.parquet"
 
 
 def quintile_table(pred: pd.Series, fwd_ret: pd.Series) -> tuple[pd.DataFrame, pd.Series]:
@@ -301,6 +380,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--qlib-dir", default=str(QLIB_DIR))
     ap.add_argument("--universe", type=int, default=300, help="训练段流动性取前 N 只股票")
+    ap.add_argument("--pool-file", default="",
+                    help="冻结票池：一行一个 symbol（或 instruments 的三列格式）。给了它就不重挑池，"
+                         "滚动重训之间才可比；池只 300 只是内存上限，见模块头说明")
+    ap.add_argument("--inst-name", default="",
+                    help="写 instruments/<name>.txt 的名字，缺省 liq<池大小>；跑研究臂时务必另起名，"
+                         "别覆盖线上实盘那份")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="LightGBM 种子。滚动臂之间要配对就得消除抽样噪声，缺省不设=与历史批次同口径")
     ap.add_argument("--train-beg", default="2016-01-01")
     ap.add_argument("--train-end", default="2021-12-31")
     ap.add_argument("--valid-beg", default="2022-01-01")
@@ -319,6 +406,8 @@ def main() -> int:
     ap.add_argument("--export-model", metavar="DIR", nargs="?", const="", default=None,
                     help="训练完把 booster+稳健标准化统计+票池落盘，给 qlib 插件（8003）只读；"
                          "不带 DIR 时写默认目录 data/qlib/model")
+    ap.add_argument("--write-live-model", action="store_true",
+                    help="允许把产物写进插件正在读的 data/qlib/model（等于当场换掉线上模型）")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -329,6 +418,19 @@ def main() -> int:
         args.valid_beg, args.valid_end, args.test_beg, args.test_end = "2021-01-01", "2021-06-30", "2021-07-01", "2021-12-31"
     run_id = args.run_id or pd.Timestamp.now().strftime("%Y%m%d-%H%M%S")
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from stock_selector_qlib import artifacts
+
+    export_dest: Path | None = None
+    if args.export_model is not None:
+        export_dest = Path(args.export_model) if args.export_model else artifacts.MODEL_DIR
+        # 8003 每次调用都重读 data/qlib/model ⇒ 写进去就等于当场换掉线上模型，连 refresh 都不用。
+        # 研究臂必须写到别的目录，所以这条要在训练**之前**拦，别花完 5 分钟才拒绝。
+        if export_dest.resolve() == artifacts.MODEL_DIR.resolve() and not args.write_live_model:
+            raise SystemExit(
+                f"--export-model 指向实盘模型目录 {artifacts.MODEL_DIR}：研究臂请另给一个 DIR，"
+                "确实要把线上模型换掉才加 --write-live-model")
 
     # qlib 的 LGBModel.fit 会走 R.log_metrics → mlflow 实验；新版 mlflow 默认拒绝
     # 文件型 backend（"maintenance mode"），不设这个开关就直接抛异常、根本训不完。
@@ -343,32 +445,38 @@ def main() -> int:
     calendar = [str(d)[:10] for d in qlib.data.D.calendar()]
     print(f"qlib 日历 {len(calendar)} 天：{calendar[0]} → {calendar[-1]}")
 
-    symbols = stock_symbols()
-    print(f"面板里的股票（剔基金/指数/B股/北交所）：{len(symbols)} 只")
     liquid_end = min(args.train_end, calendar[-1])
-    pool = liquid_universe(symbols, args.train_beg, liquid_end, args.universe)
-    inst_file = write_instruments(Path(args.qlib_dir), f"liq{len(pool)}", pool)
-    print(f"票池：{len(pool)} 只（{args.train_beg}→{liquid_end} 日均成交额前 {args.universe}）→ {inst_file}")
+    if args.pool_file:
+        pool = read_pool_file(Path(args.pool_file))
+        print(f"票池：{len(pool)} 只（冻结自 {args.pool_file}，本次不重挑）")
+    else:
+        symbols = stock_symbols()
+        print(f"面板里的股票（剔基金/指数/B股/北交所）：{len(symbols)} 只")
+        pool = liquid_universe(symbols, args.train_beg, liquid_end, args.universe)
+        print(f"票池：{len(pool)} 只（{args.train_beg}→{liquid_end} 日均成交额前 {args.universe}）")
+    inst_file = write_instruments(Path(args.qlib_dir), args.inst_name or f"liq{len(pool)}", pool)
+    print(f"票池 → {inst_file}")
 
     segments = {
         "train": (args.train_beg, args.train_end),
         "valid": (args.valid_beg, args.valid_end),
         "test": (args.test_beg, args.test_end),
     }
-    dataset = build_dataset(qlib, inst_file.name.replace(".txt", ""), liquid_end, segments)
+    # 用落盘文件的实际名（已小写），不要用传进来的 --inst-name 原样
+    dataset = build_dataset(qlib, inst_file.stem, liquid_end, segments)
 
     from qlib.contrib.model.gbdt import LGBModel
 
+    gbdt_kwargs = {} if args.seed is None else {"seed": args.seed}
     model = LGBModel(loss="mse", learning_rate=0.04, num_leaves=128, max_depth=-1,
                      colsample_bytree=0.6, subsample=0.7, reg_alpha=10.0, reg_lambda=10.0,
-                     n_estimators=600, num_thread=4, verbose=-1)
+                     n_estimators=600, num_thread=4, verbose=-1, **gbdt_kwargs)
     print(f"训练 {segments['train']} / 验证 {segments['valid']} / 测试 {segments['test']}")
     model.fit(dataset)
 
-    if args.export_model is not None:
+    if export_dest is not None:
         # 插件进程只加载最近 130 天，归一化统计必须从这次训练里带出来：
         # RobustZScoreNorm 是在已加载的那段面板上算 median/MAD 的，短窗重算的不是同一个模型
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from stock_selector_qlib.export import export_from_dataset
 
         dest = export_from_dataset(model, dataset, pool, {
@@ -378,9 +486,11 @@ def main() -> int:
             "label": LABEL,
             "universe": args.universe,
             "pool_size": len(pool),
+            "pool_file": args.pool_file,
+            "seed": args.seed,
             "qlib_version": getattr(qlib, "__version__", ""),
             "source": "scripts/qlib_run.py",
-        }, dest=Path(args.export_model) if args.export_model else None)
+        }, dest=export_dest)
         print(f"模型产物落盘：{dest}（{len(pool)} 只票池，插件读这一份）")
 
     from qlib.data.dataset.handler import DataHandlerLP
@@ -391,19 +501,25 @@ def main() -> int:
     label_valid = as_series(dataset.prepare("valid", col_set="label", data_key=DataHandlerLP.DK_L))
     pred_test = dt_inst(model.predict(dataset, segment="test"))
     pred_valid = dt_inst(model.predict(dataset, segment="valid"))
+    ic_valid = daily_ic_frame(pred_valid, label_valid)
+    ic_test = daily_ic_frame(pred_test, label_test)
     report = {
         "run_id": run_id,
         "config": {k: v for k, v in vars(args).items() if k not in ("run_id",)},
         "pool_size": len(pool),
+        "pool_file": args.pool_file,
         "label_formula": LABEL,
-        "ic_valid": daily_ic(pred_valid, label_valid),
-        "ic_test": daily_ic(pred_test, label_test),
+        "ic_valid": ic_summary(ic_valid),
+        "ic_test": ic_summary(ic_test),
     }
     print(json.dumps(report["ic_valid"], indent=2, ensure_ascii=False))
     print(json.dumps(report["ic_test"], indent=2, ensure_ascii=False))
 
     fwd = forward_returns(qlib, pool, args.test_beg, args.test_end)
     table, spread = quintile_table(pred_test, fwd)
+    report["ic_daily_file"] = str(dump_ic_daily(REPORT_DIR, run_id, ic_valid, ic_test, spread))
+    report["pred_file"] = str(dump_predictions(REPORT_DIR, run_id, pred_test))
+    print(f"逐日序列落盘：{report['ic_daily_file']} / {report['pred_file']}")
     if not table.empty:
         report["quintile_test"] = table.round(5).to_dict("index")
         report["quintile_long_short_pooled_t"] = float(
