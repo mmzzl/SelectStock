@@ -42,4 +42,7 @@ class SelectResultRepo(RepoBase):
     schema = SelectResultCreate
 
     async def list_by_job(self, job_id: str) -> list[dict]:
-        return await self._find_all(filters={"job_id": job_id})
+        # 必须显式排序：qlib 引擎下 risk_ex10_pp 全是 null，App 的 sortByRiskDesc 对同值保序，
+        # 于是页面顺序 = 本接口的顺序 = 模型名次。不写 ORDER BY 就只剩「SQLite 恰好按插入序返回」
+        # 这个未定义行为在兜着，一旦换后端存储（Mongo 无序）名次就散了。
+        return await self._find_all(filters={"job_id": job_id}, order_by="rank_no")

@@ -22,7 +22,7 @@ _inflight: dict[str, str] = {}
 
 async def list_strategies() -> list[str]:
     if settings.selection_plugin_mode == "http":
-        url = settings.selection_plugin_base_url.rstrip("/") + "/api/strategy/list"
+        url = settings.selector_url + "/api/strategy/list"
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(url)
             resp.raise_for_status()
@@ -45,13 +45,27 @@ _MOCK_STRATEGY_DETAILS = [
 async def list_strategy_details() -> list[dict]:
     """策略元信息（中文说明/取数需求），前端拿它做中文标签，避免在客户端硬编码策略名。"""
     if settings.selection_plugin_mode == "http":
-        url = settings.selection_plugin_base_url.rstrip("/") + "/api/strategy/detail"
+        url = settings.selector_url + "/api/strategy/detail"
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             body = resp.json()
         return list(body.get("data") or [])
     return _MOCK_STRATEGY_DETAILS
+
+
+async def _default_strategies() -> list[str]:
+    """页面没勾策略时问插件要名单，不在后端写死策略名。
+
+    写死自研那两个名字之后，把选股切到 qlib 插件（它只认 qlib_alpha158）会让插件按契约
+    返回空名单——落库 0 条、页面上看起来就是「今天没有票」，而真实原因是名字对不上。
+    """
+    try:
+        names = await list_strategies()
+    except Exception as exc:  # noqa: BLE001 - 问不到就退回旧默认，让真正那次请求去暴露错误
+        logger.warning("缺省策略名单取不到，用内置兜底：%s", exc)
+        return ["trend_rebound", "box_oscillate"]
+    return names or ["trend_rebound", "box_oscillate"]
 
 
 async def _mock_run(strategies: list[str]) -> list[dict]:
@@ -75,7 +89,7 @@ def _num(value, integer: bool = False):
 
 
 async def _http_run(strategies: list[str]) -> list[dict]:
-    url = settings.selection_plugin_base_url.rstrip("/") + "/api/selector/run"
+    url = settings.selector_url + "/api/selector/run"
     async with httpx.AsyncClient(timeout=600) as client:
         resp = await client.post(url, json={"strategies": strategies or None})
         resp.raise_for_status()
@@ -175,7 +189,7 @@ async def start_run(user_id: str, strategies: list[str] | None,
     running = await _release_stale(user_id)
     if running:
         raise BizError(f"已有选股任务运行中: {running['job_id']}", code=409, status_code=409)
-    strategies = strategies or ["trend_rebound", "box_oscillate"]
+    strategies = strategies or await _default_strategies()
     job = await select_jobs_repo.create({
         "user_id": user_id,
         "strategies": json.dumps(strategies, ensure_ascii=False),

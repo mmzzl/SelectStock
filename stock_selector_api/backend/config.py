@@ -92,6 +92,11 @@ class Settings(BaseSettings):
     # ---------- 选股插件（薄代理，端口 8002）----------
     selection_plugin_mode: str = "http"        # http（本机选股插件 8002）| mock（测试确定性）
     selection_plugin_base_url: str = "http://localhost:8002"
+    # 选股内核地址（换引擎就改这个：8002 自研 / 8003 qlib）。留空 = 沿用上面那个键。
+    # 为什么要单开一个键而不是整键切过去：news_service 与 sector_service 也复用
+    # selection_plugin_base_url，而 8003 只实现选股那三条路由，整键切过去会让
+    # App 的消息面页和板块热力图一起 404。
+    selector_base_url: str = ""
 
     # ---------- 交割单解析（券商列别名；键为内部规范名）----------
     trades_columns: dict = {
@@ -148,6 +153,11 @@ class Settings(BaseSettings):
 
     def is_mongodb(self) -> bool:
         return self.db_backend == "mongodb"
+
+    @property
+    def selector_url(self) -> str:
+        """选股内核的地址：没单独配 selector_base_url 时回落到 8002，切换前的行为不变。"""
+        return (self.selector_base_url or self.selection_plugin_base_url).rstrip("/")
 
 
 @lru_cache

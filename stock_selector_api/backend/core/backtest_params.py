@@ -34,10 +34,37 @@ DEFAULTS: dict = {
     "rule_set_id": "",
     "sell_rule": "",
     "add_rule": "",
+    # 引擎开关：回测没有 HTTP 插件缝（Celery 任务名 backtest.run 就是那条缝），
+    # 所以「换插件」在这里表现为一个参数，worker 按它 import 不同内核。
+    "engine": "self",       # self = scripts/backtest_main.py；qlib = stock_selector_qlib.backtest
+    "topk": 30,             # 仅 engine=qlib：持仓只数
+    "n_drop": 5,            # 仅 engine=qlib（hold_rule=dropout）：每日强制换掉最低分的几只
+    "benchmark": "SH510300",  # 仅 engine=qlib：qlib 面板里的基准（指数 399xxx 只有 2025 年后数据）
+    # 持仓纪律（仅 engine=qlib）：dropout = 每天换掉 n_drop 只；
+    # band = 还在前 exit_rank 名就继续拿，空位从前 entry_rank 名补。自研内核不读这三个键。
+    "hold_rule": "dropout",
+    "entry_rank": 50,       # 买入候选 = 当日分数前 entry_rank 名
+    "exit_rank": 100,       # 跌出前 exit_rank 名才卖
 }
 
+ENGINES = ("self", "qlib")
+# 与 stock_selector_qlib/backtest.py 的 HOLD_RULES 一致（后端不 import qlib，所以这里抄一份）
+HOLD_RULES = ("dropout", "band")
+
+# engine=qlib 看不懂的参数：TopkDropout 只按分数等权分仓，没有止盈止损/持有天数/规则串。
+# 收着这些参数还照跑 = 「前端能填、回测跑不到」，所以 validate 直接拒。
+_QLIB_UNUSED_KEYS = ("strategy", "rule_set_id", "sell_rule", "add_rule", "max_hold_days",
+                     "stop_loss_pct", "take_profit_pct", "max_positions", "position_cap_pct",
+                     "target_amount", "universe")
+# 反过来：band 的键只有 qlib 引擎认，自研内核一条都不读。
+# topk/n_drop/benchmark 也要列进来：worker 是 `SimpleNamespace(**merged)` 整包喂内核的
+# （tasks/backtest_tasks.py:108），自研内核没有这三个属性，收了就静默忽略——
+# 那正好是本模块开头要避免的「前端能填、回测跑不到」。
+_SELF_UNUSED_KEYS = ("hold_rule", "entry_rank", "exit_rank", "topk", "n_drop", "benchmark")
+
 # 字符串参数：{键: 长度上限}
-_STR_SPEC: dict = {"rule_set_id": 36, "sell_rule": 2000, "add_rule": 2000}
+_STR_SPEC: dict = {"rule_set_id": 36, "sell_rule": 2000, "add_rule": 2000,
+                   "engine": 8, "benchmark": 16, "hold_rule": 8}
 
 # 数值参数：(类型, 下界, 上界)，None 表示该侧不校验
 _NUM_SPEC: dict = {
@@ -52,17 +79,29 @@ _NUM_SPEC: dict = {
     "max_hold_days": (int, 0, 250),
     "stop_loss_pct": (float, 0.0, 0.5),
     "take_profit_pct": (float, 0.0, 1.0),
+    "topk": (int, 1, 300),
+    "n_drop": (int, 0, 300),
+    "entry_rank": (int, 1, 300),
+    "exit_rank": (int, 1, 300),
 }
 
 
 def form_spec() -> dict:
-    """给前端表单的单一事实来源：缺省值 + 数值区间，避免页面自己硬编码一套边界。"""
+    """给前端表单的单一事实来源：缺省值 + 数值区间 + 每个引擎看不懂的键。
+
+    `engine_excludes` 是给页面收字段用的：collect() 会把这些键从提交体里剔掉。
+    后端 validate 对同一批键直接 400，所以两处必须来自同一份定义——
+    在页面里另抄一遍清单，加参数时就会变成「前端能填、后端拒收」。
+    """
     return {
         "defaults": dict(DEFAULTS),
         "numeric": {
             key: {"type": "int" if typ is int else "float", "min": lo, "max": hi}
             for key, (typ, lo, hi) in _NUM_SPEC.items()
         },
+        "engines": list(ENGINES),
+        "hold_rules": list(HOLD_RULES),
+        "engine_excludes": {"self": list(_SELF_UNUSED_KEYS), "qlib": list(_QLIB_UNUSED_KEYS)},
     }
 
 
@@ -93,6 +132,18 @@ def validate(raw: dict | None) -> dict:
             if len(name) > 64:
                 raise BizError("策略名过长", code=400, status_code=400)
             out[key] = name
+        elif key == "engine":
+            name = str(value).strip().lower()
+            if name not in ENGINES:
+                raise BizError(f"回测引擎只支持 {'/'.join(ENGINES)}，收到 {name!r}",
+                               code=400, status_code=400)
+            out[key] = name
+        elif key == "hold_rule":
+            name = str(value).strip().lower()
+            if name not in HOLD_RULES:
+                raise BizError(f"持仓纪律只支持 {'/'.join(HOLD_RULES)}，收到 {name!r}",
+                               code=400, status_code=400)
+            out[key] = name
         elif key in _STR_SPEC:
             out[key] = _text(key, value)
         elif key == "no_save":
@@ -105,7 +156,56 @@ def validate(raw: dict | None) -> dict:
     _check_window(effective)
     _check_position_sizing(effective)
     _check_rule_snapshot(effective)
+    _check_engine(params, effective)
+    _check_hold_rule(effective)
     return out
+
+
+def _check_engine(raw: dict, effective: dict) -> None:
+    """每个引擎只吃自己实现了的参数，其余一律拒绝。
+
+    静默忽略比报错更坏：页面填了止损 5%，qlib 根本没实现止损，读数却是「设了止损的回测」；
+    反过来给自研内核传 band 的三个键也一样，它只会走自己的 max_hold_days/止损。
+    """
+    engine = effective["engine"]
+    if engine == "qlib":
+        keys = _QLIB_UNUSED_KEYS
+        why = "qlib 内核只按分数排序建仓，没有止损/持有天数/规则串"
+    else:
+        keys = _SELF_UNUSED_KEYS
+        why = "自研内核不读 qlib 的持仓纪律参数"
+    given = [key for key in keys
+             if raw.get(key) is not None and raw.get(key) != "" and key != "engine"]
+    if given:
+        raise BizError(f"engine={engine} 不支持这些参数（{why}）：{', '.join(given)}",
+                       code=400, status_code=400)
+    # n_drop 只属于 dropout：band 不每天强制换票，收着它照跑就会把读数标成「换过 5 只」
+    if engine == "qlib" and effective["hold_rule"] == "band" and raw.get("n_drop") is not None:
+        raise BizError("hold_rule=band 不看 n_drop（它只卖跌出 exit_rank 的持仓，不每天强制换票）；"
+                       "要跑 TopkDropout 请设 hold_rule=dropout", code=400, status_code=400)
+
+
+def _check_hold_rule(params: dict) -> None:
+    """band 纪律内部自洽才能跑：出榜比进榜松、候选够填满仓位。
+
+    exit_rank < entry_rank 会让「刚卖掉的票又出现在买入候选里」，退化成高换手还自称低换手；
+    entry_rank < topk 则仓位永远凑不满，写在页面上的持仓只数是个假数。
+    两条都是「参数互相矛盾」，照跑就会产出没法解释的读数，所以直接拒。
+    """
+    if params["engine"] != "qlib":
+        return
+    if params["hold_rule"] == "dropout":
+        return
+    if params["exit_rank"] < params["entry_rank"]:
+        raise BizError(
+            f"hold_rule=band 要求出榜线不比进榜线严：exit_rank({params['exit_rank']}) "
+            f"需 ≥ entry_rank({params['entry_rank']})，否则跌出去的票当天又会被买回来",
+            code=400, status_code=400)
+    if params["entry_rank"] < params["topk"]:
+        raise BizError(
+            f"买入候选前 {params['entry_rank']} 只少于持仓 {params['topk']} 只，仓位永远凑不满；"
+            "请把 entry_rank 调到不小于 topk",
+            code=400, status_code=400)
 
 
 def _date(key: str, value) -> str:

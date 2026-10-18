@@ -27,10 +27,38 @@ def test_validate_rejects_target_amount_at_position_cap():
 
 
 def test_validate_defaults_are_self_consistent():
-    """缺省值本身必须过校验，否则页面点「发起回测」不填任何字段就会直接 400。"""
-    merged = merge(validate(DEFAULTS))
+    """页面不填任何字段（提交空 params）也要能跑，否则一点「发起回测」就 400。
+
+    注意这里喂的是 `{}` 而不是 DEFAULTS：DEFAULTS 里那些 qlib 不读的键（max_hold_days=10 等）
+    是内核的缺省值，不是用户提交的内容；把它们当提交喂进 validate 会被引擎白名单拒掉，
+    那正是「填了 qlib 不实现的参数」该有的反应。
+    """
+    merged = merge(validate({}))
     assert merged["target_amount"] < merged["capital"] * merged["position_cap_pct"]
     assert merged["start"] < merged["end"]
+    # 只切引擎、其余全缺省：qlib 侧的 topk/n_drop/hold_rule 都取得到值
+    qlib = merge(validate({"engine": "qlib"}))
+    assert qlib["hold_rule"] == "dropout" and qlib["topk"] == 30
+
+
+def test_validate_band_rule_params():
+    """band 纪律：出榜必须不比进榜严、候选够填满仓位、不能带着 n_drop 冒充换过票。"""
+    ok = validate({"engine": "qlib", "topk": 10, "hold_rule": "band",
+                   "entry_rank": 50, "exit_rank": 100})
+    assert ok["exit_rank"] == 100
+    with pytest.raises(BizError):
+        validate({"engine": "qlib", "hold_rule": "band", "entry_rank": 50, "exit_rank": 30})
+    with pytest.raises(BizError):
+        validate({"engine": "qlib", "hold_rule": "band", "topk": 30, "entry_rank": 20})
+    with pytest.raises(BizError):
+        validate({"engine": "qlib", "hold_rule": "band", "n_drop": 5})
+    with pytest.raises(BizError):
+        validate({"engine": "qlib", "hold_rule": "hold"})
+    # dropout 才读 n_drop；qlib 的那几个键自研内核一条都不读（整包 SimpleNamespace 喂进去会静默失效）
+    assert validate({"engine": "qlib", "n_drop": 3})["n_drop"] == 3
+    for key in ("hold_rule", "entry_rank", "exit_rank", "topk", "n_drop", "benchmark"):
+        with pytest.raises(BizError):
+            validate({"engine": "self", key: 10 if key != "benchmark" else "SH510300"})
 
 
 def test_validate_coerces_numeric_strings_and_bounds():
@@ -56,6 +84,16 @@ def test_merge_fills_defaults_and_ignores_unknown():
     assert merged["capital"] == 30000
     assert "unknown" not in merged
     assert merged["start"] == DEFAULTS["start"]
+
+
+def test_validate_engine_switch():
+    """引擎开关：缺省 self；喂进 qlib 不实现的止损要挡下来（收下就是「前端能填、回测跑不到」）。"""
+    assert merge(None)["engine"] == "self"
+    assert validate({"engine": "qlib", "topk": 30, "n_drop": 5})["engine"] == "qlib"
+    with pytest.raises(BizError, match="不支持这些参数"):
+        validate({"engine": "qlib", "stop_loss_pct": 0.05})
+    with pytest.raises(BizError, match="回测引擎只支持"):
+        validate({"engine": "wrong"})
 
 
 def test_form_spec_shape():

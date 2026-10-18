@@ -19,11 +19,19 @@ RECENT_TRADES = 30
 _TRADE_TEXT_KEYS = ("code", "name", "side", "date")
 
 
-def _import_run_backtest():
+def _import_kernel(engine: str):
+    """按引擎取回测内核：self 走 scripts/backtest_main.py，qlib 走仓库根的 stock_selector_qlib。
+
+    两条都是进程内 import，不是 HTTP——回测从来没有 HTTP 插件缝，Celery 任务名就是那条缝。
+    """
     root = Path(settings.backtest_root).resolve()
     for entry in (str(root), str(root / "scripts")):
         if entry not in sys.path:
             sys.path.insert(0, entry)
+    if engine == "qlib":
+        from stock_selector_qlib.backtest import run_qlib_backtest
+
+        return run_qlib_backtest
     from backtest_main import run_backtest
 
     return run_backtest
@@ -76,8 +84,9 @@ def _summary(result, params: dict) -> dict:
 
 @celery_app.task(bind=True, name=settings.backtest_task_name)
 def run_backtest(self, params: dict | None = None) -> dict:
-    run_backtest_kernel = _import_run_backtest()
     merged = merge_params(params)
+    engine = merged.get("engine") or "self"
+    kernel = _import_kernel(engine)
 
     def on_progress(idx: int, total: int, date: str) -> None:
         # 留 100% 给 SUCCESS，进度条不会停在「已完成」却仍在收尾
@@ -88,8 +97,16 @@ def run_backtest(self, params: dict | None = None) -> dict:
             "current_date": str(date),
         })
 
+    def on_stage(percent: int, stage: str) -> None:
+        # qlib 的 backtest_daily 一次性算完，没有逐日回调，只能报阶段进度
+        self.update_state(state="PROGRESS", meta={
+            "progress": min(99, int(percent)),
+            "stage": stage,
+        })
+
     try:
-        result = run_backtest_kernel(SimpleNamespace(**merged), progress_cb=on_progress)
+        result = kernel(SimpleNamespace(**merged),
+                        progress_cb=on_stage if engine == "qlib" else on_progress)
     except (Exception, SystemExit) as exc:
         raise RuntimeError(str(exc) or exc.__class__.__name__) from exc
     return _summary(result, merged)
