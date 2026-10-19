@@ -1,16 +1,17 @@
-"""批次 P：标签周期 A/B（T+1→T+5 / T+10 / T+20）。
+"""批次 P / Q：标签周期 A/B（T+1→T+5 / T+10 / T+20）。
 
-口径见 docs §20（写在读数之前）。模型侧由
-`scripts/qlib_run.py --label-horizon H --fixed-trees 61 --pool-file ...` 训练并导出到
-`data/qlib/model_batchP_labH/`；本脚本只做同一 band 纪律下的回测与读数：
+口径见 docs §20（P，旧池旧窗）与 §21（Q，独立样本复验：重挑池 + 训练窗推到 2023-12-31），
+均写在读数之前。模型侧由 `scripts/qlib_run.py --label-horizon H ...` 训练并导出到
+`data/qlib/model_batch{P,Q}_labH/`；本脚本只做同一 band 纪律下的回测与读数：
 
 - 三臂同一窗口、同一票池、同一成本、同一基准；交易纪律用 §10 A1 band 逐字相同
   （进 50 / 出 100 / 持 10），**不为长标签重调**——本批只隔离「标签」这一维。
-- 主判据：P20−P5 配对日净差（÷√20）；记录项：P10−P5（÷√10）。
+- 主判据：P20−P5（Q20−Q5）配对日净差（÷√20）；记录项：P10−P5（÷√10）。
 - 头部趋势诊断（前 10 名的 close≥MA20 比例、10/20 日收益中位数、分数与 20 日动量
   rank corr）是描述项，不参与裁决。
-- 仪器门：P5 必须复现研究臂（分数面板逐点相同 + A1 四读数/净值曲线复现 §G4）；
-  不过就整批读数作废。
+- 仪器门：P 批 = P5 复现研究臂（分数面板逐点相同 + A1 四读数/净值曲线复现 §G4）；
+  Q 批没有可复现的旧臂，改 §21.3 跨仪器互验（打分面板 vs qlib_run 落盘 pred_*.parquet
+  逐点比对）+ 三臂同池核对。不过就整批读数作废。
 """
 from __future__ import annotations
 
@@ -30,26 +31,41 @@ sys.path.insert(0, str(REPO))
 DATA = REPO / "data" / "qlib"
 RESEARCH = (DATA / "model_research_trainend2021").resolve()
 G_CURVES = DATA / "batch_G_curves.parquet"
-CURVE_OUT = DATA / "batch_P_curves.parquet"
-
-ARM_DIRS = {
-    "P5": "model_batchP_lab5",
-    "P10": "model_batchP_lab10",
-    "P20": "model_batchP_lab20",
-}
-ARM_DESC = {
-    "P5": "T+1→T+5（对照，复现研究臂）",
-    "P10": "T+1→T+10（记录臂）",
-    "P20": "T+1→T+20（主臂）",
-}
-HORIZON = {"P5": 5, "P10": 10, "P20": 20}
-REF = "P5"
-PRIMARY = "P20"
 BAND = {"hold_rule": "band", "topk": 10, "entry_rank": 50, "exit_rank": 100}
-MAIN_WINDOW = ("2023-01-03", "2026-10-15")
 EXPECT_A1 = {"total_return": 0.2938, "annual_return": 0.0709,
              "max_drawdown": -0.2236, "one_way_turnover": 0.1428}
 TOL_A1 = 0.001
+
+# 批次注册表（docs §20 / §21，预注册均写在看数之前）。
+# P：旧 2021 池、训到 2021-12-31、撮合 2023-01-03→2026-10-15、61 树、不设 seed。
+# Q：重挑池、训到 2023-12-31、撮合 2024-01-02→2026-10-16、三臂固定 141 树、seed 7。
+BATCHES = {
+    "P": {
+        "arms": {"P5": "model_batchP_lab5", "P10": "model_batchP_lab10",
+                 "P20": "model_batchP_lab20"},
+        "desc": {"P5": "T+1→T+5（对照，复现研究臂）",
+                 "P10": "T+1→T+10（记录臂）", "P20": "T+1→T+20（主臂）"},
+        "horizon": {"P5": 5, "P10": 10, "P20": 20},
+        "ref": "P5", "primary": "P20",
+        "main_window": ("2023-01-03", "2026-10-15"),
+        "halves": [("2023-01-03", "2024-12-31"), ("2025-01-01", "2026-10-15")],
+        "curve_out": DATA / "batch_P_curves.parquet",
+        "gate": "research", "section": "§20.4", "gate_section": "§20.3", "record": "P10",
+    },
+    "Q": {
+        "arms": {"Q5": "model_batchQ_lab5", "Q10": "model_batchQ_lab10",
+                 "Q20": "model_batchQ_lab20"},
+        "desc": {"Q5": "T+1→T+5（对照，新池新窗）",
+                 "Q10": "T+1→T+10（记录臂）", "Q20": "T+1→T+20（主臂）"},
+        "horizon": {"Q5": 5, "Q10": 10, "Q20": 20},
+        "ref": "Q5", "primary": "Q20",
+        # 2026-10-16 是面板末日；_snap_window 的撮合真值到 2026-10-15（见 docs §21.2 更正记录）
+        "main_window": ("2024-01-02", "2026-10-15"),
+        "halves": [("2024-01-02", "2025-05-30"), ("2025-06-03", "2026-10-15")],
+        "curve_out": DATA / "batch_Q_curves.parquet",
+        "gate": "pred_crosscheck", "section": "§21.4", "gate_section": "§21.3", "record": "Q10",
+    },
+}
 
 
 def _head_trend(panel: pd.Series, pool: list[str], warm_beg: str, end: str) -> dict:
@@ -92,12 +108,22 @@ def _head_trend(panel: pd.Series, pool: list[str], warm_beg: str, end: str) -> d
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--start", default=MAIN_WINDOW[0])
-    ap.add_argument("--end", default=MAIN_WINDOW[1])
+    ap.add_argument("--batch", default="P", choices=sorted(BATCHES),
+                    help="P=docs §20（旧池旧窗）；Q=docs §21（独立样本复验）")
+    ap.add_argument("--start", default=None)
+    ap.add_argument("--end", default=None)
     ap.add_argument("--capital", type=float, default=100_000_000.0)
     ap.add_argument("--benchmark", default="SH510300")
-    ap.add_argument("--arms", default="P5,P10,P20", help="逗号分隔，如 P5,P20")
+    ap.add_argument("--arms", default=None, help="逗号分隔，如 P5,P20；缺省=该批三臂全跑")
     args = ap.parse_args()
+
+    B = BATCHES[args.batch.upper()]
+    ARM_DIRS, ARM_DESC, HORIZON = B["arms"], B["desc"], B["horizon"]
+    REF, PRIMARY, MAIN_WINDOW, HALVES = B["ref"], B["primary"], B["main_window"], B["halves"]
+    REC, CURVE_OUT = B["record"], B["curve_out"]
+    args.start = args.start or MAIN_WINDOW[0]
+    args.end = args.end or MAIN_WINDOW[1]
+    args.arms = args.arms or ",".join(ARM_DIRS)
 
     # 先定 QLIB_MODEL_DIR 再 import：artifacts 在导入时读它；本批每臂再显式 load 自己的目录，
     # 这个默认值只是防止任何隐式路径落到线上 data/qlib/model。
@@ -146,48 +172,79 @@ def main() -> int:
         print(f"  撮合完成，耗时 {time.time() - t1:.0f} 秒，"
               f"卖出 {result.metrics['sell_count']} 笔，成交 {result.metrics['trade_count']} 笔")
 
-    # ---- 仪器门：P5 复现研究臂 ----
+    # ---- 仪器门（§20.3 / §21.3）----
     gate_ok = True
     if is_main and REF in panels:
-        print("\n=== 仪器门：P5 必须复现研究臂 ===")
-        ref_art = artifacts.load(RESEARCH)
-        ref_panel = score_panel(ref_art, beg, end)
-        joined = pd.concat([panels[REF].rename("p5"), ref_panel.rename("ref")],
-                           axis=1, join="inner").dropna()
-        diff = float((joined["p5"] - joined["ref"]).abs().max()) if len(joined) else float("inf")
-        ratio = len(joined) / max(len(ref_panel), 1)
-        ok = diff <= 1e-9 and ratio >= 0.999
-        gate_ok &= ok
-        print(f"  {'过' if ok else '不过'}  分数面板 vs 研究臂：对齐 {len(joined)}/{len(ref_panel)} 行"
-              f"（{ratio:.1%}），最大绝对差 {diff:.2e}（容差 1e-9）")
-
-        print("\n=== 仪器门：P5 的 A1 band 复现 §G4 ===")
-        m_a1 = dict(results[REF].metrics)
-        m_a1["one_way_turnover"] = (m_a1["turnover_daily"] or 0.0) / 2.0
-        for key, expected in EXPECT_A1.items():
-            got = m_a1.get(key)
-            delta = None if got is None else abs(got - expected)
-            ok = delta is not None and delta <= TOL_A1
-            gate_ok &= ok
-            print(f"  {'过' if ok else '不过'}  {key}: 本次 {got} vs §G4 {expected}"
-                  f"（差 {delta if delta is None else round(delta, 6)}，容差 {TOL_A1}）")
-        if G_CURVES.exists():
-            theirs = pd.read_parquet(G_CURVES)["A1"]
-            cj = pd.concat([curves[REF].rename("o"), theirs.rename("g")], axis=1, join="inner").dropna()
-            rel = float(((cj["o"] - cj["g"]).abs() / cj["g"].abs()).max()) if len(cj) else float("inf")
-            ok = rel <= 1e-6 and len(cj) == len(theirs)
-            gate_ok &= ok
-            print(f"  {'过' if ok else '不过'}  净值曲线 vs batch_G_curves['A1']："
-                  f"{len(cj)}/{len(theirs)} 天对齐，最大相对差 {rel:.2e}（容差 1e-6）")
+        if B["gate"] == "pred_crosscheck":
+            print("\n=== 仪器门（§21.3）：三臂同池 + 打分面板 vs qlib_run pred 跨仪器互验 ===")
+            pool_ref = (DATA / ARM_DIRS[REF] / "pool.txt").read_text()
+            same_pool = all((DATA / ARM_DIRS[n] / "pool.txt").read_text() == pool_ref
+                            for n in names)
+            gate_ok &= same_pool
+            print(f"  {'过' if same_pool else '不过'}  各臂 pool.txt 与 {REF} 逐字一致"
+                  f"（{len(pool_ref.splitlines())} 只）")
+            for name in names:
+                run_id = ARM_DIRS[name][len("model_"):]
+                pred_path = DATA / f"pred_{run_id}.parquet"
+                if not pred_path.exists():
+                    gate_ok = False
+                    print(f"  不过  {pred_path.name} 不存在，没法互验")
+                    continue
+                frame = pd.read_parquet(pred_path)
+                frame["datetime"] = pd.to_datetime(frame["datetime"])
+                theirs = frame.set_index(["datetime", "instrument"])["score"].sort_index()
+                theirs = theirs.loc[beg:end]  # 窗口外日子只进名单不撮合，不进分母（§21.6）
+                joined = pd.concat([panels[name].rename("ab"), theirs.rename("run")],
+                                   axis=1, join="inner").dropna()
+                diff = (joined["ab"] - joined["run"]).abs()
+                max_diff = float(diff.max()) if len(joined) else float("inf")
+                bad_frac = float((diff > 1e-6).mean()) if len(joined) else 1.0
+                ratio = len(joined) / max(len(theirs), 1)
+                ok = (max_diff <= 5e-2 and bad_frac <= 1e-4 and ratio >= 0.999)
+                gate_ok &= ok
+                print(f"  {'过' if ok else '不过'}  {name} 面板 vs pred_{run_id}：对齐 {len(joined)}/{len(theirs)} 行"
+                      f"（{ratio:.2%}），|差|>1e-6 占 {bad_frac:.4%}（容差 0.01%），"
+                      f"最大绝对差 {max_diff:.2e}（容差 5e-2，§21.6 float32/64 叶翻转）")
         else:
-            gate_ok = False
-            print(f"  不过  {G_CURVES} 不存在，没法做曲线级复现")
+            print("\n=== 仪器门：P5 必须复现研究臂 ===")
+            ref_art = artifacts.load(RESEARCH)
+            ref_panel = score_panel(ref_art, beg, end)
+            joined = pd.concat([panels[REF].rename("p5"), ref_panel.rename("ref")],
+                               axis=1, join="inner").dropna()
+            diff = float((joined["p5"] - joined["ref"]).abs().max()) if len(joined) else float("inf")
+            ratio = len(joined) / max(len(ref_panel), 1)
+            ok = diff <= 1e-9 and ratio >= 0.999
+            gate_ok &= ok
+            print(f"  {'过' if ok else '不过'}  分数面板 vs 研究臂：对齐 {len(joined)}/{len(ref_panel)} 行"
+                  f"（{ratio:.1%}），最大绝对差 {diff:.2e}（容差 1e-9）")
+
+            print("\n=== 仪器门：P5 的 A1 band 复现 §G4 ===")
+            m_a1 = dict(results[REF].metrics)
+            m_a1["one_way_turnover"] = (m_a1["turnover_daily"] or 0.0) / 2.0
+            for key, expected in EXPECT_A1.items():
+                got = m_a1.get(key)
+                delta = None if got is None else abs(got - expected)
+                ok = delta is not None and delta <= TOL_A1
+                gate_ok &= ok
+                print(f"  {'过' if ok else '不过'}  {key}: 本次 {got} vs §G4 {expected}"
+                      f"（差 {delta if delta is None else round(delta, 6)}，容差 {TOL_A1}）")
+            if G_CURVES.exists():
+                theirs = pd.read_parquet(G_CURVES)["A1"]
+                cj = pd.concat([curves[REF].rename("o"), theirs.rename("g")], axis=1, join="inner").dropna()
+                rel = float(((cj["o"] - cj["g"]).abs() / cj["g"].abs()).max()) if len(cj) else float("inf")
+                ok = rel <= 1e-6 and len(cj) == len(theirs)
+                gate_ok &= ok
+                print(f"  {'过' if ok else '不过'}  净值曲线 vs batch_G_curves['A1']："
+                      f"{len(cj)}/{len(theirs)} 天对齐，最大相对差 {rel:.2e}（容差 1e-6）")
+            else:
+                gate_ok = False
+                print(f"  不过  {G_CURVES} 不存在，没法做曲线级复现")
     elif is_main:
         gate_ok = False
-        print("\n  不过  主窗口没跑 P5，仪器门做不了（它是 §20 预注册的一部分）")
+        print(f"\n  不过  主窗口没跑 {REF}，仪器门做不了（它是 §20/§21 预注册的一部分）")
 
     if not gate_ok:
-        print("\n读数作废：仪器门没过，先修仪器，不打印收益（docs §20.3）。")
+        print(f"\n读数作废：仪器门没过，先修仪器，不打印收益（docs {B['gate_section']}）。")
         return 1
 
     # ---- 读数 ----
@@ -204,7 +261,7 @@ def main() -> int:
               f"平均持有 {m['avg_hold_days']} 天  成交 {m['trade_count']} 笔（卖出 {m['sell_count']}）")
         print(f"  期末 {m['end_value']:.0f}")
         yearly = _yearly(results[name].equity, bench_nav)
-        print("  分年：" + "  ".join(f"{y}: {r:.1%}/超{b:+.1%}" for y, r, b in yearly))
+        print("  分年：" + "  ".join(f"{y}: {r:.1%}/基准{b:+.1%}" for y, r, b in yearly))
 
     # ---- 头部趋势诊断（描述项）----
     if is_main:
@@ -217,9 +274,9 @@ def main() -> int:
     # ---- 配对与裁决 ----
     daily = {name: curves[name].pct_change().dropna() for name in names}
     pairs = [(name, REF) for name in names if name != REF and REF in daily]
-    halves = [("2023-01-03", "2024-12-31"), ("2025-01-01", "2026-10-15")]
+    halves = HALVES
 
-    print("\n=== 配对日净差（÷√H 按该臂标签周期折算；P5 是 5 日）===")
+    print(f"\n=== 配对日净差（÷√H 按该臂标签周期折算；{REF} 是 5 日）===")
     for a, b in pairs:
         pair = (daily[a] - daily[b]).dropna()
         print(f"  {a}−{b}: 均值 {pair.mean() * 1e4:+.1f} bp/日  t={_t(pair):.2f}"
@@ -239,18 +296,25 @@ def main() -> int:
         halves_pair = [pair.loc[lo:hi].mean() for lo, hi in halves]
         ann_p = results[PRIMARY].metrics.get("annual_return")
         ann_ref = results[REF].metrics.get("annual_return")
-        p10 = (daily["P10"] - daily[REF]).dropna() if "P10" in daily else None
+        rec = (daily[REC] - daily[REF]).dropna() if REC in daily else None
         conds = {
             "a 点估计>0": pair.mean() > 0,
             f"b 整窗 t÷√{HORIZON[PRIMARY]}≥2": t_adj >= 2,
             "c 两子窗同正": all(v > 0 for v in halves_pair),
-            "d 年化>P5": ann_p is not None and ann_ref is not None and ann_p > ann_ref,
-            "e P10−P5 方向为正": p10 is not None and p10.mean() > 0,
+            f"d 年化>{REF}": ann_p is not None and ann_ref is not None and ann_p > ann_ref,
+            f"e {REC}−{REF} 方向为正": rec is not None and rec.mean() > 0,
         }
         passed = all(conds.values())
-        verdict = ("进入独立样本复验（五条全过；仍不许直接上线）" if passed
-                   else "不成立/未证明（硬线未全过）")
-        print(f"\n=== 裁决（docs §20.4）：{PRIMARY} 主臂 = {verdict} ===")
+        only_b = not conds[f"b 整窗 t÷√{HORIZON[PRIMARY]}≥2"] and \
+            all(v for k, v in conds.items() if not k.startswith("b"))
+        if B["gate"] == "pred_crosscheck":
+            verdict = ("独立样本复验通过（五条全过；进换线批，本批研究臂不直接上线）" if passed else
+                       ("方向复现、证据不足（只剩 b 不过；§21.4 结果映射：换线与否由用户拍板）" if only_b else
+                        "不成立（标签周期维在两窗两池收口；§21.4）"))
+        else:
+            verdict = ("进入独立样本复验（五条全过；仍不许直接上线）" if passed
+                       else "不成立/未证明（硬线未全过）")
+        print(f"\n=== 裁决（docs {B['section']}）：{PRIMARY} 主臂 = {verdict} ===")
         for key, ok in conds.items():
             print(f"  {'过' if ok else '不过'}  {key}")
         print(f"  {PRIMARY}−{REF} 点估计 {pair.mean() * 1e4:+.1f} bp/日（÷√{HORIZON[PRIMARY]} "
