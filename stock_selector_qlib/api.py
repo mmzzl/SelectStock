@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,14 +42,20 @@ class RunRequest(BaseModel):
 # 必须显式声明而不是留 null：null 到 App 上是「—」或整行消失，使用者会把空白读成「没有风险」。
 _NA_FIELDS = ("risk_ex10_pp", "buy_ref_price", "buy_invalid_price", "posterior_verdict")
 
+
+def _label_horizon(label: str | None) -> int | None:
+    m = re.match(r"Ref\(\$close,\s*-(\d+)\)", str(label or ""))
+    return int(m.group(1)) if m else None
+
+
 _STRATEGY_DETAIL = {
     "name": STRATEGY,
-    "description": "qlib Alpha158 因子 + LightGBM：预测未来 5 日横截面收益，按分数排名出名单",
+    "description": "qlib Alpha158 因子 + LightGBM：预测未来 N 日横截面收益，按分数排名出名单（N 随线上模型 label，见 params.label_horizon）",
     "as_of": True,
     # 与 8002 不同：qlib 读自己的 bin 面板，不吃后端送来的日线，这两项只是元信息
     "required_columns": ["date", "open", "high", "low", "close", "volume"],
     "required_rows": serving.WARMUP_DAYS,
-    "params": {"universe": 300, "warmup_days": serving.WARMUP_DAYS, "label": "Ref($close,-5)/Ref($close,-1)-1"},
+    "params": {"universe": 300, "warmup_days": serving.WARMUP_DAYS, "label": "由线上模型 meta 提供"},
     # 本引擎不产这几项，逐条随名单一起声明（口径见 _NA_FIELDS）
     "na_fields": list(_NA_FIELDS),
 }
@@ -62,10 +69,15 @@ def strategy_list():
 @app.get("/api/strategy/detail")
 def strategy_detail():
     # universe 不写死：放开全市场之后它是每天变的，报成 300 会把口径说错
+    art = artifacts.load()
+    h = _label_horizon(art.meta.get("label"))
     _STRATEGY_DETAIL["params"]["universe"] = {
         "source": serving.POOL_SOURCE,
-        "pool_size": len(serving.score_pool(artifacts.load())),
+        "pool_size": len(serving.score_pool(art)),
     }
+    _STRATEGY_DETAIL["params"]["label"] = art.meta.get("label")
+    _STRATEGY_DETAIL["params"]["label_horizon"] = h
+    _STRATEGY_DETAIL["params"]["model"] = art.run_id
     return {"code": 0, "data": [_STRATEGY_DETAIL]}
 
 
@@ -88,11 +100,13 @@ def selector_run(req: RunRequest):
     except Exception:  # noqa: BLE001
         label_map = {}
     out = []
+    h = _label_horizon(art.meta.get("label"))
+    signal = f"预期{h}日收益排名" if h else "预期收益排名"
     for row in rows:
         out.append(SelectResult(
             code=row["code"],
             name=label_map.get(row["code"], ""),
-            signal="预期5日收益排名",
+            signal=signal,
             reason=(f"Alpha158+LightGBM 原始分 {row['score_raw']:.4f}，"
                     f"当日票池 {row['universe']} 只里排第 {row['rank']}；"
                     f"模型 {art.run_id}（训练止于 {art.meta.get('train_end')}，名单日为样本外）"),
