@@ -168,21 +168,26 @@ test("App 上传诊断串：probe 随 multipart 上去；base64 通道走 JSON",
                                       password: "138016", probe: "通道=base64" });
 });
 
-test("timeout 可按接口放宽，缺省仍是 20 秒", async () => {
+test("超时统一 20 秒：按次放宽的参数已经删掉了", async () => {
   const a = fakeAdapter();
   const c = createClient({ adapter: a, getToken: () => "T1" });
   await c.get("/api/v1/holdings");
   assert.equal(a.calls[0].timeout, 20000);
-  await c.get("/api/v1/selection/rank", { query: { codes: "600000" }, timeout: 60000 });
-  assert.equal(a.calls[1].timeout, 60000);
-  assert.match(a.calls[1].url, /\/api\/v1\/selection\/rank\?codes=600000/);
+  // 传了也不生效：唯一需要放宽的 rank 接口已经改成「没算好就立即回未就绪」，
+  // 读接口里不再有任何一条要等引擎计算。留着这个参数只会让人以为还能等下去。
+  await c.get("/api/v1/backtest/run", { timeout: 60000 });
+  assert.equal(a.calls[1].timeout, 20000);
+  assert.match(a.calls[1].url, /\/api\/v1\/backtest\/run/);
 });
 
-test("榜内名次查询：走 rank 路由、60 秒超时（冷缓存实测 34.5 秒，默认 20 秒每天第一次必失败）", async () => {
+test("榜内名次查询：走 rank 路由、用默认 20 秒（引擎不再在请求里等打分）", async () => {
   const { selectionApi } = await import("../src/api/selection.js");
   const seen = [];
-  const fake = { get: (p, o) => { seen.push([p, o]); return Promise.resolve({ supported: true, items: [] }); } };
+  const fake = { get: (p, o) => { seen.push([p, o]); return Promise.resolve({ supported: true, ready: false, items: [] }); } };
   const out = await selectionApi(fake).rank({ codes: "600000,510300" });
-  assert.deepEqual(seen, [["/api/v1/selection/rank", { query: { codes: "600000,510300" }, timeout: 60000 }]]);
+  // 曾经按次放宽到 60 秒，因为冷缓存要在请求里现算全池因子（实测 34.5 秒/299 只）。
+  // 2026-10-18 放开全市场那批把那条路改成了「未就绪立刻返回 + 后台预热」，这个前提没了。
+  assert.deepEqual(seen, [["/api/v1/selection/rank", { query: { codes: "600000,510300" } }]]);
   assert.equal(out.supported, true);
+  assert.equal(out.ready, false);
 });

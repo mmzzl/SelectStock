@@ -102,6 +102,43 @@ def _amount(fields: list[str]) -> float | None:
     return wan * 1e4 if wan is not None else None
 
 
+def parse_name(line: str) -> tuple[str, str] | None:
+    """只取 (六位代码, 现名)，不管价格是否有效。
+
+    为什么不能复用 parse()：它在 price 缺失/≤0 时返回 None，而停牌、退市整理期的票恰恰
+    就是 price 无效、名字最要紧的那一批（「退」字只在现名里看得到）。
+    """
+    body = line.split('="', 1)[1] if '="' in line else line
+    fields = body.rstrip('";\r\n ').split("~")
+    if len(fields) < 3:
+        return None
+    code, name = fields[F_CODE].strip(), fields[F_NAME].strip()
+    return (code, name) if code and name else None
+
+
+def fetch_names(codes: list[str], timeout: float = 8.0, retries: int = 2) -> dict[str, str]:
+    """批量取现名，返回 {六位代码: 名称}；取不到的代码不出现在结果里，由调用方决定兜底。
+
+    只读接口，一次 60 只；名字表过期时（本仓 data/csv/all_stock.csv 是 2026-05-24 的快照）
+    ST/*ST/退 的判定只能靠这里，否则「剔 ST」这道筛事实上什么都没筛。
+    """
+    syms = [symbol(c) for c in codes if str(c).strip()]
+    out: dict[str, str] = {}
+    for start in range(0, len(syms), BATCH):
+        chunk = syms[start:start + BATCH]
+        for attempt in range(retries + 1):
+            try:
+                for line in _request(chunk, timeout).splitlines():
+                    if line.strip() and (hit := parse_name(line)):
+                        out[hit[0]] = hit[1]
+                break
+            except (urllib.error.URLError, OSError, ValueError) as exc:
+                if attempt >= retries:
+                    logger.warning("腾讯现名分片失败（%d 只，已重试 %d 次）: %s",
+                                   len(chunk), attempt, exc)
+    return out
+
+
 def parse(line: str) -> dict | None:
     """解析一条 `v_sh600000="1~浦发银行~..."` 记录；结构不符返回 None。"""
     body = line.split('="', 1)[1] if '="' in line else line

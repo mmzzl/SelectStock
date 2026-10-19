@@ -24,9 +24,15 @@ logger = logging.getLogger("selection_service")
 _inflight: dict[str, str] = {}
 
 _RANK_MAX_CODES = 60
-# 第一次查名次（或刚重启过）会让引擎给整个票池打一遍分，比名单查询慢一个量级；
-# 命中当日缓存后是毫秒级。取 120 秒给冷缓存留余量，又不至于把连接占死。
-_RANK_TIMEOUT = 120
+# 名次查询现在是**毫秒级**的：引擎侧那条路由不等打分——当日榜单没算好时它立刻回
+# ready=false 并自己起后台预热（放开全市场后冷打分要几百秒，放进同步请求里只会被超时打断，
+# 而超时给页面的是「查询失败」，真实原因却是「还在算」）。这里留 20 秒是网络余量，不是打分余量。
+_RANK_TIMEOUT = 20
+# 后台作业等 8003 出名单的上限。**这不是「用户在页面上等 900 秒」**：start_run 建作业后立即
+# 返回 job_id，页面轮询状态，这个数只决定作业多久被判 failed。
+# 口径：全市场名单 + 1 亿流动性下限 ≈2,900 只，冷打分按只数从 550 秒（4,976 只实测，docs §17.4）
+# 推约 310 秒；900 秒是给「16:00 面板刚增量完、qlib 自己也在冷加载」的日子留余量。
+_SELECTOR_RUN_TIMEOUT = 900
 
 
 async def list_strategies() -> list[str]:
@@ -84,15 +90,19 @@ async def day_ranks(codes: list[str]) -> dict:
         # 而真实原因是查询失败。抛业务错，页面显示失败原因。
         raise BizError(f"榜内名次查询失败：HTTP {resp.status_code}")
     data = resp.json().get("data") or {}
+    ready = bool(data.get("ready", True))
     return {
         "supported": True,
+        # ready=false 是「当日榜单还在算」，不是「这些票都没上榜」，也不是查询失败。
+        # 放开全市场之后第一次冷打分要几百秒，这条同步链路只能把这个状态原样带给页面。
+        "ready": ready,
         "date": str(data.get("date") or ""),
         "pool_size": int(data.get("pool_size") or 0),
         "universe": int(data.get("universe") or 0),
         # 卖出线：回测 band 纪律用的同一个缺省值，前端拿它判「还在榜内 / 已跌出榜外」，
         # 不在前端写死 100
         "exit_rank": int(BACKTEST_DEFAULTS["exit_rank"]),
-        "message": "",
+        "message": "" if ready else str(data.get("message") or "当日榜单还在计算中，稍后再查"),
         "items": [{
             "code": str(it.get("code") or ""),
             "in_pool": bool(it.get("in_pool")),
@@ -174,7 +184,7 @@ def _num(value, integer: bool = False):
 
 async def _http_run(strategies: list[str]) -> list[dict]:
     url = settings.selector_url + "/api/selector/run"
-    async with httpx.AsyncClient(timeout=600) as client:
+    async with httpx.AsyncClient(timeout=_SELECTOR_RUN_TIMEOUT) as client:
         resp = await client.post(url, json={"strategies": strategies or None})
         resp.raise_for_status()
         body = resp.json()

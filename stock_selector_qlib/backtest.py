@@ -161,10 +161,13 @@ def _make_strategy(hold_rule: str, params: dict, signal: pd.Series):
         return TopkDropoutStrategy(topk=int(params["topk"]), n_drop=int(params["n_drop"]),
                                    signal=signal, only_tradable=False)
     return BandHoldStrategy(topk=int(params["topk"]), entry_rank=int(params["entry_rank"]),
-                            exit_rank=int(params["exit_rank"]), signal=signal)
+                            exit_rank=int(params["exit_rank"]), signal=signal,
+                            entry_gate=params.get("entry_gate"),
+                            scan_all=bool(params.get("scan_all", False)))
 
 
-def band_plan(scores: pd.Series, held, topk: int, entry_rank: int, exit_rank: int):
+def band_plan(scores: pd.Series, held, topk: int, entry_rank: int, exit_rank: int,
+              allowed: set | None = None, scan_all: bool = False):
     """「进榜严、出榜松」的名单，返回 `(要卖的代码, 要买的代码)`。
 
     `scores` 是当日全票池分数（index=代码），`held` 是当前持仓。还在前 `exit_rank` 名的继续拿，
@@ -173,6 +176,10 @@ def band_plan(scores: pd.Series, held, topk: int, entry_rank: int, exit_rank: in
 
     榜上没有行的票（停牌/断档）算「不在榜」=要卖；真停牌时交易所那关本来就挡单，
     所以这条不会把卖不掉的东西假装成已成交。
+
+    `allowed` / `scan_all` 是批次 O 的入场闸门（docs §18，默认 None / False 时行为与旧版逐字相同）：
+    给了 `allowed` 就只有里面的代码能买（不在集合里 = 关门）；`scan_all=True` 时补位扫描
+    不限前 `entry_rank` 名，从全榜按分数往下找——卖出/持有永远不看这两个参数。
     """
     ranked = scores.sort_values(ascending=False, kind="mergesort").index.tolist()
     in_band = set(ranked[:exit_rank])
@@ -180,7 +187,9 @@ def band_plan(scores: pd.Series, held, topk: int, entry_rank: int, exit_rank: in
     sells = [code for code in held if code not in in_band]
     slots = max(int(topk) - len(keep), 0)
     keep_set = set(keep)
-    buys = [code for code in ranked[:entry_rank] if code not in keep_set][:slots]
+    scan = ranked if scan_all else ranked[:entry_rank]
+    buys = [code for code in scan
+            if code not in keep_set and (allowed is None or code in allowed)][:slots]
     return sells, buys
 
 
@@ -190,13 +199,20 @@ class BandHoldStrategy(BaseSignalStrategy):
 
     没走 qlib 的 `WeightStrategyBase`：它按目标权重每天把每只票**再平衡回等权**，
     那笔减仓换手不属于「还在推荐就拿着」这个纪律。
+
+    `entry_gate` 是批次 O 的实验旋钮（docs §18）：一张 (datetime, instrument) 的 0/1 面板，
+    在**信号日 F**（= 成交日 T−1，与分数同一信息集）决定该票当天能不能买；NaN/缺行按关门算。
+    默认 None 时与旧版逐字相同。闸门只管买入，卖出/持有不受影响。
     """
 
-    def __init__(self, *, topk: int, entry_rank: int, exit_rank: int, **kwargs):
+    def __init__(self, *, topk: int, entry_rank: int, exit_rank: int,
+                 entry_gate: pd.Series | None = None, scan_all: bool = False, **kwargs):
         super().__init__(**kwargs)
         self.topk = int(topk)
         self.entry_rank = int(entry_rank)
         self.exit_rank = int(exit_rank)
+        self.entry_gate = entry_gate
+        self.scan_all = bool(scan_all)
 
     def generate_trade_decision(self, execute_result=None):
         trade_step = self.trade_calendar.get_trade_step()
@@ -208,9 +224,21 @@ class BandHoldStrategy(BaseSignalStrategy):
         if pred_score is None or pred_score.empty:
             return TradeDecisionWO([], self)
 
+        allowed = None
+        if self.entry_gate is not None:
+            allowed = set()
+            try:
+                day_gate = self.entry_gate.xs(pred_start_time, level="datetime")
+            except KeyError:
+                day_gate = None
+            if day_gate is not None:
+                allowed = {code for code, value in day_gate.items()
+                           if pd.notna(value) and float(value) >= 0.5}
+
         current = copy.deepcopy(self.trade_position)
         sells, buys = band_plan(pred_score, current.get_stock_list(), self.topk,
-                                self.entry_rank, self.exit_rank)
+                                self.entry_rank, self.exit_rank,
+                                allowed=allowed, scan_all=self.scan_all)
         cash = current.get_cash()
         orders = []
         for code in sells:

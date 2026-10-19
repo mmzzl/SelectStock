@@ -238,9 +238,10 @@ def test_ranks_by_code_never_invents_a_rank(art_dir, monkeypatch):
     而且这一种最容易被读成「跌出榜外该卖了」，所以要把原因写进 note。
     """
     monkeypatch.setattr(artifacts, "MODEL_DIR", art_dir)
-    monkeypatch.setattr(serving, "day_ranking", lambda refresh=False: _ranking_rows())
+    monkeypatch.setattr(serving, "day_ranking",
+                        lambda refresh=False, wait=True: _ranking_rows())
     out = serving.ranks_by_code(["600000", "000001", "510300"])
-    assert (out["date"], out["pool_size"], out["universe"]) == ("2026-10-16", 2, 1)
+    assert (out["ready"], out["date"], out["pool_size"], out["universe"]) == (True, "2026-10-16", 2, 1)
     by_code = {it["code"]: it for it in out["items"]}
     assert by_code["600000"] == {"code": "600000", "in_pool": True, "rank": 1,
                                  "universe": 1, "score_raw": 1.234}
@@ -262,7 +263,8 @@ def test_rank_route_shape_and_failure_is_not_empty_board(art_dir, monkeypatch):
     from stock_selector_qlib import api
 
     monkeypatch.setattr(artifacts, "MODEL_DIR", art_dir)
-    monkeypatch.setattr(serving, "day_ranking", lambda refresh=False: _ranking_rows())
+    monkeypatch.setattr(serving, "day_ranking",
+                        lambda refresh=False, wait=True: _ranking_rows())
     client = TestClient(api.app)
 
     data = client.get("/api/selector/rank?codes=600000,510300").json()
@@ -271,8 +273,162 @@ def test_rank_route_shape_and_failure_is_not_empty_board(art_dir, monkeypatch):
     # 没给代码就是空查询，不去打分（持仓页会先判有没有票再调）
     assert client.get("/api/selector/rank").json()["data"]["items"] == []
 
-    def _boom(refresh=False):
+    def _boom(refresh=False, wait=True):
         raise RuntimeError("面板里没有 2026-10-16")
 
     monkeypatch.setattr(serving, "day_ranking", _boom)
     assert client.get("/api/selector/rank?codes=600000").status_code == 502
+
+
+def test_rank_route_returns_not_ready_instead_of_blocking(art_dir, monkeypatch):
+    """当日榜单没算好时，同步的名次查询**立刻**回 ready=false 并起后台预热。
+
+    这条钉的是放开全市场之后最坏的一种坏法：冷打分要几百秒，如果它待在 HTTP 请求里，
+    App/后端会超时，页面拿到的是「查询失败」或空名单，而真实情况只是「还在算」——
+    空名单会被读成「持仓全跌出榜外，该卖了」。
+    """
+    from fastapi.testclient import TestClient
+
+    from stock_selector_qlib import api
+
+    monkeypatch.setattr(artifacts, "MODEL_DIR", art_dir)
+    warmed = []
+
+    def _not_ready(refresh=False, wait=True):
+        assert wait is False, "名次路由必须带 wait=False，否则它又在请求里等打分"
+        raise serving.RankingNotReady("2026-10-16 的全票池打分还在计算中，稍后再查名次")
+
+    monkeypatch.setattr(serving, "ranks_by_code", _not_ready)
+    monkeypatch.setattr(serving, "warm_ranking", lambda: warmed.append(1) or True)
+    data = TestClient(api.app).get("/api/selector/rank?codes=600000").json()["data"]
+    assert data["ready"] is False and data["items"] == [] and data["warming"] is True
+    assert "还在计算中" in data["message"]
+    assert warmed == [1]
+
+
+def test_day_ranking_scores_once_for_concurrent_cold_requests(art_dir, monkeypatch):
+    """两个请求同时撞上冷缓存只能算一遍：全市场一次要约 1 GB，各算一遍会把内存翻倍。"""
+    import threading
+
+    monkeypatch.setattr(artifacts, "MODEL_DIR", art_dir)
+    monkeypatch.setattr(serving, "_cache", {})
+    monkeypatch.setattr(serving, "init_qlib", lambda provider_uri=None: None)
+    monkeypatch.setattr(serving, "calendar", lambda: ["2026-10-16"])
+    calls = []
+    entered = threading.Event()
+    gate = threading.Event()
+
+    def fake_score_frame(art, beg=None, end=None, **kw):
+        calls.append(end)
+        entered.set()
+        gate.wait(5)
+        idx = pd.MultiIndex.from_tuples([(pd.Timestamp("2026-10-16"), "SH600000")],
+                                        names=["datetime", "instrument"])
+        return pd.Series([1.0], index=idx), {"pool": 1, "chunk": 1, "thin_rows": 0,
+                                             "no_row": 0, "scored": 1, "max_nan": 20}
+
+    monkeypatch.setattr(serving, "score_frame", fake_score_frame)
+    first = threading.Thread(target=serving.day_ranking)
+    first.start()
+    entered.wait(2)                       # 第一个人已经在算（并占着 _score_lock）
+    second = threading.Thread(target=serving.day_ranking)
+    second.start()
+    second.join(0.3)                      # 给第二个人 0.3 秒：没有单飞锁的话此刻他会再算一遍
+    assert not second.is_alive() or len(calls) == 1
+    assert len(calls) == 1
+    gate.set()
+    second.join(10)
+    first.join(10)
+    assert len(calls) == 1
+    assert serving.day_ranking()[0]["rank"] == 1     # 缓存命中，第三次也不重算
+
+
+def test_warm_ranking_starts_only_one_thread(art_dir, monkeypatch):
+    """预热也不能堆线程：每次未就绪的名次查询都起一个，等于把单飞锁的排队排成一排。"""
+    import threading
+
+    monkeypatch.setattr(serving, "_warming", False)
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_day_ranking(refresh=False, wait=True):
+        started.set()
+        release.wait(5)
+        return []
+
+    monkeypatch.setattr(serving, "day_ranking", fake_day_ranking)
+    assert serving.warm_ranking() is True
+    started.wait(2)
+    assert serving.warm_ranking() is False           # 已经有一个在跑
+    release.set()
+    for _ in range(200):
+        if not serving._warming:
+            break
+        threading.Event().wait(0.02)
+    assert serving._warming is False                 # 跑完必须放行，否则永远不再预热
+
+def test_score_pool_follows_the_pool_source_switch(art_dir, tmp_path, monkeypatch):
+    """放开全市场靠 QLIB_POOL_SOURCE 一个键；但名单文件缺失/为空必须是硬错，不能静默退回训练池。
+
+    静默退回就是「以为放开了、其实还在 300 只里选」，页面和台账都看不出差别。
+    """
+    monkeypatch.setattr(artifacts, "MODEL_DIR", art_dir)
+    art = artifacts.load()
+    monkeypatch.setattr(serving, "POOL_SOURCE", "model")
+    assert serving.score_pool(art) == ["SH600000", "SZ000001"]
+
+    listing = tmp_path / "universe.txt"
+    monkeypatch.setattr(serving, "UNIVERSE_FILE", listing)
+    monkeypatch.setattr(serving, "POOL_SOURCE", "universe")
+    with pytest.raises(RuntimeError, match="先跑 scripts/qlib_daily_universe"):
+        serving.score_pool(art)
+    listing.write_text("\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="空名单"):
+        serving.score_pool(art)
+    listing.write_text("SH600000\nSZ301165\n", encoding="utf-8")
+    assert serving.score_pool(art) == ["SH600000", "SZ301165"]
+
+
+def test_ranks_by_code_membership_uses_the_scored_pool(art_dir, tmp_path, monkeypatch):
+    """成员判定要跟「当天真的给谁打了分」一致，不是跟训练池一致。
+
+    universe 模式下 art.pool（训练池 300）早就不是打分名单了，拿它判会把
+    「今天确实打了分」的票说成「模型没给这只打过分」，持仓页就是一堆假「不在池里」。
+    """
+    monkeypatch.setattr(artifacts, "MODEL_DIR", art_dir)
+    listing = tmp_path / "universe.txt"
+    listing.write_text("SH600000\nSZ301165\n", encoding="utf-8")
+    monkeypatch.setattr(serving, "UNIVERSE_FILE", listing)
+    monkeypatch.setattr(serving, "POOL_SOURCE", "universe")
+    monkeypatch.setattr(serving, "day_ranking",
+                        lambda refresh=False, wait=True: _ranking_rows())
+
+    out = serving.ranks_by_code(["301165", "510300"])
+    assert out["pool_size"] == 2
+    by = {it["code"]: it for it in out["items"]}
+    assert by["301165"]["in_pool"] is True and by["301165"]["rank"] is None
+    assert "没有可打分的行情" in by["301165"]["note"]
+    assert by["510300"]["in_pool"] is False
+    assert "不在当前 2 只候选池里" in by["510300"]["note"]
+
+
+def test_health_and_detail_report_the_live_pool_caliber(art_dir, monkeypatch):
+    """G-N4：谁没进榜、为什么少，必须能从 /api/health 读到；/api/strategy/detail 的 universe 不能写死。
+
+    放开池之后 universe 是每天变的数，报成 300 就是把口径说错。
+    """
+    from fastapi.testclient import TestClient
+
+    from stock_selector_qlib import api
+
+    monkeypatch.setattr(artifacts, "MODEL_DIR", art_dir)
+    monkeypatch.setattr(serving, "POOL_SOURCE", "model")
+    monkeypatch.setattr(serving, "last_score_stats", lambda: {
+        "pool": 5013, "chunk": 1000, "thin_rows": 774, "no_row": 0,
+        "scored": 650678, "max_nan": 20, "universe": 5004, "seconds": 550.0})
+    client = TestClient(api.app)
+
+    health = client.get("/api/health").json()
+    assert health["scoring"]["thin_rows"] == 774 and health["scoring"]["universe"] == 5004
+    detail = client.get("/api/strategy/detail").json()["data"][0]
+    assert detail["params"]["universe"] == {"source": "model", "pool_size": 2}

@@ -361,6 +361,26 @@ async def test_day_ranks_passes_through_without_inventing(monkeypatch):
     assert "候选池" in by_code["510300"]["note"]
 
 
+async def test_day_ranks_not_ready_is_a_state_not_an_empty_board(monkeypatch):
+    """引擎回「当日榜单还在算」时，代理要原样带上 ready=false + 那句话。
+
+    放开全市场之后第一次冷打分要几百秒。这条同步链路**不许**把它变成空 items：
+    空 items 在持仓页和「你的票全跌出卖出线了」长得一模一样，而后者是会让人卖票的结论。
+    """
+    class _Warming(_RankClient):
+        async def get(self, url, params=None):
+            return _StubResponse({"code": 0, "data": {
+                "ready": False, "warming": True, "date": "", "pool_size": 0,
+                "universe": 0, "items": [],
+                "message": "2026-10-16 的全票池打分还在计算中，稍后再查名次"}})
+
+    monkeypatch.setattr(selection_service.settings, "selection_plugin_mode", "http")
+    monkeypatch.setattr(selection_service.httpx, "AsyncClient", _Warming)
+    out = await selection_service.day_ranks(["600000"])
+    assert out["supported"] is True and out["ready"] is False
+    assert out["items"] == [] and "还在计算中" in out["message"]
+
+
 async def test_day_ranks_404_is_explicitly_unsupported(monkeypatch):
     """自研内核（8002）没有这条路由：必须说「这个引擎不提供名次」，不能退化成空名单。
 

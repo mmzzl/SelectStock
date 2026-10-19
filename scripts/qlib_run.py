@@ -59,7 +59,17 @@ import pandas as pd
 QLIB_DIR = Path("/data/work/qlib_data/cn")
 CSV_DIR = Path("/data/work/qlib_data/csv")
 REPORT_DIR = Path("/data/work/SelectStock/data/qlib")
-LABEL = "Ref($close, -5) / Ref($close, -1) - 1"
+LABEL_FMT = "Ref($close, -{h}) / Ref($close, -1) - 1"
+
+
+def label_formula(horizon: int = 5) -> str:
+    """T+1→T+H 的收益表达式。历史批次一律 H=5；批次 P 只改这一个数。"""
+    if horizon < 1:
+        raise ValueError(f"标签周期至少 1 天，收到 {horizon}")
+    return LABEL_FMT.format(h=horizon)
+
+
+LABEL = label_formula(5)  # 历史读数口径；新代码请显式传 label，别依赖这个常量
 # 号段白名单：沪主板的 60/科创板 68、深主板 00、创业板 30；其余（15/16/18/5x 基金、
 # 399 指数、2xx B股、4/8 北交所）一律不进股票池
 STOCK_PREFIX = ("60", "68", "00", "30")
@@ -136,7 +146,7 @@ def write_instruments(qlib_dir: Path, name: str, symbols: list[str]) -> Path:
     return path
 
 
-def build_dataset(qlib, instruments: str, fit_end: str, segments: dict):
+def build_dataset(qlib, instruments: str, fit_end: str, segments: dict, label: str = LABEL):
     """Alpha158 因子 + 训练段拟合的稳健标准化。fit 窗口只到 fit_end，绝不越过训练段末尾。"""
     from qlib.contrib.data.handler import Alpha158
     from qlib.data.dataset import DatasetH
@@ -148,7 +158,7 @@ def build_dataset(qlib, instruments: str, fit_end: str, segments: dict):
         end_time=segments["test"][1],
         fit_start_time=segments["train"][0],
         fit_end_time=fit_end,
-        label=[LABEL],
+        label=[label],
         infer_processors=[
             RobustZScoreNorm(fit_start_time=segments["train"][0], fit_end_time=fit_end,
                              fields_group="feature", clip_outlier=True),
@@ -410,6 +420,9 @@ def main() -> int:
                     help="关掉早停、恰好长 N 棵树。训练段吃到日历末尾时验证段必然落在训练段之内，"
                          "早停等于在自家数据上挑轮数；此时树数必须由人定，且应对齐已上线那份的实测棵数，"
                          "否则「换了更新的数据」和「换了模型大小」会混在一起")
+    ap.add_argument("--label-horizon", type=int, default=5,
+                    help="标签周期 H：T+1→T+H 的收益（默认 5 = 历史口径）。批次 P 用它比较 T+10/T+20；"
+                         "改了它就是改训练目标，与历史读数不可直接比")
     ap.add_argument("--smoke", action="store_true", help="200 只 + 短窗，只验管道")
     ap.add_argument("--backtest", action="store_true")
     ap.add_argument("--topk", type=int, default=30)
@@ -417,6 +430,9 @@ def main() -> int:
     ap.add_argument("--benchmark", default="SH510300",
                     help="基准：面板里唯一贯穿 2015-12→2026-10 的大盘代理。"
                          "399xxx 指数只有 2025-01 之后的 419 行，2021/2023 窗口直接无数据")
+    ap.add_argument("--skip-selection", action="store_true",
+                    help="不写 data/qlib/selection_<date>.parquet。研究批次跑数时用：那一天的名单"
+                         "可能是上一批的审计产物，别让研究臂静默覆盖")
     ap.add_argument("--to-mongo", action="store_true", help="把最新选股名单 upsert 进 qlib_top_stocks")
     ap.add_argument("--run-id", default="")
     ap.add_argument("--export-model", metavar="DIR", nargs="?", const="", default=None,
@@ -439,6 +455,10 @@ def main() -> int:
         args.pool_end = str(pd.Timestamp(args.pool_end).date())
     if args.fixed_trees is not None and args.fixed_trees < 1:
         raise SystemExit(f"--fixed-trees 至少 1 棵，给了 {args.fixed_trees}")
+    try:
+        label = label_formula(args.label_horizon)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     run_id = args.run_id or pd.Timestamp.now().strftime("%Y%m%d-%H%M%S")
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -488,7 +508,7 @@ def main() -> int:
     }
     # 用落盘文件的实际名（已小写），不要用传进来的 --inst-name 原样
     # fit_end 必须是**训练段**末尾（稳健标准化统计的拟合窗），不能跟着 --pool-end 走
-    dataset = build_dataset(qlib, inst_file.stem, train_end_eff, segments)
+    dataset = build_dataset(qlib, inst_file.stem, train_end_eff, segments, label=label)
 
     from qlib.contrib.model.gbdt import LGBModel
 
@@ -501,6 +521,7 @@ def main() -> int:
                      colsample_bytree=0.6, subsample=0.7, reg_alpha=10.0, reg_lambda=10.0,
                      n_estimators=600, num_thread=4, verbose=-1, **gbdt_kwargs, **round_kwargs)
     print(f"训练 {segments['train']} / 验证 {segments['valid']} / 测试 {segments['test']}")
+    print(f"标签 T+1→T+{args.label_horizon}：{label}")
     if args.fixed_trees:
         import lightgbm as lgb
 
@@ -533,7 +554,7 @@ def main() -> int:
             "run_id": run_id,
             "train_end": args.train_end,
             "segments": {k: [str(x) for x in v] for k, v in segments.items()},
-            "label": LABEL,
+            "label": label,
             "universe": args.universe,
             "pool_size": len(pool),
             "pool_file": args.pool_file,
@@ -569,7 +590,7 @@ def main() -> int:
         "pool_end": pool_end_eff,
         "fixed_trees": args.fixed_trees,
         "holdout": holdout,
-        "label_formula": LABEL,
+        "label_formula": label,
         "ic_valid": ic_summary(ic_valid) if ic_valid is not None else None,
         "ic_test": ic_summary(ic_test) if ic_test is not None else None,
     }
@@ -618,7 +639,7 @@ def main() -> int:
     else:
         # --smoke 的测试段止于 2021-12-31，日历最后一天根本没有分数
         tail = pd.Series(dtype=float)
-    if len(tail):
+    if len(tail) and not args.skip_selection:
         top = tail.sort_values(ascending=False).head(args.topk)
         selections = [{"code": str(inst)[2:], "qlib_symbol": str(inst),
                        "score": round(float(score), 6)} for inst, score in top.items()]

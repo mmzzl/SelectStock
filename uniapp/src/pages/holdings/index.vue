@@ -22,8 +22,9 @@ onShow(async () => {
     // 汇总条与列表分开取：插件不可用时只降级掉汇总，不影响持仓列表
     try { summary.value = toPnlView(await holdings.pnl({ natural_day: today() })); } catch { summary.value = null; }
   } catch (e) { err.value = e.message; } finally { loading.value = false; }
-  // 名次不挂在 loading 上：引擎冷缓存时这一次要给整个票池打分（300 只 × 130 天因子），
-  // 比持仓列表慢一个量级。先让列表出来，名次到了再填，取不到就只说名次失败。
+  // 名次不挂在 loading 上：这条接口现在**不会等打分**（引擎当日榜单没算好时立刻回 ready=false
+  // 并自己起后台预热，全市场约 2,900 只冷打分要几百秒，放进请求里一定被超时打断）。
+  // 先让持仓列表出来，名次到了再填，取不到就只说名次这件事的状态。
   loadRanks();
 });
 
@@ -49,6 +50,9 @@ const rankHead = computed(() => {
   const m = rankMeta.value;
   if (!m) return rankErr.value ? `榜内名次没取到：${rankErr.value}` : "";
   if (!m.supported) return `榜内名次 · ${m.message || "当前选股引擎不提供榜内名次"}`;
+  // ready=false：引擎当日还没算完全票池打分（放开全市场后第一次要几百秒），它正在后台算。
+  // 这一句必须和「都没上榜」分开显示——后者会让人以为持仓集体跌出卖出线该卖了。
+  if (m.ready === false) return `榜内名次 · ${m.message || "当日榜单还在计算中"} · 稍后重进本页`;
   return `榜内名次是 ${m.date} 收盘后引擎对 ${m.pool_size} 只候选池的排序`
     + `（当日打得分出 ${m.universe} 只）· 卖出线取回测同一条：前 ${m.exit_rank} 名`;
 });

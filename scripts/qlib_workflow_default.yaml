@@ -1,0 +1,61 @@
+# qlib 官方 benchmark 的默认 LightGBM+Alpha158 配置，照原样跑一遍看它自己报的 IC 是多少。
+# 母本：/data/work/qlib/examples/benchmarks/LightGBM/workflow_config_lightgbm_Alpha158.yaml
+# 只有下面 5 处是被本机数据逼着改的（改的都是数据边界，不改建模口径），其余超参/标签/归一化一律原值：
+#   1. provider_uri：面板在 /data/work/qlib_data/cn，不是 ~/.qlib/qlib_data/cn_data
+#   2. market：面板里没有 csi300/csi500 成分股名单，只能用实盘池 live2026jun（300 只，按训练段流动性挑）
+#   3. benchmark：SH000300 不存在（面板无 000xxx 指数），换 SH510300；本配置只跑 IC，不含组合回测
+#   4. 日期：本面板日历从 2015-01-05 起，原 yaml 的 2008-01-01 会拿到空训练段，整段往后平移
+#   5. kernels: 1：默认按核数并行加载会把峰值内存抬过本机上限（原 yaml 没这个键，纯粹是硬件限制）
+# 注意口径差：**标签是 1 日收益 Ref($close,-2)/Ref($close,-1)-1**（我们线上那条是 5 日），
+# 标签归一化是 **CSZScoreNorm**（线上是 CSRankNorm），特征归一化是 **ZScoreNorm+Fillna**（线上是 RobustZScoreNorm）。
+# 1 日标签相邻不重叠 ⇒ 这里的逐日 IC **不需要 ÷√5**。
+qlib_init:
+    provider_uri: /data/work/qlib_data/cn
+    region: cn
+    kernels: 1
+    uri: /data/work/SelectStock/data/qlib/mlruns_default
+market: &market live2026jun
+benchmark: &benchmark SH510300
+data_handler_config: &data_handler_config
+    start_time: 2015-01-01
+    end_time: 2026-10-16
+    fit_start_time: 2015-01-01
+    fit_end_time: 2020-12-31
+    instruments: *market
+task:
+    model:
+        class: LGBModel
+        module_path: qlib.contrib.model.gbdt
+        kwargs:
+            loss: mse
+            colsample_bytree: 0.8879
+            learning_rate: 0.2
+            subsample: 0.8789
+            lambda_l1: 205.6999
+            lambda_l2: 580.9768
+            max_depth: 8
+            num_leaves: 210
+            num_threads: 12
+    dataset:
+        class: DatasetH
+        module_path: qlib.data.dataset
+        kwargs:
+            handler:
+                class: Alpha158
+                module_path: qlib.contrib.data.handler
+                kwargs: *data_handler_config
+            segments:
+                train: [2015-01-01, 2020-12-31]
+                valid: [2021-01-01, 2022-12-31]
+                test: [2023-01-01, 2026-10-16]
+    record:
+        - class: SignalRecord
+          module_path: qlib.workflow.record_temp
+          kwargs:
+            model: <MODEL>
+            dataset: <DATASET>
+        - class: SigAnaRecord
+          module_path: qlib.workflow.record_temp
+          kwargs:
+            ana_long_short: False
+            ann_scaler: 252

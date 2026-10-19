@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -58,6 +59,10 @@ PLUGIN_BASE = "http://172.17.0.1:8003"
 CSV_UPDATE_DIR = Path("/data/work/qlib_data/csv_update")
 SNAPSHOT_ROOT = Path("/data/work/qlib_data/backup_pool")
 SNAPSHOT_KEEP = 5
+UNIVERSE_FILE = REPO / "data" / "qlib" / "universe.txt"
+# 预热那一步是**真的等一次打分**：训练池 300 只约 35 秒，放开全市场 5,000 只实测 550 秒，
+# 300 秒的旧超时会在服务端还算对的情况下把脚本判成失败。
+CHECK_TIMEOUT = int(os.environ.get("QLIB_CHECK_TIMEOUT", "1200"))
 
 logger = logging.getLogger("qlib_update_bin")
 
@@ -69,9 +74,18 @@ def panel_calendar(qlib_dir: Path) -> list[str]:
     return [line.strip()[:10] for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def pool_symbols() -> list[str]:
-    """票池取模型产物里的 pool.txt，再加基准——训练用哪批票，增量就补哪批票。"""
-    syms = list(artifacts.load().pool)
+def pool_symbols(scope: str) -> list[str]:
+    """增量要补哪批票。scope=pool 用模型产物里的 pool.txt（训练用哪批补哪批）；
+    scope=universe 用 scripts/qlib_daily_universe.py 每天重算的全市场名单。
+    放开全市场时必须走后者，否则 17:30 会给票池外的票打**上一个交易日**的因子，
+    而且分数看着完全正常——这是本脚本头一段写的最难发现的那种坏法。"""
+    if scope == "universe":
+        if not UNIVERSE_FILE.exists():
+            raise RuntimeError(f"缺少全市场名单 {UNIVERSE_FILE}，先跑 scripts/qlib_daily_universe.py")
+        syms = [line.strip() for line in UNIVERSE_FILE.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+    else:
+        syms = list(artifacts.load().pool)
     bench = symbol(BENCHMARK)
     if bench not in syms:
         syms.append(bench)
@@ -166,9 +180,12 @@ def refresh_plugin(base_url: str) -> dict:
 
 
 def check_plugin(base_url: str, expect_date: str, topk: int = 3) -> int:
-    """真出一次名单，确认打分用的就是新交易日。返回名单条数。"""
+    """真出一次名单，确认打分用的就是新交易日。返回名单条数。
+
+    这一步同时是 17:30 那轮的预热：缓存键是 (run_id, date)，预热过就不再冷算。
+    """
     resp = requests.post(f"{base_url.rstrip('/')}/api/selector/run",
-                         json={"strategies": None, "topk": topk}, timeout=300)
+                         json={"strategies": None, "topk": topk}, timeout=CHECK_TIMEOUT)
     resp.raise_for_status()
     rows = list(resp.json().get("data") or [])
     if not rows:
@@ -199,10 +216,17 @@ def main() -> int:
     parser.add_argument("--max-workers", type=int, default=2, help="dump_bin 的进程数（内存有限，别用默认 16）")
     parser.add_argument("--plugin-base", default=PLUGIN_BASE)
     parser.add_argument("--no-refresh", action="store_true", help="不通知 8003 清缓存")
-    parser.add_argument("--check-plugin", action="store_true", help="更新完真跑一次打分验日期（约 35 秒）")
+    parser.add_argument("--check-plugin", action="store_true", help="更新完真跑一次打分验日期（训练池约 35 秒，全市场约 9 分钟；这一步同时预热 17:30 的缓存）")
     parser.add_argument("--no-snapshot", action="store_true", help="不备份票池 bin（省 30 MB/天）")
     parser.add_argument("--dry-run", action="store_true", help="只做检查与导出，不写面板")
     parser.add_argument("--no-alert", action="store_true")
+    parser.add_argument("--scope", choices=("pool", "universe"),
+                        default=os.environ.get("QLIB_UPDATE_SCOPE", "pool"),
+                        help="pool=只补模型票池那 300 只（现状）；universe=补 data/qlib/universe.txt 的全市场名单。"
+                             "也可以由 QLIB_UPDATE_SCOPE 给：根调度器解析 script:// 的正则里字符类没有 =，"
+                             "写 --scope=universe 会被静默截成 --scope 而报错，环境变量这条路不会被截")
+    parser.add_argument("--chunk", type=int, default=800,
+                        help="每批送进 dump_update 的只数；全市场必须分批，见导出那段的注释")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -216,11 +240,10 @@ def main() -> int:
     db = mongo_db()
     col = db["stock_kline"]
     cal = trading_calendar(col)
-    syms = pool_symbols()
-    codes = [s[2:] for s in syms]
+    syms = pool_symbols(args.scope)
     print(f"面板日历：{len(panel)} 天，止于 {panel[-1]}")
     print(f"库内日历：{len(cal)} 天，止于 {cal[-1]}")
-    print(f"票池：{len(syms)} 只（含基准 {symbol(BENCHMARK)}）")
+    print(f"名单（scope={args.scope}，chunk={args.chunk}）：{len(syms)} 只（含基准 {symbol(BENCHMARK)}）")
 
     if cal[-1] <= panel[-1]:
         print("库里没有比面板更新的日子，无需更新。")
@@ -241,17 +264,26 @@ def main() -> int:
         return 0
 
     try:
-        stats = export_window(col, codes, cal, lo, hi, csv_dir)
-        print("窗口导出：" + ", ".join(f"{k}={v}" for k, v in stats.items()))
-        if not stats["files"]:
-            raise RuntimeError("一只票都没导出来，票池代码和库里的 code 对不上？")
-
         snap = None
         if not args.no_snapshot:
             snap = snapshot(qlib_dir, syms, SNAPSHOT_ROOT / f"{panel[-1]}_{pd.Timestamp.now():%Y%m%d%H%M%S}")
             print(f"票池 bin 已备份到 {snap}")
 
-        run_dump_update(csv_dir, qlib_dir, args.max_workers)
+        # 分批：dump_bin 的 DumpDataUpdate 会把 csv 目录里的**所有**文件一次性 concat 进内存
+        # （源码注释自己写着 "NOTE: Need more memory"），所以全市场名单必须切着喂，
+        # 每批导完立刻落盘，临时目录里永远只留这一批。
+        chunks = [syms[i: i + args.chunk] for i in range(0, len(syms), args.chunk)]
+        totals = {"files": 0, "all_nan": 0, "dirty_dropped": 0}
+        for ci, chunk in enumerate(chunks, 1):
+            stats = export_window(col, [s[2:] for s in chunk], cal, lo, hi, csv_dir)
+            for key in totals:
+                totals[key] += stats[key]
+            print(f"[{ci}/{len(chunks)}] 批次 {len(chunk)} 只："
+                  + ", ".join(f"{k}={stats[k]}" for k in ("files", "all_nan", "dirty_dropped")))
+            if not stats["files"]:
+                raise RuntimeError("一只票都没导出来，票池代码和库里的 code 对不上？")
+            run_dump_update(csv_dir, qlib_dir, args.max_workers)
+        print(f"窗口导出合计：{totals}，窗口行数={stats['rows']}")
 
         new_panel = panel_calendar(qlib_dir)
         if new_panel[-1] != cal[-1]:

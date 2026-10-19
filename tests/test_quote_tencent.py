@@ -67,6 +67,36 @@ def test_zero_price_record_is_dropped():
     assert tencent.parse('v_sh600000="1~~600000~0.00~9.5~"') is None
 
 
+def test_parse_name_keeps_what_parse_drops():
+    """停牌/退市票 price 无效，parse() 丢整条，但「退」字只写在现名里——parse_name 必须留下它。"""
+    line = 'v_sh688121="1~*ST卓然~688121~0.00~0.81~"'
+    assert tencent.parse(line) is None
+    assert tencent.parse_name(line) == ("688121", "*ST卓然")
+    assert tencent.parse_name('v_sh688121="1~"') is None       # 没有代码/名字就弃
+    assert tencent.parse_name('v_sh688121="1~~688121~"') is None  # 名字空串也弃
+
+
+def test_fetch_names_batches_and_survives_a_failed_chunk(monkeypatch):
+    calls = []
+
+    def fake_request(syms, timeout):
+        calls.append(list(syms))
+        if syms[0].endswith("600000"):
+            raise OSError("connection reset")
+        lines = []
+        for s in syms:
+            if s.endswith("000004"):
+                lines.append(SZ000004)
+            elif s.endswith("300003"):
+                lines.append('v_sz300003="1~立创传媒~300003~0.00~9.5~"')
+        return "\n".join(lines)
+
+    monkeypatch.setattr(tencent, "_request", fake_request)
+    monkeypatch.setattr(tencent, "BATCH", 1)
+    out = tencent.fetch_names(["600000", "000004", "300003"], retries=1)
+    assert out == {"000004": "国华退", "300003": "立创传媒"}   # 失败那片不出现，不编名字
+
+
 def test_short_record_returns_none_not_partial():
     """字段不够长（接口异常/被截断）时整条丢弃，不给半成品快照。"""
     assert tencent.parse('v_sh600000="1~浦发银行~600000~9.67~9.54~"') is None

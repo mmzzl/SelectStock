@@ -6,7 +6,8 @@ export const selectionApi = (c) => ({
   runs: (query = {}) => c.get("/api/v1/selection/runs", { query }),
   runDetail: (jobId) => c.get(`/api/v1/selection/runs/${jobId}`),
   // 持仓的「当日榜内名次」：引擎对当天整个票池的名次，和名单里的 rank 不是一个口径。
-  // 超时放宽到 60 秒：8003 冷缓存时这一次要现算全池因子（2026-10-18 实测 34.5 秒/299 只），
-  // 默认 20 秒会在每天第一次查的时候必然失败。
-  rank: (query = {}) => c.get("/api/v1/selection/rank", { query, timeout: 60000 }),
+  // 用默认 20 秒就够：这条链路不等打分——当日榜单没算好时引擎立刻回 ready=false 并自己起
+  // 后台预热（放开全市场后冷打分要几百秒，放进请求里必然被超时打断，2026-10-18 曾因此放宽到
+  // 60 秒，那个前提已经不存在了）。
+  rank: (query = {}) => c.get("/api/v1/selection/rank", { query }),
 });

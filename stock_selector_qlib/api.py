@@ -61,6 +61,11 @@ def strategy_list():
 
 @app.get("/api/strategy/detail")
 def strategy_detail():
+    # universe 不写死：放开全市场之后它是每天变的，报成 300 会把口径说错
+    _STRATEGY_DETAIL["params"]["universe"] = {
+        "source": serving.POOL_SOURCE,
+        "pool_size": len(serving.score_pool(artifacts.load())),
+    }
     return {"code": 0, "data": [_STRATEGY_DETAIL]}
 
 
@@ -114,12 +119,23 @@ def selector_rank(codes: str = Query(default="", description="逗号分隔的 6 
 
     这条路由不在 8002 的三条契约里，是 qlib 独有的读接口（自研内核没有"榜"这个概念）。
     池外持仓返回 `in_pool=false` + 一句原因，绝不返回一个补出来的名次。
+
+    **这条是同步接口，所以它绝不等打分**：放开全市场之后第一次冷打分要几百秒，
+    把它放进请求里只会被 App/后端的超时打断，打断后页面拿到的是「查询失败」或空名单，
+    而真实情况是「还在算」。未就绪就立刻返回 `ready=false` 并起一个后台预热线程。
     """
     picked = [c.strip() for c in codes.split(",") if c.strip()][:60]
     if not picked:
-        return {"code": 0, "data": {"date": "", "pool_size": 0, "universe": 0, "items": []}}
+        return {"code": 0, "data": {"ready": True, "date": "", "pool_size": 0,
+                                    "universe": 0, "items": []}}
     try:
-        return {"code": 0, "data": serving.ranks_by_code(picked)}
+        return {"code": 0, "data": serving.ranks_by_code(picked, wait=False)}
+    except serving.RankingNotReady as exc:
+        started = serving.warm_ranking()
+        logger.info("榜单未就绪，后台预热%s：%s", "已起" if started else "已在跑", exc)
+        return {"code": 0, "data": {"ready": False, "warming": started, "date": "",
+                                    "pool_size": 0, "universe": 0, "items": [],
+                                    "message": str(exc)}}
     except Exception as exc:  # noqa: BLE001 - 查不到名次必须报错，不能返回「都没上榜」
         logger.exception("qlib 名次查询失败")
         raise HTTPException(status_code=502, detail=f"qlib 名次查询失败：{exc}") from exc
@@ -144,6 +160,7 @@ def health():
     status = {"status": "ok", "engine": STRATEGY}
     try:
         status["model"] = artifacts.load().describe()
+        status["scoring"] = serving.last_score_stats()
     except Exception as exc:  # noqa: BLE001
         status["status"] = "no_model"
         status["message"] = str(exc)
