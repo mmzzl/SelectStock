@@ -72,6 +72,9 @@ from stock_selector.fundflow.store import (
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = ROOT / "data" / "fund_flow"
+# 站点 JS 种的匿名 Cookie（refresh_em_cookie.py 落盘）。实测硬窗口边缘带它的存活率
+# 14/15 vs 裸指纹 7/15（2026-10-20 交错 A/B）；文件不存在就维持原样裸跑。
+COOKIE_PATH = OUTPUT_DIR / "em_cookie.txt"
 KLINE_DIR = ROOT / "data" / "stock_kline"
 SNAPSHOT_DIR = ROOT / "data" / "market_snapshot"
 # 旧「逐只一文件」目录。2026-10-17 已全量摊成日分区并整体移到
@@ -159,12 +162,17 @@ def http_session():
             from curl_cffi import requests as cffi_requests
 
             _SESSION = cffi_requests.Session(impersonate="chrome")
-            _SESSION.headers.update({"Referer": "https://quote.eastmoney.com/"})
+            # Referer 与真实采集页一致（data.eastmoney.com/zjlx/detail.html）：
+            # Cookie 是那页 JS 种的，来源页对不上会被识别成"有身份没来历"的怪会话
+            _SESSION.headers.update({"Referer": "https://data.eastmoney.com/zjlx/detail.html"})
             _CATCH = (cffi_requests.exceptions.RequestException, ValueError)
         else:
             _SESSION = requests.Session()
             _SESSION.headers.update(_HEADERS)
             _CATCH = (requests.RequestException, ValueError)
+        if COOKIE_PATH.exists():
+            # Cookie 头要在 impersonate 的指纹头之后覆盖，与浏览器实际发出顺序一致
+            _SESSION.headers["Cookie"] = COOKIE_PATH.read_text(encoding="utf-8").strip()
     return _SESSION
 
 
@@ -269,6 +277,28 @@ def build_daily_frame(rows: list[dict], *, trade_date: str, data_ts: str) -> pd.
     return normalize_and_flag(frame, data_ts=data_ts, collected_at=now_iso())
 
 
+def _try_refresh_cookie() -> bool:
+    """被节流时现种一份新浏览器身份（headless Chrome 跑站点 JS），成功=True。
+
+    起不了浏览器（没装 selenium/driver 下载失败）不算错误：维持拉长间隔的原路，
+    绝不为刷 Cookie 把整轮采集拖死。
+    """
+    try:
+        import refresh_em_cookie
+        cookie = refresh_em_cookie.seed_cookie_string()
+        COOKIE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = COOKIE_PATH.with_suffix(".tmp")
+        tmp.write_text(cookie, encoding="utf-8")
+        tmp.replace(COOKIE_PATH)
+        logger.info("[daily] 已现种浏览器身份（%d 项 Cookie），换会话重试",
+                    cookie.count("="))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[daily] 现种 Cookie 失败（%s: %s），维持原节奏",
+                       type(exc).__name__, exc)
+        return False
+
+
 def run_daily(*, limit_pages: int = 0, max_pages: int = 0, page_sleep: float | None = None,
               force: bool = False, known: dict[str, int] | None = None,
               sleeper=time.sleep) -> dict:
@@ -323,12 +353,22 @@ def run_daily(*, limit_pages: int = 0, max_pages: int = 0, page_sleep: float | N
     failed_pages: list[int] = []
     sleep = PAGE_SLEEP if page_sleep is None else page_sleep
     streak = 0
+    cookie_refreshed = False
     started = time.monotonic()
     for page in range(2, pages + 1):
         got = fetch_daily_page(page)
         if got is None:
             failed_pages.append(page)
             streak += 1
+            # 连续两页被掐先换浏览器身份再试（一次为限，别和 JS 较劲）：
+            # 同窗实测带站点 Cookie 的存活远高于裸指纹（见 COOKIE_PATH 注释）。
+            if (streak >= 2 and not cookie_refreshed and TRANSPORT == "cffi"
+                    and _try_refresh_cookie()):
+                global _SESSION
+                _SESSION = None      # 重建会话，吃进新 Cookie
+                streak = 0
+                cookie_refreshed = True
+                continue             # 立刻重试这一页
             # 连续两页取不到 = 链路在被节流，把间隔拉长而不是把重试打满：
             # 硬重试正是 2026-10-17 那次把 IP 送进黑名单的原因。
             if streak >= 2 and sleep < PAGE_SLEEP_MAX:
