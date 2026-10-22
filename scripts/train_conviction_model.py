@@ -50,12 +50,14 @@ from stock_selector.conviction import features as fx  # noqa: E402
 SAMPLES_FILE = ROOT / "data" / "conviction" / "samples.parquet"
 KLINE_DIR = ROOT / "data" / "stock_kline"
 MODEL_FILE = ROOT / "data" / "conviction" / "conviction_model.lgb.txt"
+DOWNSIDE_MODEL_FILE = ROOT / "data" / "conviction" / "downside_model.lgb.txt"
 META_FILE = ROOT / "data" / "conviction" / "conviction_model.json"
 LOG_DIR = ROOT / "logs"
 
 # 读样本表只要这些列：全量 10.66M 行，多读一列就把可用内存吃掉一截。
+# fwd_low 只给下臂（跌破 −10% 事件）用；上臂不读它也能跑（列缺失时下臂自动跳过）。
 READ_COLUMNS = ["date", "code", "close", "board", "bias20", "pos60", "vol_ratio",
-                "vol_z", "rsi14", "adx14", "atr_n", "lu", "label"]
+                "vol_z", "rsi14", "adx14", "atr_n", "lu", "label", "fwd_low"]
 
 # 特征契约（列序 / 必需项）与线上插件同源，见 stock_selector/conviction/features.py：
 # 训练和线上各自拼特征迟早会拼出「AUC 好看但概率是错的」这种不报错的偏差。
@@ -99,10 +101,14 @@ def st_codes(kline_dir: Path) -> set[str]:
 
 
 def load_samples(path: Path, exclude_codes: set[str], horizon: int,
-                 max_groups: int = 0) -> pd.DataFrame:
+                 max_groups: int = 0, resolved_only: bool = True,
+                 drop: float = 0.10) -> pd.DataFrame:
     """流式读样本 → 训练用行。
 
-    留下的行：label ∈ {0,1}（中性剔除，见模块 docstring）、close 有效、三个必需特征齐全。
+    `resolved_only=True`（上臂）：留下的行 label ∈ {0,1}（中性剔除，见模块 docstring）、
+    close 有效、三个必需特征齐全。
+    `resolved_only=False`（下臂）：**全样本**（含中性——「跌破 −10%」在没触屏障的窗口里
+    照样可能发生），label 换成 drop 事件 `fwd_low <= close*(1-drop)`，fwd_low 必须有限。
     其余数值列允许 NaN——LightGBM 自己学缺失方向，线上缺 rsi14 之类不至于整格不给分。
     `seq` 是该票内第几根样本行，用于验证窗口去重叠（缺陷 2）。
     """
@@ -120,7 +126,11 @@ def load_samples(path: Path, exclude_codes: set[str], horizon: int,
             code = chunk["code"].astype(str)
             seq = code.groupby(code).cumcount().to_numpy(dtype=np.int32)
         label = chunk["label"].to_numpy()
-        keep = np.isin(label, (0, 1))
+        if resolved_only:
+            keep = np.isin(label, (0, 1))
+        else:
+            fwd_low = chunk["fwd_low"].to_numpy(dtype=float)
+            keep = np.isfinite(fwd_low)
         if exclude_codes:
             keep &= ~chunk["code"].isin(exclude_codes).to_numpy()
         keep &= np.isfinite(chunk["close"].to_numpy(dtype=float)) & (chunk["close"] > 0)
@@ -132,6 +142,10 @@ def load_samples(path: Path, exclude_codes: set[str], horizon: int,
         if chunk.empty:
             continue
         chunk = chunk.copy()
+        if not resolved_only:
+            chunk["label"] = (chunk["fwd_low"].to_numpy(dtype=float)
+                              <= chunk["close"].to_numpy(dtype=float) * (1.0 - drop)
+                              ).astype(np.int8)
         chunk["seq"] = seq
         frames.append(chunk[list(dict.fromkeys([*READ_COLUMNS, "seq"]))])
         if (i + 1) % 500 == 0 or i + 1 == n_groups:
@@ -144,14 +158,16 @@ def load_samples(path: Path, exclude_codes: set[str], horizon: int,
     # board 一律按 code 现算：样本文件里的 board 列是旧口径写的（基金并进主板），不能信。
     df["board"] = df["code"].astype(str).map(bucket.classify_board)
     df["lu"] = df["lu"].astype(np.int8)
-    logger.info("可用样本 %d 行 / %d 只 / %s→%s", len(df), df["code"].nunique(),
-                df["date"].min().date(), df["date"].max().date())
+    stat_name = "止盈率" if resolved_only else "跌破率"
+    logger.info("可用样本 %d 行 / %d 只 / %s→%s（%s）", len(df), df["code"].nunique(),
+                df["date"].min().date(), df["date"].max().date(),
+                "屏障已解算" if resolved_only else "全样本含中性")
     for b, grp in df.groupby("board", observed=True):
         lab = grp["label"].to_numpy()
         s = int((lab == 1).sum())
         f = int((lab == 0).sum())
-        logger.info("  %-6s 行 %9d  独立窗口 %8d  止盈率 %.2f%%",
-                    b, len(grp), (grp["seq"] % horizon == 0).sum(), 100.0 * s / (s + f))
+        logger.info("  %-6s 行 %9d  独立窗口 %8d  %s %.2f%%",
+                    b, len(grp), (grp["seq"] % horizon == 0).sum(), stat_name, 100.0 * s / (s + f))
     return df
 
 
@@ -283,10 +299,13 @@ def main() -> None:
     ap.add_argument("--samples", default=str(SAMPLES_FILE))
     ap.add_argument("--kline-dir", default=str(KLINE_DIR))
     ap.add_argument("--out-model", default=str(MODEL_FILE))
+    ap.add_argument("--out-downside-model", default=str(DOWNSIDE_MODEL_FILE))
     ap.add_argument("--out-meta", default=str(META_FILE))
     ap.add_argument("--horizon", type=int, default=10)
     ap.add_argument("--stop", type=float, default=0.05)
     ap.add_argument("--take", type=float, default=0.10)
+    ap.add_argument("--drop", type=float, default=0.10,
+                    help="下臂事件阈值：未来 horizon 根内最低价 <= close*(1-drop)")
     ap.add_argument("--valid-start", default="2019-01-01", help="第一折验证窗口起点")
     ap.add_argument("--fold-days", type=int, default=365, help="每个验证窗口的自然日宽度")
     ap.add_argument("--calib-from", default="2022-01-01",
@@ -319,73 +338,18 @@ def main() -> None:
     cutoff0 = pd.Timestamp(args.valid_start).toordinal()
     calib_from = pd.Timestamp(args.calib_from).toordinal()
 
-    # 净化式前推：train = 窗口起点前 EMERBAGO_DAYS 自然日及以前；验证窗口内去重叠。
-    # embargo 是为了不让训练行 t 的 10 日前向窗口伸进验证段（那样验证就是训练的记忆）。
-    oof_score = np.full(n_rows, np.nan)
-    best_iters = []
-    folds = []
-    start = cutoff0
-    max_day = int(day.max())
-    while start <= max_day:
-        end = start + args.fold_days
-        in_val = (day >= start) & (day < end) & (seq % args.horizon == 0)
-        val_idx = np.flatnonzero(in_val)
-        train_idx = np.flatnonzero(day < start - EMERBAGO_DAYS)
-        if len(val_idx) < 2000 or len(train_idx) < 100_000:
-            start = end
-            continue
-        booster, best, proba = fit_fold(x, label, train_idx, val_idx,
-                                        lgb_params(args), args.iterations)
-        best_iters.append(best)
-        oof_score[val_idx] = proba
-        m = metrics(label[val_idx], proba)
-        m["window"] = f"{pd.Timestamp.fromordinal(int(start)).date()}~{pd.Timestamp.fromordinal(int(end - 1)).date()}"
-        m["train_n"] = int(len(train_idx))
-        m["era"] = "pre" if start < calib_from else "post"
-        folds.append(m)
-        logger.info("折 %s  训练 %d 行 → 验证 %d 独立窗口  AUC=%.4f Brier=%.5f 基准=%.2f%% best_iter=%d",
-                    m["window"], m["train_n"], m["n"], m.get("auc", float("nan")),
-                    m.get("brier", float("nan")), m["base_rate"] * 100, best)
-        del booster
-        start = end
-    if not folds:
-        logger.error("验证折为空（--valid-start/--fold-days 与数据区间不匹配）")
-        raise SystemExit(2)
-
-    have = np.flatnonzero(~np.isnan(oof_score))
-    pooled = metrics(label[have], oof_score[have])
+    # ---------- 上臂：先触 +10%（屏障已解算行，中性剔除） ----------
+    arm = run_arm(x, label, day, seq, args, lgb, cutoff0, calib_from, tag="上臂")
+    oof_score, have, folds, pooled = (arm["oof"], arm["have"], arm["folds"], arm["pooled"])
+    base_by_board, table, iters = arm["base_by_board"], arm["table"], arm["iters"]
+    board_codes = arm["board_codes"]
     logger.info("样本外合计 %d 独立窗口：AUC=%.4f Brier=%.5f 基准止盈率=%.2f%%",
                 pooled["n"], pooled["auc"], pooled["brier"], pooled["base_rate"] * 100)
-
-    # 按板块各自的样本外基准：基金天然比股票难摸到 +10%（22.6% vs 30.9%），
-    # 用全市场均值当基准会让所有基金票永远「低」，档位就丢了「同类里相对更容易」的原意。
-    board_codes = x[have, BOARD_COL].astype(int)
-    base_by_board = {}
-    for code, grp_mask in pd.Series(board_codes).value_counts().items():
-        idx = have[board_codes == code]
-        name = bucket.BOARD_CATEGORIES[int(code)]
-        base_by_board[name] = round(float(np.mean(label[idx])) * 100, 2)
-        logger.info("板块基准 %-6s 样本外 %6d 独立窗口  止盈率 %.2f%%", name, len(idx),
-                    base_by_board[name])
-
-    cal_idx = have[day[have] >= calib_from]
-    if len(cal_idx) < 20_000:
-        logger.warning("校准窗口样本外行只有 %d（<20k），改用全部折", len(cal_idx))
-        cal_idx = have
-    table = calibrate(oof_score[cal_idx], label[cal_idx], args.bins)
-    cal_metrics = metrics(label[cal_idx], np.array([
-        (calibrate_lookup(table, s) or {"rate": float("nan")})["rate"] for s in oof_score[cal_idx]]))
     logger.info("校准后（%s 及以后，%d 独立窗口）：AUC=%.4f Brier=%.5f",
-                args.calib_from, cal_metrics["n"], cal_metrics["auc"], cal_metrics["brier"])
+                args.calib_from, arm["cal_metrics"]["n"],
+                arm["cal_metrics"]["auc"], arm["cal_metrics"]["brier"])
 
-    # 终版：全量重拟合，迭代数取各折 best_iteration 中位数（此时没有干净验证集可早停）。
-    iters = max(1, int(np.median(best_iters)))
-    logger.info("终版拟合：全量 %d 行，num_iteration=%d（各折中位）", x.shape[0], iters)
-    train_all = lgb.Dataset(x, label=label, categorical_feature=[BOARD_COL],
-                            free_raw_data=False)
-    booster = lgb.train(lgb_params(args), train_all, num_boost_round=iters)
-
-    gain = booster.feature_importance(importance_type="gain")
+    gain = arm["booster"].feature_importance(importance_type="gain")
     order = np.argsort(gain)[::-1]
     logger.info("特征重要度（gain）：")
     for i in order:
@@ -423,7 +387,7 @@ def main() -> None:
         "board_levels": list(bucket.BOARD_CATEGORIES),
         "params": lgb_params(args),
         "num_iteration": iters,
-        "best_iterations": best_iters,
+        "best_iterations": arm["best_iters"],
         "data": {
             "samples": str(samples_path), "rows": int(n_rows), "range": list(span),
         },
@@ -444,15 +408,136 @@ def main() -> None:
                     "页面该说「和历史同类差不多」而不是给个好看的数",
         },
         "calibration": table,
-        "calibrated_metrics": cal_metrics,
+        "calibrated_metrics": arm["cal_metrics"],
         "importance_gain": {FEATURES[i]: round(float(gain[i]), 2) for i in order},
     }
 
     out_model = Path(args.out_model)
     out_model.parent.mkdir(parents=True, exist_ok=True)
-    booster.save_model(str(out_model), num_iteration=iters)
+    arm["booster"].save_model(str(out_model), num_iteration=iters)
+    logger.info("已写上涨臂 %s（%d 行 Booster）", out_model, iters)
+    del x, label, day, seq, arm, oof_score, rates   # 下臂再要一份全量数组，先腾地方
+
+    # ---------- 下臂：P(未来 horizon 根内最低价 <= close*(1-drop))，全样本含中性 ----------
+    # 2026-10-20 定稿口径：诊断的可信度 = 对当前动作的支持度（sell=P、hold=1−P），
+    # 下跌事件复验窗 AUC 0.73、校准近乎对角线——比上涨臂（0.56）有用得多。
+    df_d = load_samples(samples_path, exclude, args.horizon,
+                        300 if args.smoke else 0, resolved_only=False, drop=args.drop)
+    span_d = (str(df_d["date"].min().date()), str(df_d["date"].max().date()))
+    xd, ld, dd, seqd = to_arrays(df_d)
+    del df_d
+    arm_d = run_arm(xd, ld, dd, seqd, args, lgb, cutoff0, calib_from, tag="下臂")
+    dtable = arm_d["table"]
+    meta["downside"] = {
+        "version": 1,
+        "model_file": Path(args.out_downside_model).name,
+        "num_iteration": arm_d["iters"],
+        "best_iterations": arm_d["best_iters"],
+        "label_contract": {
+            "horizon": args.horizon, "drop": args.drop,
+            "meaning": (f"P(未来 {args.horizon} 根内最低价 <= close*(1-{args.drop}))；"
+                        "全样本含中性，是无条件事件概率，不是屏障条件概率"),
+            "neutral_included": True,
+        },
+        "features": FEATURES,
+        "board_levels": list(bucket.BOARD_CATEGORIES),
+        "params": lgb_params(args),
+        "data": {"rows": int(len(ld)), "range": list(span_d)},
+        "validation": {
+            "scheme": meta["validation"]["scheme"],
+            "folds": arm_d["folds"], "pooled": arm_d["pooled"],
+        },
+        "base_rate_pct": round(arm_d["pooled"]["base_rate"] * 100, 2),
+        "base_rate_by_board_pct": arm_d["base_by_board"],
+        "calibration": dtable,
+        "calibrated_metrics": arm_d["cal_metrics"],
+        "max_probability_pct": round(dtable[-1]["rate"] * 100, 1) if dtable else None,
+        "note": ("卖出侧显示值的封顶就是最险档实测率——历史上没有任何形态给出 100% 该卖；"
+                 "该概率量的是「崩不崩」，不是「赚不赚」"),
+    }
+    out_down = Path(args.out_downside_model)
+    arm_d["booster"].save_model(str(out_down), num_iteration=arm_d["iters"])
+    logger.info("已写下行臂 %s（%d 行 Booster，基准 %.2f%%，AUC %.4f）", out_down,
+                arm_d["iters"], meta["downside"]["base_rate_pct"],
+                arm_d["pooled"].get("auc", float("nan")))
+
     Path(args.out_meta).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info("已写 %s（%d 行 Booster）与 %s", out_model, iters, args.out_meta)
+    logger.info("已写 %s", args.out_meta)
+
+
+def run_arm(x, label, day, seq, args, lgb, cutoff0, calib_from, tag: str) -> dict:
+    """一臂的全流程：净化前推折 → 板块基准 → 校准表 → 终版全量重拟合。
+
+    上/下两臂只有标签和日志叫法不同，fold/embargo/去重叠/校准逻辑必须一字不差共用——
+    两臂数字要在同一套独立窗口口径下才能并排说（2026-10-20 两窗复验就是这么做的）。
+    """
+    n_rows = len(label)
+    oof_score = np.full(n_rows, np.nan)
+    best_iters = []
+    folds = []
+    start = cutoff0
+    max_day = int(day.max())
+    while start <= max_day:
+        end = start + args.fold_days
+        in_val = (day >= start) & (day < end) & (seq % args.horizon == 0)
+        val_idx = np.flatnonzero(in_val)
+        train_idx = np.flatnonzero(day < start - EMERBAGO_DAYS)
+        if len(val_idx) < 2000 or len(train_idx) < 100_000:
+            start = end
+            continue
+        booster, best, proba = fit_fold(x, label, train_idx, val_idx,
+                                        lgb_params(args), args.iterations)
+        best_iters.append(best)
+        oof_score[val_idx] = proba
+        m = metrics(label[val_idx], proba)
+        m["window"] = (f"{pd.Timestamp.fromordinal(int(start)).date()}"
+                       f"~{pd.Timestamp.fromordinal(int(end - 1)).date()}")
+        m["train_n"] = int(len(train_idx))
+        m["era"] = "pre" if start < calib_from else "post"
+        folds.append(m)
+        logger.info("[%s] 折 %s  训练 %d 行 → 验证 %d 独立窗口  AUC=%.4f Brier=%.5f "
+                    "基准=%.2f%% best_iter=%d", tag, m["window"], m["train_n"], m["n"],
+                    m.get("auc", float("nan")), m.get("brier", float("nan")),
+                    m["base_rate"] * 100, best)
+        del booster
+        start = end
+    if not folds:
+        logger.error("[%s] 验证折为空（--valid-start/--fold-days 与数据区间不匹配）", tag)
+        raise SystemExit(2)
+
+    have = np.flatnonzero(~np.isnan(oof_score))
+    pooled = metrics(label[have], oof_score[have])
+
+    # 按板块各自的样本外基准：基金天然比股票难摸到 +10%（22.6% vs 30.9%），
+    # 用全市场均值当基准会让所有基金票永远「低」，档位就丢了「同类里相对更容易」的原意。
+    board_codes = x[have, BOARD_COL].astype(int)
+    base_by_board = {}
+    for code, grp_mask in pd.Series(board_codes).value_counts().items():
+        idx = have[board_codes == code]
+        name = bucket.BOARD_CATEGORIES[int(code)]
+        base_by_board[name] = round(float(np.mean(label[idx])) * 100, 2)
+        logger.info("[%s] 板块基准 %-6s 样本外 %6d 独立窗口  实测率 %.2f%%",
+                    tag, name, len(idx), base_by_board[name])
+
+    cal_idx = have[day[have] >= calib_from]
+    if len(cal_idx) < 20_000:
+        logger.warning("[%s] 校准窗口样本外行只有 %d（<20k），改用全部折", tag, len(cal_idx))
+        cal_idx = have
+    table = calibrate(oof_score[cal_idx], label[cal_idx], args.bins)
+    cal_metrics = metrics(label[cal_idx], np.array([
+        (calibrate_lookup(table, s) or {"rate": float("nan")})["rate"]
+        for s in oof_score[cal_idx]]))
+
+    # 终版：全量重拟合，迭代数取各折 best_iteration 中位数（此时没有干净验证集可早停）。
+    iters = max(1, int(np.median(best_iters)))
+    logger.info("[%s] 终版拟合：全量 %d 行，num_iteration=%d（各折中位）", tag, x.shape[0], iters)
+    train_all = lgb.Dataset(x, label=label, categorical_feature=[BOARD_COL],
+                            free_raw_data=False)
+    final = lgb.train(lgb_params(args), train_all, num_boost_round=iters)
+    return {"booster": final, "iters": iters, "best_iters": best_iters,
+            "oof": oof_score, "have": have, "folds": folds, "pooled": pooled,
+            "base_by_board": base_by_board, "table": table,
+            "cal_metrics": cal_metrics, "board_codes": board_codes}
 
 
 if __name__ == "__main__":

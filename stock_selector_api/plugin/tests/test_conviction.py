@@ -183,3 +183,79 @@ def test_num_iteration_passed_to_predict():
     data, num_iteration = booster.calls[-1]
     assert num_iteration == META["num_iteration"]
     assert len(data) == 1 and len(data[0]) == len(META["features"])
+
+
+# ---------------------------------------------------------------------------
+# 下行风险档（P(未来10日跌破−10%)）+ 动作感知可信度
+# 2026-10-20 与用户定稿：conviction_pct = 对「当前显示动作」的实测支持度——
+#   sell → P(跌破)，hold → 1−P(跌破)。下行模型缺失时回退原上涨口径。
+# ---------------------------------------------------------------------------
+DOWN_SIDE = {
+    "num_iteration": 9,
+    "base_rate_pct": 20.0,
+    "max_probability_pct": 85.2,          # 复验窗历史最险一天的预测上限
+    "validation": {"pooled": {"auc": 0.7269}},
+    "label_contract": {"horizon": 10, "drop": 0.10,
+                       "meaning": "P(未来10日最低价 <= close*(1-drop))，全样本、不剔中性"},
+    "calibration": [
+        {"lo": 0.00, "hi": 0.10, "rate": 0.019, "n": 340486},
+        {"lo": 0.10, "hi": 0.20, "rate": 0.105, "n": 340485},
+        {"lo": 0.20, "hi": 0.35, "rate": 0.228, "n": 680970},
+        {"lo": 0.35, "hi": 0.60, "rate": 0.420, "n": 680971},
+        {"lo": 0.60, "hi": 1.00, "rate": 0.600, "n": 340485},
+    ],
+}
+META_DOWN = {**META, "downside": DOWN_SIDE}
+
+
+def _inject_down(down_score, meta=None, up_score=0.30):
+    """注入两个假 Booster：上涨臂固定 0.30，下行臂由用例给分。"""
+    up = FakeBooster(up_score)
+    down = FakeBooster(down_score)
+    conviction._package = lambda: {"meta": meta or META_DOWN,
+                                   "booster": up, "downside_booster": down}
+    return down
+
+
+def test_hold_conviction_is_complement_of_downside():
+    _inject_down(0.25)                    # 档 rate 0.228 → P(跌破)=22.8%
+    out = conviction.evaluate(ROW, action="hold")
+    assert out["conviction_pct"] == 77.2  # 100 − 22.8
+    assert out["conviction_level"] == "高"
+    assert "持有可信度" in out["conviction_text"]
+    assert "22.8" in out["conviction_text"]         # 事件原值必须露出来，不能只给补
+    assert "不崩" in out["conviction_text"] and "会赚" in out["conviction_text"]
+
+
+def test_sell_conviction_is_downside_itself():
+    _inject_down(0.25)
+    out = conviction.evaluate(ROW, action="sell")
+    assert out["conviction_pct"] == 22.8
+    assert out["conviction_level"] == "低"          # 22.8 < 50：这条卖出证据弱
+    assert "卖出可信度" in out["conviction_text"]
+
+
+def test_sell_conviction_level_and_ceiling_note():
+    _inject_down(0.62)                    # 档 rate 0.600 → P(跌破)=60%
+    out = conviction.evaluate(ROW, action="sell")
+    assert out["conviction_pct"] == 60.0
+    assert out["conviction_level"] == "中"          # 50<=60<75
+    assert "上限" in out["conviction_text"]          # 提醒卖出侧到不了 100%
+    assert "最险档样本外实测" in out["conviction_text"]  # 上限的口径要说清：是分档实测，不是某天
+    assert "历史最险一天" not in out["conviction_text"]
+
+
+def test_downside_falls_back_to_upside_when_model_absent():
+    _inject(0.30)                         # 只有上涨臂（META 无 downside）
+    assert conviction.evaluate(ROW, action="hold")["conviction_pct"] == 31.5
+    assert conviction.evaluate(ROW)["conviction_pct"] == 31.5
+
+
+def test_downside_st_respects_st_and_feature_degrade():
+    _inject_down(0.25)
+    out = conviction.evaluate({**ROW, "name": "*ST海润"}, action="hold")
+    assert out["conviction_pct"] is None and out["conviction_text"] is None
+    _inject_down(0.25)
+    out2 = conviction.evaluate({k: v for k, v in ROW.items() if k != "pos60"},
+                               action="sell")
+    assert out2["conviction_pct"] is None

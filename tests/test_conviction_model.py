@@ -70,3 +70,41 @@ def test_feature_contract_matches_serving_module():
     assert mod.NUMERIC_FEATURES == fx.NUMERIC_FEATURES
     assert mod.BOARD_COL == fx.BOARD_COL == len(fx.NUMERIC_FEATURES)
     assert mod.REQUIRED_FEATURES == fx.REQUIRED_FEATURES
+
+
+# ---------------------------------------------------------------------------
+# 下臂（P(未来10日最低价跌破 close*(1-drop))）的建样本口径
+# ---------------------------------------------------------------------------
+def _tiny_samples(tmp_path):
+    """6 行合成样本：2 行中性（label=-1）、fwd_low 覆盖 9.0 阈值两侧。"""
+    import pandas as pd
+
+    df = pd.DataFrame({
+        "date": pd.date_range("2020-01-01", periods=6),
+        "code": ["600000"] * 6,
+        "close": [10.0] * 6,
+        "board": ["主板"] * 6,
+        "bias20": [0.01] * 6, "pos60": [0.5] * 6, "vol_ratio": [1.0] * 6,
+        "vol_z": [0.2] * 6, "rsi14": [50.0] * 6, "adx14": [20.0] * 6,
+        "atr_n": [0.02] * 6, "lu": [0] * 6,
+        "label": [1, 0, -1, -1, 0, 1],
+        "fwd_low": [9.5, 8.9, 9.9, 8.0, 9.0, 9.4],
+    })
+    path = tmp_path / "s.parquet"
+    df.to_parquet(path, index=False)
+    return path
+
+
+def test_downside_arm_keeps_neutral_and_swaps_label(tmp_path):
+    """下臂吃全样本（不剔中性）：label 换成 drop10 事件；9.0 恰在阈值上算触发。"""
+    path = _tiny_samples(tmp_path)
+    df = mod.load_samples(path, set(), 10, 0, resolved_only=False)
+    assert len(df) == 6
+    assert df["label"].tolist() == [0, 1, 0, 1, 1, 0]
+
+
+def test_upside_arm_unchanged_by_new_flag(tmp_path):
+    path = _tiny_samples(tmp_path)
+    df = mod.load_samples(path, set(), 10)                 # 默认 resolved_only=True
+    assert len(df) == 4
+    assert df["label"].tolist() == [1, 0, 0, 1]            # 中性行（label=-1）被剔

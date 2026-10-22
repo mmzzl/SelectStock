@@ -1,9 +1,13 @@
 """portfolio/conviction.py — 直读 LightGBM 可信度模型，给持仓诊断补一组可核对的数字。
 
 口径（全部来自 scripts/train_conviction_model.py 写出的 conviction_model.json，别在这里改数）：
-- `conviction_pct` = 模型分数经**样本外分位档校准**后的实测止盈率，含义是
-  P(未来 horizon 根内先触 close*(1+take) | 先触 take 或先触 stop 之一，同根双触算止损)。
-  中性窗口（两边都没触，占 ~44%）已剔除，所以它是**条件概率，不是期望收益**。
+- 传了 action（诊断里的 hold/sell 判定）且有下行模型时，`conviction_pct` = **对当前动作的
+  实测支持度**：sell=P(未来10日最低价跌破 close×(1−10%))、hold=1−该概率。下跌比上涨好预测
+  （复验窗 AUC 0.73 vs 0.56），且校准几乎一行不差（预测1.8%档实测1.9%、51%档实测48%）。
+  边界：含义是「崩不崩」不是「赚不赚」；卖出侧历史上限 ~85%（2024→2026 独立窗实测）。
+- 没有 action 或下行模型缺位时，回退上涨口径：`conviction_pct` = 模型分数经**样本外分位档
+  校准**后的实测止盈率，含义是 P(未来 horizon 根内先触 close*(1+take) | 先触 take 或先触
+  stop 之一，同根双触算止损)；中性窗口（两边都没触，占 ~44%）已剔除，是**条件概率**。
 - 文案里的 N 是「去重叠 + 留 embargo 的独立窗口数」：相邻交易日样本共用 9/10 根前向 bar，
   旧的 81 格 Beta 表把它们当独立样本，CI 窄了 3.16 倍（73 个可信格只剩 28 个）。
 - 场内基金（15/16/5x 段）单成一类，不再并进主板——同样屏障下基金止盈率比股票低 8pp。
@@ -41,8 +45,14 @@ def _path(env: str, default: Path) -> Path:
     return Path(os.environ.get(env) or default)
 
 
-def evaluate(row: dict | None) -> dict:
-    """最新指标行 → 冻结契约那 7 个字段（缺数据时为 None，调用方直接 update）。"""
+def evaluate(row: dict | None, action: str | None = None) -> dict:
+    """最新指标行 → 冻结契约那 7 个字段（缺数据时为 None，调用方直接 update）。
+
+    `action` 给定时（诊断里由形态规则判出的 hold/sell）且下行模型可用，`conviction_pct`
+    改口径为「对当前显示动作的实测支持度」：sell=「P(未来10日跌破−10%)事件概率」、
+    hold=「1−该概率」。下行模型缺失或没给 action 时，回退原上涨口径（剧本成功率），
+    保证重训/上线间隙诊断整页不报错、也不静默改含义——文案会写明是哪一口径。
+    """
     fields = {
         "conviction_pct": None,
         "conviction_level": None,
@@ -70,6 +80,14 @@ def evaluate(row: dict | None) -> dict:
     vec, ok = features.row_to_vector(row)
     if not ok:
         return fields                                   # 核心特征不齐 → 不猜
+    dpack, dmeta = pack.get("downside_booster"), meta.get("downside")
+    if dpack is not None and dmeta and action in ("hold", "sell"):
+        dp = float(dpack.predict([vec], num_iteration=dmeta["num_iteration"])[0])
+        seg = _lookup(dmeta["calibration"], dp)
+        if seg is not None:
+            fields["conviction_pct"], fields["conviction_level"], \
+                fields["conviction_text"] = _downside_action(action, seg, dmeta)
+            return fields
     score = float(booster.predict([vec], num_iteration=meta["num_iteration"])[0])
     seg = _lookup(meta["calibration"], score)
     if seg is None:
@@ -81,6 +99,41 @@ def evaluate(row: dict | None) -> dict:
     fields["conviction_level"] = _level(pct, base)
     fields["conviction_text"] = _text(pct, seg, meta, base)
     return fields
+
+
+def _support_level(pct: float) -> str:
+    """动作支持度的档：>=75 高、>=50 中、否则低（支持度天然是补数尺度，不看板块基准）。"""
+    if pct >= 75:
+        return "高"
+    if pct >= 50:
+        return "中"
+    return "低"
+
+
+def _downside_action(action: str, seg: dict, dmeta: dict) -> tuple[float, str, str]:
+    """(可信度%, 档, 文案)。事件原值一定印出来——只给补数会读成「稳=会赚」。"""
+    lc = dmeta["label_contract"]
+    h = lc["horizon"]
+    drop = lc.get("drop", 0.10) * 100
+    p_down = round(seg["rate"] * 100, 1)
+    auc = dmeta.get("validation", {}).get("pooled", {}).get("auc")
+    base = dmeta.get("base_rate_pct")
+    extra = f"，模型AUC{auc:.2f}" if auc is not None else ""
+    btxt = f"，复验基准{base:.1f}%" if base is not None else ""
+    n = f"N={seg['n']:,}实测"
+    if action == "sell":
+        support, head = p_down, "卖出可信度"
+        ceil = dmeta.get("max_probability_pct")
+        note = (f"。卖出侧诚实上限约{ceil:.0f}%（最险档样本外实测），不存在 100% 该卖"
+                if ceil is not None else "")
+        core = (f"{head} {support:.1f}%（=未来{h}日跌破−{drop:.0f}%概率{p_down:.1f}%，"
+                f"样本外同档{n}{btxt}{extra}）{note}")
+    else:
+        support, head = round(100.0 - p_down, 1), "持有可信度"
+        core = (f"{head} {support:.1f}%（=1−未来{h}日跌破−{drop:.0f}%概率{p_down:.1f}%，"
+                f"样本外同档{n}{btxt}{extra}）。这是「不崩」（最低价没跌破−{drop:.0f}%）"
+                "的概率，不等于「会赚」")
+    return support, _support_level(support), core
 
 
 def _level(pct: float, base_pct: float) -> str:
@@ -151,7 +204,11 @@ def _game(row: dict):
 
 
 def _package() -> dict:
-    """加载（并缓存）模型 + meta；按两个文件的 mtime+size 失效，缺失返回 {}。"""
+    """加载（并缓存）模型 + meta；按文件的 mtime+size 失效，缺失返回 {}。
+
+    meta 里带 downside 块时，同目录再加载下行 Booster；它坏了/没训不影响上涨臂——
+    只是拿不到下行档，evaluate 自动回退上涨口径。
+    """
     global _cache, _cache_key
     model, meta_path = _path("CONVICTION_MODEL_FILE", DEFAULT_MODEL), \
         _path("CONVICTION_META_FILE", DEFAULT_META)
@@ -178,7 +235,29 @@ def _load(model_path, meta_path) -> dict:
         logger.warning("可信度模型列数 %d 与 meta %d 不符，退化为不可用",
                        booster.num_feature(), len(meta["features"]))
         return {}
-    return {"meta": meta, "booster": booster}
+    pack = {"meta": meta, "booster": booster}
+    dmodel = _downside_file(model_path, meta)
+    if dmodel is not None:
+        try:
+            booster_d = lgb.Booster(model_file=str(dmodel))
+        except Exception as exc:
+            logger.warning("下行模型读取失败 %s：%s（回退上涨口径）", dmodel, exc)
+            return pack
+        if booster_d.num_feature() != len(meta["features"]):
+            logger.warning("下行模型列数 %d 与 meta %d 不符，只用上涨臂",
+                           booster_d.num_feature(), len(meta["features"]))
+            return pack
+        pack["downside_booster"] = booster_d
+    return pack
+
+
+def _downside_file(model_path, meta: dict):
+    block = meta.get("downside") or {}
+    name = block.get("model_file")
+    if not name:
+        return None
+    path = Path(model_path).parent / name
+    return path if path.is_file() else None
 
 
 def _num(v):
