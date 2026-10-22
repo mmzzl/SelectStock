@@ -281,6 +281,9 @@ def test_run_daily_slows_down_instead_of_hard_retrying(tmp_daily, monkeypatch):
 
     monkeypatch.setattr(fetch, "fetch_daily_page", fake_page)
     monkeypatch.setattr(fetch, "PAGE_SLEEP", 1.0)
+    # 换浏览器身份那条分支排在降速前面，而且会吃掉 streak：本机 data/fund_flow/cookies/
+    # 有真 Cookie 时它会成功，用例就变成「看今天有没有 cookie」而不是测降速。这里固定失败。
+    monkeypatch.setattr(fetch, "_try_refresh_cookie", lambda: False)
     sleeps: list[float] = []
     result = fetch.run_daily(sleeper=sleeps.append)
     assert result["failed_pages"] == [2, 3]
