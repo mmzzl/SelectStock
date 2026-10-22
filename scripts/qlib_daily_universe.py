@@ -11,18 +11,24 @@
    名字必须问**现名**（默认走腾讯快照）：本仓那份 data/csv/all_stock.csv 是 2026-05-24 的快照、
    Mongo bk_stocks 最近一次 imported_at 是 2026-05-19，两份都过期了 5 个月，拿旧表判 ST 等于没判
    ——2026-10-18 实测这样漏进名单的有 113 只（含当日榜内第 16 名 *ST卓然、第 28 名 ST龙大）。
-3. **上市满 --min-bars 根日线**（默认 130 = serving.WARMUP_DAYS）：Alpha158 最长滚动窗口 60 日，
+3. **上市满 --min-bars 根日线**（默认 130 = serving.WARMUP_DAYS）：算的是面板里**有行情**
+   的天数（close 非 NaN 的格子），停牌那些天不算，所以门槛比「上市天数」略严一点。
+   Alpha158 最长滚动窗口 60 日，
    不足 130 根的票，窗口里全是 NaN，归一化后被填成 0——那是一行「看起来像中性票」的假因子，
    模型会给它一个像模像样的分数。这类票必须挡在名单外，而不是靠打分阶段兜。
-4. **面板里有这只的日线文件**：候选代码清单本身就取自 csv 面板（缺文件=数据链没覆盖到它，
-   进不了名单），不再像以前那样以名字表为准——旧表不认识的新上市票会静默进不了名单，
-   连计数都没有。
+4. **候选清单取自打分真正读的那份 bin 面板**（features/ 下有 close.day.bin 的 A 股目录）：
+   以前取的是 /data/work/qlib_data/csv 那份手工全量拷贝，它停在 10-16 而 bin 已经到 10-22
+   （2026-10-23 实测），于是「最近 20 天」算的是 9/17~10/16，筛出来的池和打分读的数据
+   差着 4 个交易日——119 只早该按流动性的新口径出去、71 只该进来却没进（两边都在 1 亿上下
+   0.6~1.2 亿的边缘带里）。也不是名字表：旧表不认识的新上市票会静默进不了名单，连计数都没有。
 5. **最近 20 个交易日日均成交额 ≥ --min-amount**（默认 1e8 元 = 1 亿）：全市场名单里四成的票
    钱进不去——2026-10-18 按 67 个交易日样本外重放实测，1 亿门槛只留下 **60.6%** 的名单
    （日均 2,993 只），而池外前 30 名的 20 日均成交额中位有 4.59 亿（模型本来就偏爱流动票）。
    这道筛**按可成交性选，不按准确度选**：那 67 个交易日窗口里「榜内 IC」是负的
    （不设下限 −0.0056），所以不能拿它证明「筛掉低流动就更准」。
-   取不到成交额的票（面板 amount 列整列空/非正，或 20 天里有效行不足 10 天）**单独计数并剔除**——
+   窗口锚在**面板日历的最后 20 格**上（和打分同一个坐标系），不是这只票自己那串数的尾巴；
+   取不到成交额的票（amount.day.bin 整列空/非正，或这 20 格里有效天不足 10 天，
+   退市和长期停牌就落在这里）**单独计数并剔除**——
    「判不了流动性」不等于「过了流动性筛」，和第 2 条对「取不到名字」的处理是同一个原则。
 
 用法：
@@ -50,11 +56,10 @@ logger = logging.getLogger("qlib_universe")
 ASHARE_PREFIXES = ("SH60", "SH68", "SZ00", "SZ30")
 OUT_DEFAULT = REPO / "data" / "qlib" / "universe.txt"
 NAME_FILE = REPO / "data" / "csv" / "all_stock.csv"
-CSV_PANEL = Path("/data/work/qlib_data/csv")
+BIN_PANEL = Path("/data/work/qlib_data/cn")   # 8003 打分真正读的那份面板
 
-AMT_COL = 6           # 面板列序 date,open,high,low,close,volume,amount,vwap,factor
 AMT_WINDOW = 20       # 流动性看 20 个交易日，和 G-N3 分档用的 amt20 同一个口径
-AMT_MIN_DAYS = 10     # 有效行不足一半就判不了流动性
+AMT_MIN_DAYS = 10     # 有效天不足一半就判不了流动性
 MIN_AMOUNT = 1e8      # 20 日均成交额下限（元）。依据见 docs §17.9
 
 
@@ -83,43 +88,61 @@ def is_st(name: str) -> bool:
     return "ST" in name.upper() or "退" in name
 
 
+def panel_calendar() -> list[str]:
+    """面板的交易日坐标系（bin 的第 0 格就是这个下标对应的日子）。"""
+    path = BIN_PANEL / "calendars" / "day.txt"
+    return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 def panel_stocks() -> list[str]:
-    """csv 面板里所有 A 股符号（SH60/SH68/SZ00/SZ30 开头），排序后返回。
+    """bin 面板 features/ 下有 close 列的 A 股符号（目录名小写，键回大写），排序返回。
 
-    候选清单取自面板而不是名字表：面板是「数据链覆盖到谁」，名字表是「上次快照认识谁」，
-    用后者当入口会让新上市的票静默进不了名单。
+    候选清单取自打分真正读的那份面板，不是 csv 那份手工全量拷贝（2026-10-23 实测它停在
+    10-16，而 bin 已经到 10-22），也不是名字表（那是「上次快照认识谁」）。用前者会算出
+    一个「按旧数据挑出来的池」，用后者会让新上市的票静默进不了名单。
     """
-    return sorted(p.stem for p in CSV_PANEL.glob("*.csv") if p.stem.startswith(ASHARE_PREFIXES))
+    feats = BIN_PANEL / "features"
+    if not feats.is_dir():
+        return []
+    return sorted(p.name.upper() for p in feats.iterdir()
+                  if p.is_dir() and p.name.upper().startswith(ASHARE_PREFIXES)
+                  and (p / "close.day.bin").exists())
 
 
-def panel_stats(symbols: list[str]) -> dict[str, tuple[int, float | None]]:
-    """每只票 -> (日线根数, 最近 20 个交易日的日均成交额【元】)。
+def panel_stats(symbols: list[str],
+                 calendar: list[str] | None = None) -> dict[str, tuple[int, float | None]]:
+    """每只票 -> (面板里有行情的天数, 面板日历最后 20 格的日均成交额【元】)。
 
-    成交额取自面板 csv 的 amount 列（`qlib_export_kline` 落的就是元口径）。
-    两种情况给 None：整列都是空/非正（东财断供那几天 amount 就是空值），或有效行不足
-    `AMT_MIN_DAYS` 天。**判不了流动性就等于不可成交**，不能当成「过了流动性筛」放过去——
-    这和本脚本对「取不到名字的票」的处理是同一个原则。
+    成交额读 `<field>.day.bin`（float32 小端，首格是起始日历下标），口径和
+    `qlib_export_kline` 落进去的一样是元。窗口取的是**面板日历**的最后 `AMT_WINDOW` 格，
+    不是这只票自己那串数的尾巴——打分读的就是这个坐标系，票的 bin 短到窗口里有效天不足
+    `AMT_MIN_DAYS`（退市、长期停牌、或增量链没覆盖到它）时给 None。
+    两种情况给 None：整列都是空/非正（东财断供那几天 amount 就是空值），或有效天不足。
+    **判不了流动性就等于不可成交**，不能当成「过了流动性筛」放过去——这和本脚本
+    对「取不到名字的票」的处理是同一个原则。
     """
+    import numpy as np
+
+    cal = calendar if calendar is not None else panel_calendar()
+    tail_lo = len(cal) - AMT_WINDOW
     out: dict[str, tuple[int, float | None]] = {}
     for sym in symbols:
-        path = CSV_PANEL / f"{sym}.csv"
+        base = BIN_PANEL / "features" / sym.lower()
+        path = base / "close.day.bin"
         if not path.exists():
             continue
-        with path.open("rb") as fh:
-            rows = fh.read().splitlines()[1:]     # 减掉表头
+        close = np.fromfile(path, dtype="<f")
         values: list[float] = []
-        for raw in rows[-AMT_WINDOW:]:
-            fields = raw.split(b",")
-            if len(fields) <= AMT_COL:
-                continue
-            try:
-                value = float(fields[AMT_COL])
-            except ValueError:                     # 空串（断供）或非数值
-                continue
-            if value > 0:
-                values.append(value)
+        amt_path = base / "amount.day.bin"
+        if amt_path.exists():
+            amt = np.fromfile(amt_path, dtype="<f")
+            start, span = int(amt[0]), amt.size - 1
+            for i in range(max(tail_lo, start), min(len(cal) - 1, start + span - 1) + 1):
+                value = amt[i - start + 1]
+                if np.isfinite(value) and value > 0:
+                    values.append(float(value))
         amount = sum(values) / len(values) if len(values) >= AMT_MIN_DAYS else None
-        out[sym] = (len(rows), amount)
+        out[sym] = (int(np.isfinite(close[1:]).sum()), amount)
     return out
 
 
@@ -158,9 +181,11 @@ def build(min_bars: int, keep_st: bool, names_mode: str = "live",
           timeout: float = 8.0, min_amount: float = MIN_AMOUNT) -> tuple[list[str], dict]:
     symbols = panel_stocks()
     names, name_report = resolve_names(symbols, names_mode, timeout)
-    stats = panel_stats(symbols)
+    cal = panel_calendar()
+    stats = panel_stats(symbols, cal)
     report = {
         "panel_stocks": len(symbols),
+        "panel_end": cal[-1] if cal else "",
         **name_report,
         "dropped_st": 0,
         "dropped_no_name": 0,
@@ -220,10 +245,10 @@ def main() -> int:
               file=sys.stderr)
     if report["dropped_no_amount"] > 0.1 * report["panel_stocks"]:
         print(f"警告：{report['dropped_no_amount']}/{report['panel_stocks']} 只判不了流动性被剔除，"
-              f"先查 {CSV_PANEL} 的 amount 列是不是整列断供，别当成「筛掉了不流动的票」",
+              f"先查 {BIN_PANEL} 的 amount.day.bin 是不是整列断供，别当成「筛掉了不流动的票」",
               file=sys.stderr)
     if not kept:
-        raise SystemExit("名单是空的——先查 csv 面板在不在（/data/work/qlib_data/csv）")
+        raise SystemExit(f"名单是空的——先查 bin 面板在不在（{BIN_PANEL}）")
     if not args.dry_run:
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)

@@ -214,12 +214,59 @@ def score_frame(art: artifacts.Artifacts, beg: str | None = None,
 
 
 class RankingNotReady(RuntimeError):
-    """当日全票池的分数还没算好，而这条请求明确说了「不等」。
+    """当日全票池的分数还没算好，而这条调用明确说了「不等」。
 
     为什么要专门有这么个异常而不是让它慢慢算：`/api/selector/rank` 是持仓页**同步在等**的接口
     （App 侧 60 秒、后端 120 秒），而放开全市场之后第一次冷打分要几百秒。把它打死的方式是
     让 App 显示「都没上榜」——那是假结论。未就绪必须是看得见的一个状态。
     """
+
+
+# 进榜只数低于名单的这个比例 = 面板那天有成片缺日线，名单只剩半个市场（2026-10-22 实测
+# 沪市 1,326 只整天空着，1,554/2,882 = 54% 照样出得出名单）。上游那条覆盖率告警是自己数的，
+# 这里数的是「真正进了榜的只数」，两者不重复：因子算不出来、整批无数据都只会在这里露出来。
+RANK_MIN_RATIO = float(os.environ.get("QLIB_RANK_MIN_RATIO", "0.8"))
+# 已经报过的交易日：预热、/health、每次冷请求都会走这里，同一天刷屏等于没人看
+_alerted_dates: set[str] = set()
+
+
+def ranking_coverage_problem(date: str, ranked: int, pool: int,
+                             min_ratio: float = RANK_MIN_RATIO) -> dict | None:
+    """进榜只数明显少于名单时给出读数（含分子分母），否则 None。名单为空不判（上游是硬错）。"""
+    if pool <= 0:
+        return None
+    ratio = ranked / pool
+    if ratio >= min_ratio:
+        return None
+    return {"date": date, "ranked": ranked, "pool": pool,
+            "ratio": round(ratio, 3), "min_ratio": min_ratio}
+
+
+def _send_alert(title: str, text: str) -> None:
+    """钉钉运维群。scripts/ 已经在本模块开头加进 sys.path，与 16:00 那条链路同一个机器人。"""
+    import alert_pusher
+
+    name, url, secret = alert_pusher.resolve_webhook(alert_pusher.DINGTALK, "ding_ops")
+    alert_pusher.send(alert_pusher.DINGTALK, url, secret, title, text)
+
+
+def alert_ranking_coverage(problem: dict | None) -> bool:
+    """把打分覆盖问题推出去，同一天只推第一条。返回 True = 这条真的发了。"""
+    if not problem:
+        return False
+    with _cache_lock:
+        if problem["date"] in _alerted_dates:
+            return False
+        _alerted_dates.add(problem["date"])
+    text = (f"{problem['date']} 打分进榜 {problem['ranked']}/{problem['pool']} 只"
+            f"（{problem['ratio'] * 100:.1f}%，下限 {problem['min_ratio'] * 100:.0f}%）\n"
+            "先查 scripts/qlib_update_bin.py 那条日线覆盖率读数：多半是行情迟到、面板那天留了空洞，"
+            "下一次增量会自动回补。\n这份名单只覆盖了部分市场，别当全市场结论用。")
+    try:
+        _send_alert("qlib 打分覆盖异常", text)
+    except Exception as exc:  # noqa: BLE001 - 告警发不出去也不能把榜单带崩
+        logger.warning("打分覆盖告警发不出去：%s", exc)
+    return True
 
 
 def _cached_rows(key: tuple) -> list[dict] | None:
@@ -279,6 +326,8 @@ def day_ranking(refresh: bool = False, wait: bool = True) -> list[dict]:
         logger.info("qlib 打分 %s：%d/%d 只进榜（因子不足 %d 行、整批无数据 %d 只），耗时 %.1f 秒",
                     date, total, score_stats["pool"], score_stats["thin_rows"],
                     score_stats["no_row"], time.time() - started)
+        # 分数照样返回（半市场的名单也比没有强），但「只剩半个市场」这件事必须自己说出口
+        alert_ranking_coverage(ranking_coverage_problem(date, total, score_stats["pool"]))
         return rows
 
 
@@ -369,21 +418,53 @@ def _closes(symbols: list[str], date: str) -> dict[str, float]:
             for inst, v in frame["$close"].items()}
 
 
-def stock_names(codes: list[str]) -> dict[str, str]:
-    """股票名取自 Mongo 的 bk_stocks（与 8002 插件同源）。取不到就返回空表，名字是展示字段。"""
-    try:
-        import pymongo
+def _names_from_live(codes: list[str]) -> dict[str, str]:
+    """腾讯现名快照（与 8002 那条链的剔 ST 判据同源）。取不到的代码不出现在结果里。"""
+    from stock_selector.quote import tencent
 
-        db = pymongo.MongoClient("127.0.0.1", 27017,
-                                 serverSelectionTimeoutMS=4000)["eastmoney_news"]
-        cursor = db["bk_stocks"].find({}, {"_id": 0, "stock_code": 1, "stock_name": 1})
-        wanted = {str(c).zfill(6) for c in codes}
-        out: dict[str, str] = {}
-        for doc in cursor:
-            code = str(doc.get("stock_code", "")).zfill(6)[-6:]
-            if code in wanted and doc.get("stock_name"):
-                out.setdefault(code, str(doc["stock_name"]))
-        return out
-    except Exception as exc:  # noqa: BLE001 - 名称缺失不该让整次选股失败
-        logger.warning("股票名取不到（bk_stocks）：%s", exc)
-        return {}
+    return tencent.fetch_names(list(codes), timeout=8.0)
+
+
+def _names_from_mongo(codes: list[str]) -> dict[str, str]:
+    """兜底：Mongo bk_stocks。这张表靠人工触发导入，最近一次是 2026-05-19，会过期。"""
+    import pymongo
+
+    db = pymongo.MongoClient("127.0.0.1", 27017,
+                             serverSelectionTimeoutMS=4000)["eastmoney_news"]
+    cursor = db["bk_stocks"].find({}, {"_id": 0, "stock_code": 1, "stock_name": 1})
+    wanted = {str(c).zfill(6) for c in codes}
+    out: dict[str, str] = {}
+    for doc in cursor:
+        code = str(doc.get("stock_code", "")).zfill(6)[-6:]
+        if code in wanted and doc.get("stock_name"):
+            out.setdefault(code, str(doc["stock_name"]))
+    return out
+
+
+def stock_names(codes: list[str]) -> dict[str, str]:
+    """股票名：先问现名，现名答不上来的那几只才翻 bk_stocks。
+
+    顺序不能反。bk_stocks 是 2026-05-19 那次导入的冻结表，改名/摘帽在它眼里不会发生；
+    现名接口一次挂掉也不该让名单发成一片空名字，所以它只兜「这一只没答上来」，
+    整批失败时退回它。名字是展示字段，取不到就留空，绝不编一个。
+    """
+    wanted = sorted({str(c).zfill(6)[-6:] for c in codes})
+    try:
+        live = _names_from_live(wanted)
+    except Exception as exc:  # noqa: BLE001 - 网络失败退旧表，不能打断选股
+        logger.warning("现名整批取不到，退回 bk_stocks：%s", exc)
+        live = {}
+    out = {c: live[c] for c in wanted if live.get(c)}
+    missing = [c for c in wanted if c not in out]
+    if missing:
+        try:
+            stale = _names_from_mongo(missing)
+        except Exception as exc:  # noqa: BLE001 - 名称缺失不该让整次选股失败
+            logger.warning("股票名兜底也取不到（bk_stocks）：%s", exc)
+            stale = {}
+        out.update(stale)
+        if len(missing) != len(stale):
+            logger.info("股票名：现名 %d/%d，旧表补 %d，仍缺 %d",
+                        len(out) - len(stale), len(wanted), len(stale),
+                        len(missing) - len(stale))
+    return out

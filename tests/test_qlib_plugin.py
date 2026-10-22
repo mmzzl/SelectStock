@@ -432,3 +432,38 @@ def test_health_and_detail_report_the_live_pool_caliber(art_dir, monkeypatch):
     assert health["scoring"]["thin_rows"] == 774 and health["scoring"]["universe"] == 5004
     detail = client.get("/api/strategy/detail").json()["data"][0]
     assert detail["params"]["universe"] == {"source": "model", "pool_size": 2}
+
+
+# ---------------------------------------------------------------- 名单展示名
+
+def test_display_names_come_from_the_live_quote_not_the_frozen_table(monkeypatch):
+    """展示名必须问现名（腾讯快照）：Mongo bk_stocks 最近一次导入是 2026-05-19，
+    拿它当首选项，「ST 摘帽/改名」在页面上永远看不出来（2026-10-23 实测当日榜内 1/30 已是旧名）。
+    """
+    asked: list[list[str]] = []
+    stale = {"600000": "曾经的名字", "000001": "平安银行"}
+    monkeypatch.setattr(serving, "_names_from_live",
+                        lambda codes: {"600000": "浦发银行"})
+    monkeypatch.setattr(serving, "_names_from_mongo",
+                        lambda codes: (asked.append(list(codes)),
+                                       {c: stale[c] for c in codes if c in stale})[1])
+    got = serving.stock_names(["600000", "000001"])
+    assert got["600000"] == "浦发银行"
+    assert asked == [["000001"]]        # 现名答上来的那些，不该再去翻旧表
+
+
+def test_a_name_the_quote_does_not_answer_falls_back_to_the_table(monkeypatch):
+    """现名偶尔漏一只（停牌/接口抖动）时退回旧表：名字是展示字段，宁可用旧名也不能空着。"""
+    monkeypatch.setattr(serving, "_names_from_live", lambda codes: {})
+    monkeypatch.setattr(serving, "_names_from_mongo", lambda codes: {"000001": "平安银行"})
+    assert serving.stock_names(["000001"]) == {"000001": "平安银行"}
+
+
+def test_a_quote_outage_still_ships_names(monkeypatch):
+    """整批现名取不到（网络全挂）不能把名单发成一片空名字，也不能抛出去打断选股。"""
+    def boom(codes):
+        raise OSError("connect timeout")
+
+    monkeypatch.setattr(serving, "_names_from_live", boom)
+    monkeypatch.setattr(serving, "_names_from_mongo", lambda codes: {"000001": "平安银行"})
+    assert serving.stock_names(["000001"]) == {"000001": "平安银行"}

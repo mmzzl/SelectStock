@@ -174,9 +174,12 @@ decision.reason                                # 中文理由，告警链路要�
 
 **日线 `amount` 从哪来**：日线爬虫的两个源（腾讯 `ifzq`、新浪 `getKLineData`）**都不给成交额**，
 所以 `scripts/kline_spider.py` 干脆不写这个字段（留 `null`，绝不写 0——0 会被下游当成真·零成交）。
-精确值另有两条路进来：① `scripts/merge_snapshot_amount.py` 每天 15:45 把刚落的快照成交额并回当天
+精确值另有两条路进来：① `scripts/merge_snapshot_amount.py` 每天 16:50 把快照成交额并回当天
 那根日线（`--days 5` 往回自愈，因为爬虫只写"比库里最新更靠后"的 K 线，哪天少抓一批，补进来的行
-当时还没有成交额）；② `scripts/backfill_kline_amount.py` 从腾讯的兄弟接口 `newfqkline` 回补空窗
+当时还没有成交额。2026-10-23 从 15:45 挪到 16:50：沪市那批行本身要 16:24~16:31 才落库，15:45
+那次对沪市是「要合并的行还不存在」，于是 17:15 的面板增量读到的是有价无额的一天，
+而 `vwap = amount/volume` 缺额时会兜底成 `close`，Alpha158 里唯一用 `$vwap` 的 VWAP0 就退成常数 1）；
+② `scripts/backfill_kline_amount.py` 从腾讯的兄弟接口 `newfqkline` 回补空窗
 ——它比爬虫用的 `ifzq/fqkline`（只有 6 列）多两列，第 8 下标是成交额、单位**万元**，和东财/快照
 逐只对得上（差几十元 = 取整）。东财 `push2his` 也能给，但本机打它会被随机 RST（并发一高整批挂），
 所以回补走腾讯。两条都只写 `amount`、`upsert=False`，绝不凭空造 K 线；写完要
@@ -2006,8 +2009,9 @@ sudo systemctl enable --now llama-server   # 端口 18080
 | 没有在跑的同类任务 | `pgrep -af qlib_run` | 只匹配到自己那条 |
 
 **面板没更到最新**是最常见的坏法：训练会照样跑完、IC 也照样出一个数，只是那段「留出」根本没有数据。
-补面板：16:00 定时任务 `scripts/qlib_update_bin.py`（`config/inputs.conf`），手动补一次就
-`/usr/bin/python3 -u scripts/qlib_update_bin.py --check-plugin`（约 40 秒，跑完自动通知 8003 清缓存）。
+补面板：17:15 定时任务 `scripts/qlib_update_bin.py`（`config/inputs.conf`，2026-10-23 从 16:00 挪过来，
+因为沪市行情 16:24~16:31 才落库），手动补一次就
+`/usr/bin/python3 -u scripts/qlib_update_bin.py --scope universe --check-plugin`（约 40 秒，跑完自动通知 8003 清缓存）。
 
 `MLFLOW_ALLOW_FILE_STORE=true` 不用手动设，脚本里 `setdefault` 了；不设的话新版 mlflow 会拒绝文件型
 backend，训练直接抛异常。
@@ -2114,9 +2118,11 @@ curl -s http://172.17.0.1:8003/api/health | python3 -m json.tool   # model 段�
 - **地址写 `172.17.0.1` 不写 `localhost`**——8003 没监听 127.0.0.1。
 - **④ 只能直连 8003**，绝不要走后端 `start_run`：那会推真实钉钉「本次选股命中 30 只」。
 - **时间避开 17:30（选股）和 18:20（持仓诊断）**，换模型在 **17:35 之后**动手。
-- **换了票池要单独确认一次**：新池里那些原先不在池中的票，要等**下一次 16:00 增量任务**才进增量链，
-  换线当天它们的数据只到全量 dump 的最后一天。下一次 16:00 跑完抽查这几只有没有更新到当天。
-- 面板换了新池之后，16:00 的 `qlib_update_bin.py` 会自动读产物里的 `pool.txt` 跟着新池更新，不用另改。
+- **换了票池要单独确认一次**：新池里那些原先不在池中的票，要等**下一次 17:15 增量任务**才进增量链，
+  换线当天它们的数据只到全量 dump 的最后一天。下一次 17:15 跑完抽查这几只有没有更新到当天。
+- 打分池现在是 `--scope universe`（15:55 的 `scripts/qlib_daily_universe.py` 按全市场规则每天重算，
+  2026-10-23 起它直接读 bin 面板），17:15 的 `qlib_update_bin.py` 跟着那份 `data/qlib/universe.txt` 补，
+  不再读产物里的 `pool.txt`（那是训练池 300 只）。
 - 回滚 = 把备份目录的四个文件再 `cp` 回去 + 再调一次 refresh。
 - `data/qlib/model` 里的名字（`liq300.txt` 等 instruments）别当备份用，实盘池那份会被覆盖；
   要留旧池就单独存（例：`instruments/liq300_trainend2021.txt`）。
