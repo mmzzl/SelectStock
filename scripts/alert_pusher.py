@@ -69,6 +69,7 @@ KIND_LABEL = {
     "event_bullish": "利多事件", "event_bearish": "利空事件",
 }
 ACTION_LABEL = {"buy": "买入", "sell": "卖出"}
+OPPOSITE = {"buy": "sell", "sell": "buy"}
 DINGTALK, WECOM = "dingtalk", "wecom"
 
 
@@ -181,26 +182,45 @@ def fmt_line(item: dict, *, blocked: bool = False) -> str:
     return "\n".join(part for part in (head, detail, tail and f"  {tail}") if part)
 
 
+def fmt_conflict(entry: dict) -> str:
+    """冲突行：两个方向各是什么信号、各在几点几分，一条都不少——但不给任何下单量。"""
+    sides = "／".join(f"{ACTION_LABEL.get(s['action'], s['action'])}：{s['label']}"
+                      f"（{s['at']}，{s['price']}）" for s in entry["sides"])
+    head = f"- {entry['name']} {entry['code']}｜{sides}"
+    return "\n".join(part for part in (head, f"  {entry['note']}") if part)
+
+
 def render(items: list[dict], blocked: list[dict], day: str, moment: datetime,
-           cap: int = 40, merged: int = 0, today: int = 0) -> tuple[str, str]:
-    """一批决策 → (标题, markdown 正文)。放行与拦截分列，拦截必须带原因。
+           cap: int = 40, merged: int = 0, today: int = 0,
+           conflicts: list[dict] | None = None) -> tuple[str, str]:
+    """一批决策 → (标题, markdown 正文)。放行、冲突、拦截分列，后两段必须带原因。
 
     `cap` 是每段最多列几条：全市场盘中一批可能上百条，而机器人对消息长度有上限——宁可截断
     并指回当日决策文件，也不要发出一条被平台拒收的长消息（标题里的条数仍是全量，不掩饰）。
     `merged`/`today` 是「同票同方向当天只报一次」归并掉的条数与当天累计只数：归并 must 可见，
     否则读的人会以为今天这只票就只动过一次。
     """
-    title = f"[{day}] 盘中信号 {len(items)} 条"
+    conflicts = conflicts or []
+    if items:
+        title = f"[{day}] 盘中信号 {len(items)} 条"
+    elif conflicts:
+        title = f"[{day}] 本批 {len(conflicts)} 只同日买卖冲突，先不给下单建议"
+    else:
+        title = f"[{day}] 本批 {len(blocked)} 条信号全部被风控拦下"
     lines = [f"**{moment:%H:%M:%S}** 更新"]
     if today:
         lines.append(f"当天累计已推 {today} 只（同票同方向只报第一次，重复的已归并）")
+    if not items and not conflicts:
+        lines.append("本批没有可执行信号。")
     if items:
         lines += ["", "### 可执行", *[fmt_line(item) for item in items[:cap]]]
         if len(items) > cap:
             lines.append(f"- 其余 {len(items) - cap} 条见 data/intraday_decisions/{day}.parquet")
-    else:
-        title = f"[{day}] 本批 {len(blocked)} 条信号全部被风控拦下"
-        lines += ["", "本批没有可执行信号。"]
+    if conflicts:
+        lines += ["", "### 信号冲突（同一只票当天既买又卖，两条都不给下单建议）",
+                  *[fmt_conflict(entry) for entry in conflicts[:cap]]]
+        if len(conflicts) > cap:
+            lines.append(f"- 另有 {len(conflicts) - cap} 只同样冲突，明细在当日决策文件")
     if blocked:
         lines += ["", "### 风控已拦截（不给下单建议，原因如下）",
                   *[fmt_line(item, blocked=True) for item in blocked[:cap]]]
@@ -251,6 +271,10 @@ class AlertPusher:
     - **当日归并**：同一只票同一方向当天只进第一条消息，后面重复的只计数。引擎那侧的去重
       键是「票+信号种类」，而一只票可以同时命中死叉、跌破支撑、托单好几种，票级看就是刷屏；
       决策照样全量落 parquet，一条没丢。
+    - **同日反向 = 冲突**：同一只票当天又给买点又给卖点时，两条一起撤下「可执行」，改列一段
+      「信号冲突」。风控的 `family_flip` 只拦「同一个指标几十秒内翻面」，剩下的两头（不同指标
+      各说一面、反方向落在下一批）只能在这里兜——上一条要是已经发出去了，消息撤不回来，
+      就把话说清：那批已经推过卖出，这条买入不再给下单建议。
     - **攒批窗口**：`flush` 秒内的一批合成一条。窗口从**本批第一条**到达时起算，否则常驻
       空闲会让「窗口」永远在早上就已到期、下一条一来立刻发。
     - **即时通道**：`instant` 里的种类（默认跌停、利空事件）一到就发，不等窗口——这类恰恰
@@ -276,7 +300,7 @@ class AlertPusher:
         self.blocked: list[dict] = []
         self.window: float | None = None        # 本批第一条到达的时刻；None = 批是空的
         self.day = ""
-        self._seen: set[tuple] = set()          # 当日已进过消息的 (代码, 方向)
+        self._seen: dict[tuple, dict] = {}     # 当日已进过消息的 (代码, 方向) → 那条决策
         self._seen_block: set[tuple] = set()     # 当日已说过的 (代码, 拦截规则)
         self.merged = 0                         # 本批被归并掉的条数
         self.merged_block = 0
@@ -289,7 +313,7 @@ class AlertPusher:
         """换日就把当日归并表清空：昨天的「报过一次」管不到今天。"""
         if day and day != self.day:
             self.day = day
-            self._seen, self._seen_block = set(), set()
+            self._seen, self._seen_block = {}, set()
             self.merged = self.merged_block = self.pushed_today = 0
 
     def pump(self) -> int:
@@ -307,7 +331,7 @@ class AlertPusher:
                 if key in self._seen:
                     self.merged += 1
                     continue
-                self._seen.add(key)
+                self._seen[key] = item
                 self.pushed_today += 1
                 if item.get("kind") in self.instant:
                     self.urgent = True
@@ -324,6 +348,47 @@ class AlertPusher:
             kept += 1
         return kept
 
+    def _conflict_entry(self, code: str, pair: dict[str, dict], fresh: set[str]) -> dict:
+        """把两个方向拼成一行冲突：按时间排，并说明哪一头属于已经发出去的那批。"""
+        items = sorted((pair[a] for a in ("buy", "sell") if a in pair),
+                       key=lambda item: item.get("ts") or 0)
+
+        def at(item: dict) -> str:
+            return datetime.fromtimestamp(item.get("ts") or self.now()).strftime("%H:%M:%S")
+
+        stale = next((pair[a] for a in pair if a not in fresh), None)
+        if stale is None:
+            note = ("同一批里两个方向都给到，说明指标在来回摆而不是出了新信息；"
+                    "两条都不当下单依据，先别看这一只")
+        else:
+            note = (f"{at(stale)} 那批已推过{ACTION_LABEL.get(stale.get('action'), '另一条')}"
+                    f"（{KIND_LABEL.get(stale.get('kind'), '-')}），这条反向不再给下单建议；"
+                    "两条都别按")
+        return {"code": code, "name": (items[0].get("name") or "").strip() or code,
+                "sides": [{"action": item.get("action"),
+                           "label": KIND_LABEL.get(item.get("kind"), item.get("kind") or "-"),
+                           "price": item.get("signal_price"), "at": at(item)} for item in items],
+                "note": note}
+
+    def _split_conflicts(self) -> list[dict]:
+        """把本批里「同一只票正反两面都给了建议」的票摘出来，返回冲突行，剩下的留在 `self.batch`。"""
+        sides_by_code: dict[str, dict[str, dict]] = {}
+        for item in self.batch:
+            sides_by_code.setdefault(str(item.get("code")), {})[item.get("action")] = item
+        conflicts = []
+        for code, fresh in sides_by_code.items():
+            # 反面不在本批、但当天已经推出去过 → 也算冲突：那一条撤不回来，只能把话说清
+            missing = {OPPOSITE[a] for a in fresh if OPPOSITE.get(a)} - set(fresh)
+            prior = {a: self._seen[(code, a)] for a in missing if (code, a) in self._seen}
+            if len(fresh) < 2 and not prior:
+                continue
+            conflicts.append(self._conflict_entry(code, {**fresh, **prior}, set(fresh)))
+            self.pushed_today -= len(fresh)
+        if conflicts:
+            self.batch = [item for item in self.batch
+                          if str(item.get("code")) not in {c["code"] for c in conflicts}]
+        return conflicts
+
     def due(self) -> bool:
         return (self.window is not None
                 and self.clock() - self.window >= self.flush)
@@ -332,15 +397,17 @@ class AlertPusher:
         """发一条摘要消息并清空缓冲；没内容就不发（空消息比不发更吵）。"""
         if not self.batch and not self.blocked:
             return False
+        conflicts = self._split_conflicts()
         moment = datetime.fromtimestamp(self.now())
         # 日期在发的那一刻算，不在启动时算：隔夜常驻的进程不能把新的一天标成昨天。
         title, text = render(self.batch, self.blocked,
                              moment.strftime("%Y-%m-%d"), moment, cap=self.cap,
                              merged=self.merged + self.merged_block,
-                             today=self.pushed_today)
+                             today=self.pushed_today, conflicts=conflicts)
         ok = self.sender(self.channel, self.url, self.secret, title, text)
-        logger.info("告警批次%s：可执行 %d 条、拦截 %d 条、归并 %d 条", "成功" if ok else "失败",
-                    len(self.batch), len(self.blocked), self.merged + self.merged_block)
+        logger.info("告警批次%s：可执行 %d 条、冲突 %d 只、拦截 %d 条、归并 %d 条",
+                    "成功" if ok else "失败", len(self.batch), len(conflicts),
+                    len(self.blocked), self.merged + self.merged_block)
         if ok:
             self.sent += 1
         else:

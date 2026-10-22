@@ -27,7 +27,8 @@ from stock_selector.intraday.signals import SignalConfig, View, evaluate  # noqa
 from stock_selector.intraday.store import append_parquet, doc_id, row    # noqa: E402
 from stock_selector.realtime import bus                                  # noqa: E402
 from stock_selector.realtime.pool import MonitorPool                     # noqa: E402
-from stock_selector.risk import RiskEngine                                # noqa: E402
+from stock_selector.risk import RiskEngine                               # noqa: E402
+from stock_selector.risk import build_context                            # noqa: E402
 
 # 2026-10-12 是周一，10:00 在早盘时段内
 NOW = datetime(2026, 10, 12, 10, 0, 0)
@@ -254,6 +255,40 @@ def test_dead_cross_and_rsi_bands():
     assert got["rsi_overbought"].action == "sell"
 
 
+def test_family_groups_mirror_kinds():
+    """镜像种类归到同一个「族」：一个族 = 一个指标的两侧，两侧同时为真就是自相矛盾。
+
+    实测 2026-10-13~10-22 有 88 个票日「同日既放行买又放行卖」，全部是这些成对出现的
+    （bid_stack↔ask_stack、金叉↔死叉、超卖↔超买…），所以仲裁必须按族判，不能按 kind。
+    """
+    from stock_selector.intraday.signals import FAMILY
+
+    for a, b in (("bid_stack", "ask_stack"), ("ma_golden_cross", "ma_dead_cross"),
+                 ("macd_golden_cross", "macd_dead_cross"),
+                 ("rsi_oversold_bounce", "rsi_overbought"),
+                 ("boll_break_up", "boll_break_dn"),
+                 ("volume_blast_up", "volume_surge_drop"),
+                 ("breakout_resistance", "support_break"),
+                 ("order_flow_inflow", "order_flow_outflow")):
+        assert FAMILY[a] == FAMILY[b], (a, b)
+        assert FAMILY[a] not in (a, b)              # 族名是共用的第三个名字
+    # 事件类是两个独立来源（利多公告 / 减持公告），不该并成一族互相抵消
+    assert FAMILY["event_bullish"] != FAMILY["event_bearish"]
+
+
+def test_same_family_opposite_directions_cancel_in_one_tick():
+    """RSI 从 20 跳到 80：超卖回升(买)和进入超买(卖)同拍都成立 → 两条都不发。
+
+    同一族的两条互相抵消，任何一侧都没有依据；这里判不了就不给建议，和盘口比值算不出时
+    返回 None 是同一个口径。
+    """
+    v = View(code="600000", quote=quote(), held=True, snap=snap(
+        {"close": 10.5, "rsi14": 80.0, "vol_ma5": 100.0, "volume": 100.0},
+        {"close": 10.0, "rsi14": 20.0, "vol_ma5": 100.0, "volume": 100.0}))
+    kinds = {s.kind for s in evaluate(v, SignalConfig())}
+    assert {"rsi_oversold_bounce", "rsi_overbought"} & kinds == set()
+
+
 def test_volume_surge_drop_needs_both_blast_and_fall():
     def view(volume, bar_pct):
         return View(code="600000", quote=quote(), held=True, snap=snap(
@@ -468,6 +503,58 @@ def test_next_day_frees_the_same_signal(client, out_dir):
     bus.emit_ticks(client, [tick(price=11.0, limit_up=11.0, ts=clock["value"].timestamp())])
     assert engine.drain()["decisions"] == 1
     assert client.sets[bus.emitted_key("2026-10-13")] == {"600000|limit_up_touch"}
+
+
+def test_family_flip_rule_blocks_the_second_direction():
+    """同一个族几十秒内翻了面：第二条不是新信息，是抖动，风控拦掉并说清前一条是什么。
+
+    2026-10-22 09:30 实测：盘口买/卖比 09:30:12 是 0.085（压单→放行卖出 800 股），09:30:48
+    变成 2.911（托单→放行买入 2100 股），两条都进了同一条钉钉消息。
+    """
+    eng = RiskEngine(dict(RISK, flip_cooldown=1800))
+    q = quote(price=13.55, limit_up=15.0, limit_down=12.28)
+    base = dict(signal_price=13.55, kline=kline(price=13.55), quote=q)
+
+    flip = eng.review(build_context("600272", "buy", family="盘口", prev_action="sell",
+                                    prev_age_s=36.0, **base))
+    assert flip.blocked and "family_flip" in flip.reason
+    assert "36 秒" in flip.reason and "卖出" in flip.reason
+
+    same_side = eng.review(build_context("600272", "buy", family="盘口", prev_action="buy",
+                                         prev_age_s=36.0, **base))
+    assert not same_side.blocked                     # 同向重复由当日去重管，不归这条
+    stale = eng.review(build_context("600272", "buy", family="盘口", prev_action="sell",
+                                     prev_age_s=3600.0, **base))
+    assert not stale.blocked                         # 过了冷却窗口的翻面是真反手
+    blind = eng.review(build_context("600272", "buy", family="盘口", **base))
+    assert not blind.blocked                         # 当天这个族还没给过方向
+    offline = eng.review(build_context("600272", "buy", prev_action="sell", prev_age_s=36.0,
+                                       **base))
+    assert not offline.blocked                       # 盘后内核不传 family：整条规则让路
+
+
+def test_engine_blocks_book_flip_within_the_cooldown(client, out_dir):
+    """引擎把「这个族上次给的是哪个方向、隔了多久」喂给风控；翻面那条照样落盘，只是不给建议。"""
+    clock = {"value": NOW}
+    engine = make_engine(client, out_dir=out_dir,
+                         risk=RiskEngine(dict(RISK, flip_cooldown=1800)),
+                         cfg=EngineConfig(held={"600000": 1000.0}),
+                         now=lambda: clock["value"])
+
+    def round_at(offset, bids, asks):
+        stamp = TS + offset
+        clock["value"] = datetime.fromtimestamp(stamp)
+        bus.put_quotes(client, {"600000": quote(bids=bids, asks=asks)})
+        bus.emit_ticks(client, [tick(ts=stamp)])
+        return engine.drain()["decisions"]
+
+    assert round_at(0, [[10.0, 100]], [[10.01, 100]]) == 0      # 第一拍只立基线
+    assert round_at(1, [[10.0, 10]], [[10.01, 118]]) == 1       # 压单 → 卖出放行
+    assert round_at(37, [[10.0, 300]], [[10.01, 100]]) == 1     # 托单 → 买入被拦
+    last = dict(client.xrange(bus.KEY_DECISIONS)[-1][1])
+    assert last["kind"] == "bid_stack" and last["action"] == "buy"
+    assert last["verdict"] == "block" and "family_flip" in last["risk_reason"]
+    assert last["pushed"] == "0"
 
 
 def test_dedupe_falls_back_to_cooldown_when_bus_write_fails(client, out_dir):
@@ -1060,6 +1147,94 @@ def test_pusher_merges_repeated_block_reasons(client, pusher):
     p.flush_batch()
     text = sent[0][4]
     assert text.count("已涨停，买不进") == 1 and "超出可用资金" in text
+
+
+def test_pusher_moves_a_same_batch_reversal_into_a_conflict_line(client, pusher):
+    """同一批里同一只票又买又卖：两条都不给下单建议，改说「这只有冲突，先别动」。
+
+    2026-10-22 早上实测的就是这一种：09:30:12 压单放行卖出 800 股、09:30:48 托单放行
+    买入 2100 股，两条进了同一条消息，用户只能问「那我听哪个」。
+    """
+    sent = []
+    bus.emit_stream(client, bus.KEY_DECISIONS,
+                    [decision_item(action="sell", kind="ask_stack", verdict="allow", pushed=1,
+                                   shares=800, order_amount=10840.0, ts=TS + 12),
+                     decision_item(action="buy", kind="bid_stack", verdict="allow", pushed=1,
+                                    shares=2100, order_amount=28455.0, ts=TS + 48)])
+    p = pusher.AlertPusher(client, url="https://x", flush=0.0,
+                           sender=lambda *a: sent.append(a) or True, now=lambda: TS,
+                           clock=lambda: 0.0, sleeper=lambda s: None, replay=True)
+    assert p.pump() == 2
+    p.flush_batch()
+    text = sent[0][4]
+    assert "信号冲突" in text
+    assert "### 可执行" not in text
+    assert "建议 800 股" not in text and "建议 2100 股" not in text   # 两个方向都不给下单量
+    assert "卖盘压单" in text and "买盘托单" in text                   # 两边都要点名
+    assert "10:00:12" in text and "10:00:48" in text                  # 各自的时刻，复盘对得上
+
+
+def test_pusher_conflicts_a_later_reversal_against_what_it_already_sent(client, pusher):
+    """反方向落在下一批时不能装作没事：上一条已经发出去了，这条要说清「刚推过买入，现在又卖出」。"""
+    sent = []
+    bus.emit_stream(client, bus.KEY_DECISIONS,
+                    [decision_item(action="sell", kind="ask_stack", verdict="allow", pushed=1,
+                                   shares=800, order_amount=10840.0, ts=TS + 12)])
+    p = pusher.AlertPusher(client, url="https://x", flush=0.0,
+                           sender=lambda *a: sent.append(a) or True, now=lambda: TS,
+                           clock=lambda: 0.0, sleeper=lambda s: None, replay=True)
+    p.pump()
+    p.flush_batch()
+    assert "卖盘压单" in sent[0][4] and "信号冲突" not in sent[0][4]
+
+    bus.emit_stream(client, bus.KEY_DECISIONS,
+                    [decision_item(action="buy", kind="bid_stack", verdict="allow", pushed=1,
+                                   shares=2100, order_amount=28455.0, ts=TS + 48)])
+    p.pump()
+    p.flush_batch()
+    text = sent[1][4]
+    assert "信号冲突" in text and "### 可执行" not in text
+    assert "建议 2100 股" not in text
+    assert "10:00:12 那批" in text                              # 承认上一条已经发过了
+
+
+def test_pusher_same_direction_never_becomes_a_conflict(client, pusher):
+    """冲突只判反向：同一只票两种买入信号照旧进可执行（引擎去重按种类，这里按方向）。"""
+    sent = []
+    bus.emit_stream(client, bus.KEY_DECISIONS,
+                    [decision_item(action="buy", kind="bid_stack", verdict="allow", pushed=1,
+                                   shares=2100, ts=TS + 12),
+                     decision_item(action="buy", kind="order_flow_inflow", verdict="allow",
+                                   pushed=1, shares=2100, ts=TS + 48)])
+    p = pusher.AlertPusher(client, url="https://x", flush=0.0,
+                           sender=lambda *a: sent.append(a) or True, now=lambda: TS,
+                           clock=lambda: 0.0, sleeper=lambda s: None, replay=True)
+    p.pump()
+    p.flush_batch()
+    assert "信号冲突" not in sent[0][4] and "可执行" in sent[0][4]
+
+
+def test_pusher_conflict_does_not_swallow_other_codes(client, pusher):
+    """冲突只摘掉冲突那只票的两条，别的时间上挨着的正常信号照常给建议。"""
+    sent = []
+    bus.emit_stream(client, bus.KEY_DECISIONS,
+                    [decision_item(code="600272", name="开开实业", action="sell",
+                                   kind="ask_stack", verdict="allow", pushed=1, shares=800,
+                                   ts=TS + 12),
+                     decision_item(code="600272", name="开开实业", action="buy",
+                                   kind="bid_stack", verdict="allow", pushed=1, shares=2100,
+                                   ts=TS + 48),
+                     decision_item(code="000001", name="平安银行", action="buy",
+                                   kind="vol_ratio_surge", verdict="allow", pushed=1,
+                                   shares=3800, ts=TS + 55)])
+    p = pusher.AlertPusher(client, url="https://x", flush=0.0,
+                           sender=lambda *a: sent.append(a) or True, now=lambda: TS,
+                           clock=lambda: 0.0, sleeper=lambda s: None, replay=True)
+    p.pump()
+    p.flush_batch()
+    text = sent[0][4]
+    assert "建议 3800 股" in text               # 没冲突的那只照常给量
+    assert "建议 800 股" not in text and "建议 2100 股" not in text
 
 
 def test_pusher_forgets_yesterday_when_the_day_rolls(client, pusher):

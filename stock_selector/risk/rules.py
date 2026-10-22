@@ -1,4 +1,4 @@
-"""risk/rules.py — 九条风控规则：每条只回答「这个方向这一单能不能成交、值不值得成交」。
+"""risk/rules.py — 十条风控规则：每条只回答「这个方向这一单能不能成交、值不值得成交」。
 
 约定（引擎依赖它，别在规则里各写各的）：
 - 返回 `Verdict`，`status` 取 allow / block / adjust；**block 必须给出人能看懂的中文理由**，
@@ -33,6 +33,9 @@ class Verdict:
 
 def _wan(value: float | None) -> str:
     return f"{(value or 0) / 1e4:.0f}万"
+
+
+ACTION_CN = {"buy": "买入", "sell": "卖出"}
 
 
 def tradability(ctx: RiskContext, cfg, state: dict) -> Verdict:
@@ -87,6 +90,36 @@ def t_plus_1(ctx: RiskContext, cfg, state: dict) -> Verdict:
         return Verdict("t_plus_1", "block",
                        "T+1：该股今日有买入成交，明天才是可卖日", {"bought_today": True})
     return Verdict("t_plus_1", metrics={"bought_today": False})
+
+
+def family_flip(ctx: RiskContext, cfg, state: dict) -> Verdict:
+    """镜像族反向冷却：同一个指标几十秒内翻了面，第二条不是新信息，是抖动。
+
+    实测 2026-10-22 09:30 的盘口：09:30:12 买/卖比 0.085（压单→放行卖出 800 股），09:30:48
+    变成 2.911（托单→放行买入 2100 股），两条都进了同一条钉钉消息——对着同一只票同一分钟
+    既喊卖又喊买，用户只能关掉通知。同向的重复由引擎的当日去重管，不归这条。
+    没有 `family`（盘后内核）或当天这个族还没给过方向 → 放行并留指标，判不了不硬拦。
+    """
+    name = "family_flip"
+    if not cfg.flip_cooldown:
+        return Verdict(name, metrics={"skipped": "disabled"})
+    if ctx.family is None:
+        return Verdict(name, metrics={"skipped": "no_family"})
+    if ctx.prev_action is None or ctx.prev_age_s is None:
+        return Verdict(name, metrics={"family": ctx.family, "flip_prev": None})
+    if ctx.prev_action == ctx.action:
+        return Verdict(name, metrics={"family": ctx.family, "same_side": True})
+    if ctx.prev_age_s > cfg.flip_cooldown:
+        return Verdict(name, metrics={"family": ctx.family, "flip_age_s": ctx.prev_age_s})
+    prior = ACTION_CN.get(ctx.prev_action, ctx.prev_action)
+    mine = ACTION_CN.get(ctx.action, ctx.action)
+    age = (f"{ctx.prev_age_s:.0f} 秒" if ctx.prev_age_s < 60
+           else f"{ctx.prev_age_s / 60:.1f} 分钟")
+    return Verdict(name, "block",
+                   f"同一指标（{ctx.family}）{age}前刚给出{prior}建议，"
+                   f"{cfg.flip_cooldown // 60} 分钟内翻面按抖动处理，这条{mine}不给下单建议",
+                   {"family": ctx.family, "flip_prev": ctx.prev_action,
+                    "flip_age_s": round(ctx.prev_age_s, 1)})
 
 
 def buy_quota(ctx: RiskContext, cfg, state: dict) -> Verdict:
@@ -298,7 +331,7 @@ def _last_bar(kline: pd.DataFrame | None) -> dict | None:
     return {"lu": bool(value) if pd.notna(value) else False}
 
 
-# 顺序：便宜的、硬约束的在前（成交性 → T+1 → 买入名额 → 流动性），仓位相关的两条必须相邻
+# 顺序：便宜的、硬约束的在前（成交性 → T+1 → 镜像族翻面 → 买入名额 → 流动性），仓位相关的两条必须相邻
 # 且 cash_budget 在 position 之后（要用它算出的下单金额）、slippage 之前（滑点按压小后的量估）。
-RULES = (tradability, t_plus_1, buy_quota, liquidity, position, cash_budget,
+RULES = (tradability, t_plus_1, family_flip, buy_quota, liquidity, position, cash_budget,
          slippage, model, adx14_rank)

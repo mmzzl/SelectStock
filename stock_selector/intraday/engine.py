@@ -112,6 +112,8 @@ class IntradayEngine:
         self._last_price: dict[str, float] = {}
         self._bid_ratio: dict[str, float] = {}
         self._emitted: dict[str, float] = {}
+        # {(票, 族名): (上次放行的方向, 时刻)}：族是「同一指标的相反两面」，两只票共用一个族名会互相拦
+        self._family_last: dict[tuple[str, str], tuple[str, float]] = {}
         self._kline_cache: OrderedDict[str, object] = OrderedDict()
         self._day_ctx: dict[str, dict] = {}
         self._events_by_code: dict[str, list] = {}
@@ -367,16 +369,28 @@ class IntradayEngine:
         return True
 
     def _review(self, signal: signals.Signal, quote: dict, moment: dt.datetime) -> dict:
-        """单条信号过风控：能不能成交、买多少、什么价成交，都由风控定，不由信号定。"""
+        """单条信号过风控：能不能成交、买多少、什么价成交，都由风控定，不由信号定。
+
+        镜像族的历史在这里交给风控：同一个指标刚给过反方向，`family_flip` 要拿「上一条是什么、
+        隔了多久」才能判这是反手还是抖动。只记放行的那条——被拦掉的那条没有成为建议，不该
+        再把下一个方向也拖住。
+        """
+        stamp = moment.timestamp()
+        prev = self._family_last.get((signal.code, signal.family))
         ctx = build_context(signal.code, signal.action, name=signal.name,
                             signal_price=signal.price, day=self.day,
                             kline=self._kline(signal.code), quote=quote or None,
                             position_value=float(self.cfg.held.get(signal.code, 0.0)),
                             pool_rank=self.cfg.ranks.get(signal.code),
                             bought_today=signal.code in self.cfg.bought_today,
-                            cash_left=self.cfg.cash_left)
+                            cash_left=self.cfg.cash_left,
+                            family=signal.family,
+                            prev_action=prev[0] if prev else None,
+                            prev_age_s=stamp - prev[1] if prev else None)
         decision = self.risk.review(ctx)
-        row = store.row(signal, decision, ts=moment.timestamp(), day=self.day,
+        if not decision.blocked:
+            self._family_last[(signal.code, signal.family)] = (signal.action, stamp)
+        row = store.row(signal, decision, ts=stamp, day=self.day,
                         pushed=not decision.blocked,
                         metrics={"quote_time": quote.get("quote_time", "")})
         if decision.blocked:

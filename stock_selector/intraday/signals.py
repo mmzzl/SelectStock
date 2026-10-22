@@ -17,10 +17,13 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
 from ..risk.snapshot import limit_hit
 from .indicators import Snapshot, crossed_down, crossed_up
+
+logger = logging.getLogger(__name__)
 
 # —— 信号种类（settings.yaml 的 intraday.kinds 用这些名字挑）——
 KINDS = ("ma_golden_cross", "ma_dead_cross", "macd_golden_cross", "macd_dead_cross",
@@ -29,6 +32,29 @@ KINDS = ("ma_golden_cross", "ma_dead_cross", "macd_golden_cross", "macd_dead_cro
          "breakout_resistance", "support_break", "order_flow_inflow", "order_flow_outflow",
          "bid_stack", "ask_stack", "limit_up_touch", "limit_down_touch",
          "event_bullish", "event_bearish")
+
+# 镜像族：一个指标的两个相反侧面。同一族同时给出买和卖，等于同一个量既在说多又在说空，
+# 不构成两条独立证据（实测 88 个「同日反向」票日全部落在这些成对种类上）。
+# 族名直接用大白话，因为它会原样出现在风控拒绝原因里（「同一指标（盘口）36 秒前……」）。
+# 事件族是两个来源（利多公告 / 减持公告），各有各的依据，故意不并成一族互相抵消。
+FAMILY = {
+    "ma_golden_cross": "均线", "ma_dead_cross": "均线",
+    "macd_golden_cross": "MACD", "macd_dead_cross": "MACD",
+    "rsi_oversold_bounce": "RSI", "rsi_overbought": "RSI",
+    "boll_break_up": "布林带", "boll_break_dn": "布林带",
+    "volume_blast_up": "单分钟量能", "volume_surge_drop": "单分钟量能",
+    "vol_ratio_surge": "量比", "turnover_hot": "换手率",
+    "breakout_resistance": "日线关键位", "support_break": "日线关键位",
+    "order_flow_inflow": "打单方向", "order_flow_outflow": "打单方向",
+    "bid_stack": "盘口", "ask_stack": "盘口",
+    "limit_up_touch": "涨跌停板", "limit_down_touch": "涨跌停板",
+    "event_bullish": "利多事件", "event_bearish": "利空事件",
+}
+
+
+def family_of(kind: str) -> str:
+    """没登记种类的族名就是它自己：新加信号忘了登记时，退化成「不参与族仲裁」而不是误伤。"""
+    return FAMILY.get(kind, kind)
 
 
 @dataclass
@@ -46,6 +72,10 @@ class Signal:
     def key(self) -> str:
         """去重键：同一只票同一类信号在冷却期内只报一次。"""
         return f"{self.code}|{self.kind}"
+
+    @property
+    def family(self) -> str:
+        return family_of(self.kind)
 
     def as_dict(self) -> dict:
         return {"code": self.code, "name": self.name, "action": self.action,
@@ -115,7 +145,13 @@ def _sig(v: View, action: str, kind: str, reason: str, **metrics) -> Signal:
 
 
 def evaluate(v: View, cfg: SignalConfig | None = None) -> list[Signal]:
-    """跑完三类规则，返回这一拍的信号（可能为空，也可能同时给出一条买一条卖）。"""
+    """跑完三类规则，返回这一拍的信号。
+
+    两道过滤都在「这一拍到底能不能表态」的层面上做，不是把信号藏起来：
+    - 卖出方向只对持仓判定（见 `View.held`）。
+    - 同一镜像族在这一拍里既给买又给卖 → 两条都不发。它是同一个指标的两侧读数，
+      互相抵消，留下任何一侧都是编一个方向出来。
+    """
     cfg = cfg or SignalConfig()
     out: list[Signal] = []
     for rule in (_trend, _rsi, _boll, _bars, _snapshot, _breakout, _flow, _book, _limit,
@@ -124,6 +160,12 @@ def evaluate(v: View, cfg: SignalConfig | None = None) -> list[Signal]:
     if not v.held:
         # 「卖」的宾语必须是自己的持仓：选股池里的票没有可卖的仓位，这类信号一律不成立。
         out = [s for s in out if s.action != "sell"]
+    conflicts = {s.family for s in out
+                 if len({x.action for x in out if x.family == s.family}) > 1}
+    if conflicts:
+        logger.info("票 %s 同拍镜像族 %s 正反都成立，两条都不发",
+                                         v.code, "、".join(sorted(conflicts)))
+        out = [s for s in out if s.family not in conflicts]
     return out
 
 

@@ -1,4 +1,4 @@
-"""风控层测试：行情口径读取 → 上下文换算 → 九条规则 → 引擎出决策。
+"""风控层测试：行情口径读取 → 上下文换算 → 十条规则 → 引擎出决策。
 
 规则里凡是「数据不可得」的分支都单独钉住：风控的失败姿态是**跳过判定并留痕**，
 不是拿 0 或 NaN 去比较（那会把复牌股、新股、缺快照的历史日期整批误杀）。
@@ -466,10 +466,10 @@ def test_engine_allows_and_fills_decision_fields():
     assert d.shares == 4000 and d.order_amount == 40000
     assert d.est_fill_price and d.est_fill_price > 10.0
     assert d.slippage_bp is not None and d.slippage_bp < 100
-    # 九条规则按序各留一个 check；闸门默认关，所以它也出现在 check 里但标 skipped
-    assert [v.name for v in d.checks] == ["tradability", "t_plus_1", "buy_quota", "liquidity",
-                                          "position", "cash_budget", "slippage", "model",
-                                          "adx14_rank"]
+    # 十条规则按序各留一个 check；闸门默认关，所以它也出现在 check 里但标 skipped
+    assert [v.name for v in d.checks] == ["tradability", "t_plus_1", "family_flip", "buy_quota",
+                                          "liquidity", "position", "cash_budget", "slippage",
+                                          "model", "adx14_rank"]
     assert d.checks[-1].metrics["skipped"] == "disabled"
 
 
@@ -558,7 +558,7 @@ def test_adx14_skips_sell_side():
 
 
 def test_adx14_is_registered_as_last_rule():
-    assert R.RULES[-1] is R.adx14_rank and len(R.RULES) == 9
+    assert R.RULES[-1] is R.adx14_rank and len(R.RULES) == 10
 
 
 def test_engine_runs_gate_through_pipeline_and_records_metric():
@@ -622,3 +622,39 @@ def test_gate_decision_reaches_result_extra():
     # 分位取不到时不写这两个字段（而不是写 0/None 让下游误以为"判过且判低了"）
     assert "adx14_pct" not in RiskEngine(_gate_cfg(), rules=(R.adx14_rank,)
                                         ).review(_ctx()).extra()
+
+
+# ── 第三条规则：镜像族反向冷却 ──────────────────────────────────────────────────
+# 同一指标几十秒内翻了面，两条都推给用户 = 让通知关掉。这条只管「翻面」，
+# 同向重复归引擎的当日去重；判不了（盘后没有族、当天没方向）一律放行留痕。
+
+
+def test_family_flip_blocks_the_reversal_and_says_how_long_ago():
+    v = R.family_flip(_ctx(action="buy", family="盘口", prev_action="sell", prev_age_s=36.0),
+                      _cfg(), {})
+    assert v.blocked
+    assert "盘口" in v.reason and "36 秒" in v.reason
+    assert "卖出" in v.reason and "买入" in v.reason        # 两个方向都要出现在理由里
+    assert v.metrics["flip_prev"] == "sell"
+
+
+def test_family_flip_uses_minutes_above_one_minute():
+    v = R.family_flip(_ctx(family="均线", prev_action="sell", prev_age_s=420.0), _cfg(), {})
+    assert v.blocked and "7.0 分钟" in v.reason
+
+
+def test_family_flip_allows_same_side_and_a_flip_outside_the_window():
+    same = R.family_flip(_ctx(family="盘口", prev_action="buy", prev_age_s=36.0), _cfg(), {})
+    assert same.status == "allow" and same.metrics["same_side"] is True
+    stale = R.family_flip(_ctx(family="盘口", prev_action="sell", prev_age_s=1801.0), _cfg(), {})
+    assert stale.status == "allow" and stale.metrics["flip_age_s"] == 1801.0
+
+
+def test_family_flip_skips_without_family_or_without_history():
+    """盘后内核不传族；盘中当天这个族还没给过方向 —— 两种都是「判不了」，放行并留痕。"""
+    assert R.family_flip(_ctx(), _cfg(), {}).metrics["skipped"] == "no_family"
+    blind = R.family_flip(_ctx(family="盘口"), _cfg(), {})
+    assert blind.status == "allow" and blind.metrics["flip_prev"] is None
+    assert R.family_flip(_ctx(family="盘口", prev_action="sell", prev_age_s=36.0),
+                         _cfg(flip_cooldown=0), {}).metrics["skipped"] == "disabled"
+
