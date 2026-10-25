@@ -32,7 +32,7 @@ async def test_options_lists_strategies_and_defaults(client, admin_headers, fake
 
 
 async def test_run_then_list_and_detail(client, admin_headers, fake_celery):
-    body = {"params": {"start": "2026-01-01", "end": "2026-02-01",
+    body = {"params": {"engine": "self", "start": "2026-01-01", "end": "2026-02-01",
                        "capital": 50000, "target_amount": 5000}}
     r = await client.post("/api/v1/backtest/run", json=body, headers=admin_headers)
     assert r.status_code == 200, r.text

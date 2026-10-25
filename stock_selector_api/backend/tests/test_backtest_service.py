@@ -21,7 +21,9 @@ def _user():
 
 
 def _params():
-    return {"start": "2026-01-01", "end": "2026-02-01", "capital": 50000, "target_amount": 5000}
+    # 这些键属于自研内核（target_amount/universe 是 qlib 不实现的），引擎必须点名 self
+    return {"engine": "self", "start": "2026-01-01", "end": "2026-02-01",
+            "capital": 50000, "target_amount": 5000}
 
 
 def _summary():

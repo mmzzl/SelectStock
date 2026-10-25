@@ -36,11 +36,12 @@ def test_validate_defaults_are_self_consistent():
     merged = merge(validate({}))
     assert merged["target_amount"] < merged["capital"] * merged["position_cap_pct"]
     assert merged["start"] < merged["end"]
-    # 只切引擎、其余全缺省：qlib 侧按线上单票 band 口径
+    # 只切引擎、其余全缺省：qlib 缺省即 2026-10-25 扫描的甜点臂（topk=20 / band 出榜 300）
     qlib = merge(validate({"engine": "qlib"}))
-    assert qlib["hold_rule"] == "band" and qlib["topk"] == 1
+    assert qlib["hold_rule"] == "band" and qlib["topk"] == 20 and qlib["exit_rank"] == 300
+    assert qlib["risk_degree"] == 0.35
     # 页面把缺省表单整包提交时 n_drop=5 也要能过；band 不读它
-    assert merge(validate({"engine": "qlib", "n_drop": DEFAULTS["n_drop"]}))["topk"] == 1
+    assert merge(validate({"n_drop": DEFAULTS["n_drop"]}))["topk"] == 20
 
 
 def test_validate_band_rule_params():
@@ -58,13 +59,14 @@ def test_validate_band_rule_params():
         validate({"engine": "qlib", "hold_rule": "hold"})
     # dropout 才读 n_drop；qlib 的那几个键自研内核一条都不读（整包 SimpleNamespace 喂进去会静默失效）
     assert validate({"engine": "qlib", "hold_rule": "dropout", "n_drop": 3})["n_drop"] == 3
-    for key in ("hold_rule", "entry_rank", "exit_rank", "topk", "n_drop", "benchmark"):
+    for key in ("hold_rule", "entry_rank", "exit_rank", "topk", "n_drop", "benchmark",
+                "risk_degree"):
         with pytest.raises(BizError):
             validate({"engine": "self", key: 10 if key != "benchmark" else "SH510300"})
 
 
 def test_validate_coerces_numeric_strings_and_bounds():
-    out = validate({"universe": "40", "stop_loss_pct": "0.03", "capital": 50000,
+    out = validate({"engine": "self", "universe": "40", "stop_loss_pct": "0.03", "capital": 50000,
                     "target_amount": 5000})
     assert out["universe"] == 40 and isinstance(out["universe"], int)
     assert out["stop_loss_pct"] == 0.03 and isinstance(out["stop_loss_pct"], float)
@@ -89,8 +91,9 @@ def test_merge_fills_defaults_and_ignores_unknown():
 
 
 def test_validate_engine_switch():
-    """引擎开关：缺省 self；喂进 qlib 不实现的止损要挡下来（收下就是「前端能填、回测跑不到」）。"""
-    assert merge(None)["engine"] == "self"
+    """引擎开关：缺省 qlib（最优组合只有它有）；喂进 qlib 不实现的止损要挡下来。"""
+    assert merge(None)["engine"] == "qlib"
+    assert validate({"engine": "self"})["engine"] == "self"
     assert validate({"engine": "qlib", "topk": 30, "n_drop": 5})["engine"] == "qlib"
     with pytest.raises(BizError, match="不支持这些参数"):
         validate({"engine": "qlib", "stop_loss_pct": 0.05})

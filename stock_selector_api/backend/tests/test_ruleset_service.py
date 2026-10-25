@@ -310,7 +310,9 @@ async def test_snapshot_by_id_and_active(sent):
 # ------------------------------------------------------------------ 回测联动
 
 def _bt_params():
-    return {"start": "2026-01-01", "end": "2026-02-01", "capital": 50000, "target_amount": 5000}
+    # target_amount/rule_set_id 都是自研内核的键，qlib 引擎不读，必须点名 engine=self
+    return {"engine": "self", "start": "2026-01-01", "end": "2026-02-01",
+            "capital": 50000, "target_amount": 5000}
 
 
 @pytest.fixture()

@@ -36,17 +36,21 @@ DEFAULTS: dict = {
     "add_rule": "",
     # 引擎开关：回测没有 HTTP 插件缝（Celery 任务名 backtest.run 就是那条缝），
     # 所以「换插件」在这里表现为一个参数，worker 按它 import 不同内核。
-    "engine": "self",       # self = scripts/backtest_main.py；qlib = stock_selector_qlib.backtest
-    # 默认按线上「只买最高分一只」的口径；要看多票组合再显式传 topk。
-    "topk": 1,              # 仅 engine=qlib：持仓只数
+    # 缺省切到 qlib：全市场验证的最优组合只有它有。
+    "engine": "qlib",       # self = scripts/backtest_main.py；qlib = stock_selector_qlib.backtest
+    # 2026-10-25 两轮参数扫描验证的甜点臂（Pareto 前沿）：topk=20 分散 + 出榜 300 +
+    # 3.5 成仓位，年化 +32.29%/回撤 -17.54%（收益/回撤比 1.84 全场最高，压力档仍 +25.39%）。
+    # 单票臂、topk=30 都被选参过拟合与集中度双重证伪。要看单票再显式传 topk=1。
+    "topk": 20,             # 仅 engine=qlib：持仓只数
     "n_drop": 5,            # 仅 engine=qlib（hold_rule=dropout）：每日强制换掉最低分的几只
     "benchmark": "SH510300",  # 仅 engine=qlib：qlib 面板里的基准（指数 399xxx 只有 2025 年后数据）
     # 持仓纪律（仅 engine=qlib）：dropout = 每天换掉 n_drop 只；
     # band = 还在前 exit_rank 名就继续拿，空位从前 entry_rank 名补。自研内核不读这三个键。
-    # 单票默认用 band：进榜严、出榜松，不每天追着 #1 换票。
     "hold_rule": "band",
     "entry_rank": 50,       # 买入候选 = 当日分数前 entry_rank 名
-    "exit_rank": 100,       # 跌出前 exit_rank 名才卖
+    "exit_rank": 300,       # 跌出前 exit_rank 名才卖（t20 甜点在 300；300 也是校验上限）
+    # 仅 engine=qlib：风险预算（现金缓冲），0.95=near全仓、0.35=本次应用的甜点仓位
+    "risk_degree": 0.35,
     # 仅 engine=qlib：是否在回测信号上叠加线上那两条名单护栏（薄流动/拉升后阴跌）。
     # 关闭只用于研究对照；默认开着，避免回测与线上差一层筛子却没人知道。
     "guardrails": True,
@@ -62,11 +66,11 @@ _QLIB_UNUSED_KEYS = ("strategy", "rule_set_id", "sell_rule", "add_rule", "max_ho
                      "stop_loss_pct", "take_profit_pct", "max_positions", "position_cap_pct",
                      "target_amount", "universe")
 # 反过来：band 的键只有 qlib 引擎认，自研内核一条都不读。
-# topk/n_drop/benchmark 也要列进来：worker 是 `SimpleNamespace(**merged)` 整包喂内核的
-# （tasks/backtest_tasks.py:108），自研内核没有这三个属性，收了就静默忽略——
+# topk/n_drop/benchmark/risk_degree 也要列进来：worker 是 `SimpleNamespace(**merged)`
+# 整包喂内核的（tasks/backtest_tasks.py:108），自研内核没有这些属性，收了就静默忽略——
 # 那正好是本模块开头要避免的「前端能填、回测跑不到」。
 _SELF_UNUSED_KEYS = ("hold_rule", "entry_rank", "exit_rank", "topk", "n_drop", "benchmark",
-                     "guardrails")
+                     "guardrails", "risk_degree")
 
 # 字符串参数：{键: 长度上限}
 _STR_SPEC: dict = {"rule_set_id": 36, "sell_rule": 2000, "add_rule": 2000,
@@ -89,6 +93,8 @@ _NUM_SPEC: dict = {
     "n_drop": (int, 0, 300),
     "entry_rank": (int, 1, 300),
     "exit_rank": (int, 1, 300),
+    # 风险预算：qlib 引擎每笔买入按「现金 × risk_degree」下单；1.0 不是真全仓（qlib 缺省 0.95）
+    "risk_degree": (float, 0.05, 1.0),
 }
 
 
