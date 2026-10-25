@@ -1,18 +1,19 @@
-"""qlib 影子盘：每日纸面组合追踪（批次 P 候选臂 vs live 对照）。
+"""qlib 影子盘：每日纸面组合追踪（线上臂 vs 纸面反面尺）。
 
-预注册依据：《qlib风格与标签周期验证_20261025.md》换线门槛条文第 2 条。
-- 臂（写死，改动 = 重新预注册）：live2026jun@t20_r0.35_e300（现行默认，对照）、
-  h10@t20_r0.15_e300（主候选）、h10@t20_r0.10_e300（回撤偏好档）。
-  h20 面板/风险档扫描落定后由 ARMS 增补。
+预注册依据：《qlib风格与标签周期验证_20261025.md》换线门槛条文第 2 条 + 2026-10-26 拍板记录。
+- 臂（写死，改动 = 重新预注册）：online_p10_r015 = batchP_h10@r0.15（10-26 拍板起的线上，
+  对照基准）、paper_q10_r035（旧线上 Q-lab10@r0.35 下线上纸面，反面尺）、
+  p10_r010（深回撤偏好档留观）。
 - 影子起点 2026-10-23（首轮 10-22 的分数直接取自各臂全市场复检面板做种子）。
 - 每晚 17:35（qlib_update_bin 17:15 之后）：补新交易日分数 → 重建护栏信号 →
   从影子起点**全窗重放**回测（确定性，无外部状态）；分数缓存只追加。
 - 特征每个新交易日只取一次，各模型各自 normalize+predict（共享 raw 面板）；
   行过滤按各臂 artifact 自身列数算 NaN（base 三臂 = 158 列，与种子面板产出口径一致）。
 - 读数输出 data/qlib/shadow_20261025/：shadow_<日期>.json + 各臂 <arm>.parquet/<arm>.json。
-- 判定到期：影子期（≥3 个月）各候选臂「区间/超额/回撤/换手」不劣于 live 对照才谈换默认。
+- 判定（10-26 拍板时写死）：影子期（≥3 个月）纸面 Q@r0.35 若对新线上同时
+  「区间年化超额领先 ≥3pp 且最大回撤浅 ≥2pp」→ 回滚 Q-lab10；否则持有新配置。
 
-用法：python3 -u scripts/qlib_shadow_tracking.py [--arms live_h5_r035,h10_r015,…]
+用法：python3 -u scripts/qlib_shadow_tracking.py [--arms online_p10_r015,paper_q10_r035,…]
       [--limit-symbols N --start 2026-10-23]   # 冒烟小票池限时窗
 """
 from __future__ import annotations
@@ -45,19 +46,18 @@ TOPK, ENTRY, EXITR = 20, 50, 300
 CAPITAL = 100_000_000.0
 BENCH = "SH510300"
 
-# 各臂（预注册于《qlib风格与标签周期验证_20261025.md》条文 2，2026-10-26 更正身份）：
-#   线上自 2026-10-19 12:27 起就是 batchQ_lab10（h10，train_end 2023-12-31，§24 换线留痕），
-#   因此「对照臂」= 现上模型 @现行缺省档 t20/r0.35/e300；「候选臂」= 批次 P 的 batchP_h10
-#   （同 h10 标签，train_end 2026-06-30 + live2026jun 抽的池，= 同标签里的新鲜度臂）。
-#   seed = 该模型自己全市场复检面板的首日 T−1 分数（口径与当日生产链一致）。
-#   h20 不进影子（§21.4 已裁决标签周期维收口，h20 属门外记录，需用户拍板才动）。
+# 各臂（2026-10-26 拍板换线后反转，改动 = 重新预注册）：
+#   线上 = batchP_h10（10-26 07:20 拷入，§同日拍板记录）@ r0.15（复检甜点档，后端缺省同步）；
+#   旧线上 batchQ_lab10（10-19→10-26）下线进纸面 @ 原 r0.35 档，作影子反面尺；
+#   p10_r010 = 深回撤偏好档留观。seed = 各模型自己全市场复检面板的首日 T−1 分数。
+#   两只模型缓存（scores_batchP_h10 / scores_batchQ_lab10）换线前已各暖到 2026-10-23。
 ARMS: dict[str, dict] = {
-    "online_q10_r035": {"dir": artifacts.MODEL_DIR, "risk": 0.35,
-                        "seed": REPO / "data/qlib/fullmarket_validation_20261025_scores.parquet"},
-    "p_h10_r015": {"dir": REPO / "data/qlib/model_batchP_h10", "risk": 0.15,
-                   "seed": REPO / "data/qlib/fullmarket_validation_h10_20261025_scores.parquet"},
-    "p_h10_r010": {"dir": REPO / "data/qlib/model_batchP_h10", "risk": 0.10,
-                   "seed": REPO / "data/qlib/fullmarket_validation_h10_20261025_scores.parquet"},
+    "online_p10_r015": {"dir": artifacts.MODEL_DIR, "risk": 0.15,
+                        "seed": REPO / "data/qlib/fullmarket_validation_h10_20261025_scores.parquet"},
+    "paper_q10_r035": {"dir": REPO / "data/qlib/model_batchQ_lab10", "risk": 0.35,
+                       "seed": REPO / "data/qlib/fullmarket_validation_20261025_scores.parquet"},
+    "p10_r010": {"dir": REPO / "data/qlib/model_batchP_h10", "risk": 0.10,
+                 "seed": REPO / "data/qlib/fullmarket_validation_h10_20261025_scores.parquet"},
 }
 
 

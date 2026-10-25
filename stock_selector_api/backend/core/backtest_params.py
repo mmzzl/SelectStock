@@ -49,8 +49,10 @@ DEFAULTS: dict = {
     "hold_rule": "band",
     "entry_rank": 50,       # 买入候选 = 当日分数前 entry_rank 名
     "exit_rank": 300,       # 跌出前 exit_rank 名才卖（t20 甜点在 300；300 也是校验上限）
-    # 仅 engine=qlib：风险预算（现金缓冲），0.95=near全仓、0.35=本次应用的甜点仓位
-    "risk_degree": 0.35,
+    # 仅 engine=qlib：风险预算（现金缓冲），0.95=near全仓
+    # 2026-10-26 拍板换 batchP_h10 后按复检甜点档应用 r0.15（+40.04%/−18.68%/比 2.14，
+    # 对当时线上 Q-lab10@0.35 +32.29%/−17.54%/比 1.84 同面板对照）
+    "risk_degree": 0.15,
     # 仅 engine=qlib：是否在回测信号上叠加线上那两条名单护栏（薄流动/拉升后阴跌）。
     # 关闭只用于研究对照；默认开着，避免回测与线上差一层筛子却没人知道。
     "guardrails": True,

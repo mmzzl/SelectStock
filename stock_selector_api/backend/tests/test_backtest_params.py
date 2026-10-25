@@ -36,10 +36,11 @@ def test_validate_defaults_are_self_consistent():
     merged = merge(validate({}))
     assert merged["target_amount"] < merged["capital"] * merged["position_cap_pct"]
     assert merged["start"] < merged["end"]
-    # 只切引擎、其余全缺省：qlib 缺省即 2026-10-25 扫描的甜点臂（topk=20 / band 出榜 300）
+    # 只切引擎、其余全缺省：qlib 缺省即 2026-10-25 扫描的甜点纪律（topk=20 / band 出榜 300），
+    # 2026-10-26 换 batchP_h10 后风险预算同步切复检甜点档 r0.15
     qlib = merge(validate({"engine": "qlib"}))
     assert qlib["hold_rule"] == "band" and qlib["topk"] == 20 and qlib["exit_rank"] == 300
-    assert qlib["risk_degree"] == 0.35
+    assert qlib["risk_degree"] == 0.15
     # 页面把缺省表单整包提交时 n_drop=5 也要能过；band 不读它
     assert merge(validate({"n_drop": DEFAULTS["n_drop"]}))["topk"] == 20
 
