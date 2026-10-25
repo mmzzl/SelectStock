@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from stock_selector.models.result import SelectResult
-from stock_selector_qlib import artifacts, serving
+from stock_selector_qlib import artifacts, pref, serving
 
 logger = logging.getLogger("qlib_plugin")
 
@@ -34,7 +34,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 class RunRequest(BaseModel):
     strategies: list[str] | None = Field(
-        default=None, description="策略名列表；缺省或含 qlib_alpha158 时出名单，其他名字返回空")
+        default=None, description="策略名列表；缺省或含 qlib_alpha158 时出名单，未知策略返回 400")
     topk: int | None = Field(default=None, ge=1, le=200, description="取前 N 只，缺省读 QLIB_TOPK")
 
 
@@ -63,7 +63,7 @@ _STRATEGY_DETAIL = {
 
 @app.get("/api/strategy/list")
 def strategy_list():
-    return {"code": 0, "data": [STRATEGY]}
+    return {"code": 0, "data": _strategies()}
 
 
 @app.get("/api/strategy/detail")
@@ -78,38 +78,109 @@ def strategy_detail():
     _STRATEGY_DETAIL["params"]["label"] = art.meta.get("label")
     _STRATEGY_DETAIL["params"]["label_horizon"] = h
     _STRATEGY_DETAIL["params"]["model"] = art.run_id
-    return {"code": 0, "data": [_STRATEGY_DETAIL]}
+    return {"code": 0, "data": [_STRATEGY_DETAIL] + _pref_details()}
+
+
+def _strategies() -> list[str]:
+    """本插件能出票的策略名。热门偏好榜默认下线，只有 `PREF_LIST=on` 才出现。"""
+    return [STRATEGY] + ([pref.STRATEGY] if serving.pref_enabled() else [])
+
+
+def _pref_details() -> list[dict]:
+    if not serving.pref_enabled():
+        return []
+    return [{
+        "name": pref.STRATEGY,
+        "label": pref.LABEL,
+        "description": ("热门偏好榜：在模型当日榜内，按「热门板块 + 新闻利好 + 排除小市值 + "
+                        "趋势向上」四条重排（热度 45% / 趋势 35% / 新闻 20%，三道硬闸：板块、市值、趋势）。"
+                        "不重新打分，所以两条护栏已经挡在前面"),
+        "as_of": True,
+        "required_columns": ["date", "open", "high", "low", "close", "volume"],
+        "required_rows": serving.WARMUP_DAYS,
+        "params": {
+            "min_float_mv_yi": pref.MIN_FLOAT_MV,
+            "top_boards": pref.TOP_BOARDS,
+            "min_board_stocks": pref.MIN_BOARD_STOCKS,
+            "weights": pref.WEIGHTS,
+            "topk": pref.DEFAULT_TOPK,
+            # 数据时点如实写：17:30 选股时今天的板块热度（18:30）和新闻（22:00）都还没落，
+            # 用的必然是前一天的——这一栏不写，页面就会把昨天的热度说成今天的。
+            "heat_source": "data/sector_heat/board.parquet（每日 18:30 覆盖，无历史）",
+            "news_source": "data/news_analysis/（每日 22:00，服务次日）",
+            "mv_source": "data/market_snapshot/（每日 15:30，2026-10-12 起）",
+            "backtestable": False,
+        },
+        "na_fields": list(_NA_FIELDS),
+    }]
 
 
 @app.post("/api/selector/run")
 def selector_run(req: RunRequest):
-    """出最新一个交易日的 qlib 名单。分数只由落盘模型 + 短窗因子决定，不在此处训练。"""
+    """出最新一个交易日的名单。分数只由落盘模型 + 短窗因子决定，不在此处训练。
+
+    `qlib_alpha158` 是默认榜；`hot_pref` 默认下线，只有 `PREF_LIST=on` 时才参与。
+    两只票可以在两条榜里各出现一次（`strategy` 不同），页面按策略分开展示。
+    """
     names = set(req.strategies or [])
-    if names and STRATEGY not in names:
-        return {"code": 0, "data": []}
+    able = _strategies()
+    want = [s for s in able if not names or s in names]
+    if not want:
+        # 未知策略不能回 200 空名单：后端会把它当成「今天没有票」落库。
+        # 明确 400，调用方才知道是名字下线/拼错，而不是市场没机会。
+        raise HTTPException(status_code=400, detail=f"策略不可用：{', '.join(sorted(names))}")
     try:
         art = artifacts.load()
-        rows = serving.latest_scores(topk=req.topk or serving.DEFAULT_TOPK)
-    except Exception as exc:  # noqa: BLE001 - 打分失败必须是 HTTP 错误，不能被当成「今天没票」
-        logger.exception("qlib 打分失败")
+    except Exception as exc:  # noqa: BLE001 - 模型加载失败必须是 HTTP 错误，不能被当成「今天没票」
+        logger.exception("qlib 模型加载失败")
         raise HTTPException(status_code=502, detail=f"qlib 打分失败：{exc}") from exc
 
-    codes = [r["code"] for r in rows]
+    out: list[dict] = []
+    if STRATEGY in want:
+        try:
+            rows = serving.latest_scores(topk=req.topk or serving.DEFAULT_TOPK)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("qlib 打分失败")
+            raise HTTPException(status_code=502, detail=f"qlib 打分失败：{exc}") from exc
+        out += _model_rows(art, rows)
+    if pref.STRATEGY in want:
+        try:
+            prows = serving.latest_pref(topk=req.topk)
+        except Exception as exc:  # noqa: BLE001 - 偏好榜失败同样不能变成「今天没票」
+            logger.exception("热门偏好榜失败")
+            raise HTTPException(status_code=502, detail=f"热门偏好榜失败：{exc}") from exc
+        out += _pref_rows(prows)
+    return {"code": 0, "data": out}
+
+
+def _names_for(rows: list[dict]) -> dict[str, str]:
     try:
-        label_map = serving.stock_names(codes)
-    except Exception:  # noqa: BLE001
-        label_map = {}
-    out = []
+        return serving.stock_names([r["code"] for r in rows])
+    except Exception:  # noqa: BLE001 - 名字是展示字段，取不到不能打断出票
+        return {}
+
+
+def _model_rows(art, rows: list[dict]) -> list[dict]:
+    label_map = _names_for(rows)
     h = _label_horizon(art.meta.get("label"))
     signal = f"预期{h}日收益排名" if h else "预期收益排名"
+    out = []
     for row in rows:
+        raw_rank = int(row.get("raw_rank") or row["rank"])
+        rank_text = (f"护栏后第 {row['rank']}" if raw_rank == row["rank"]
+                     else f"原始第 {raw_rank}、护栏后第 {row['rank']}")
+        reason = (f"Alpha158+LightGBM 原始分 {row['score_raw']:.4f}，"
+                  f"{rank_text}（护栏后票池 {row['universe']} 只）；"
+                  f"模型 {art.run_id}（训练止于 {art.meta.get('train_end')}，名单日为样本外）")
+        blocked_top = row.get("guard_blocked_top")
+        if blocked_top:
+            reason += (f"；原始第 1 的 {blocked_top['code']} 被"
+                       f"{blocked_top['reason']}挡下")
         out.append(SelectResult(
             code=row["code"],
             name=label_map.get(row["code"], ""),
             signal=signal,
-            reason=(f"Alpha158+LightGBM 原始分 {row['score_raw']:.4f}，"
-                    f"当日票池 {row['universe']} 只里排第 {row['rank']}；"
-                    f"模型 {art.run_id}（训练止于 {art.meta.get('train_end')}，名单日为样本外）"),
+            reason=reason,
             strategy=STRATEGY,
             asof=row["date"],
             price=row["price"],
@@ -118,13 +189,36 @@ def selector_run(req: RunRequest):
             extra={
                 "qlib_symbol": row["qlib_symbol"],
                 "score_raw": round(row["score_raw"], 6),
+                "raw_rank": raw_rank,
+                "guard_blocked_top": blocked_top,
                 "model_id": art.run_id,
                 "universe": row["universe"],
                 "feature_count": art.meta.get("feature_count"),
                 "na_fields": list(_NA_FIELDS),
             },
         ).to_dict())
-    return {"code": 0, "data": out}
+    return out
+
+
+def _pref_rows(rows: list[dict]) -> list[dict]:
+    """热门偏好榜的行：分数是四路合成（0~1，和模型榜同口径），理由把四路各说一遍。"""
+    label_map = _names_for(rows)
+    out = []
+    for row in rows:
+        ex = row.get("extra") or {}
+        out.append(SelectResult(
+            code=row["code"],
+            name=row.get("name") or label_map.get(row["code"], ""),
+            signal="热门板块+利好+大市值+趋势向上",
+            reason=row["reason"],
+            strategy=pref.STRATEGY,
+            asof=row["asof"],
+            price=row["price"],
+            score=round(row["score"], 6),
+            rank=row["rank"],
+            extra={**ex, "qlib_symbol": row["qlib_symbol"], "na_fields": list(_NA_FIELDS)},
+        ).to_dict())
+    return out
 
 
 @app.get("/api/selector/rank")
@@ -171,10 +265,13 @@ def admin_refresh():
 
 @app.get("/api/health")
 def health():
-    status = {"status": "ok", "engine": STRATEGY}
+    status = {"status": "ok", "engine": STRATEGY, "strategies": _strategies()}
     try:
         status["model"] = artifacts.load().describe()
         status["scoring"] = serving.last_score_stats()
+        # 偏好榜的筛数与数据时点：哪一路挡了多少、热度/新闻取的是哪天，都在这里看得见。
+        # 空表 = 今天还没出过这条榜（不是「挡了 0 只」）。
+        status["pref"] = serving.last_pref_stats()
     except Exception as exc:  # noqa: BLE001
         status["status"] = "no_model"
         status["message"] = str(exc)

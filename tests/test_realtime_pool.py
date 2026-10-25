@@ -30,14 +30,16 @@ def build(tmp_path: Path, *, jobs=(), results=(), holdings=(), trades=()) -> Pat
     path = tmp_path / "app.db"
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE select_jobs (job_id TEXT, status TEXT, created_at TEXT)")
-    conn.execute("CREATE TABLE select_results (job_id TEXT, code TEXT, rank_no INTEGER)")
+    conn.execute("CREATE TABLE select_results (job_id TEXT, code TEXT, rank_no INTEGER, "
+                 "strategy TEXT)")
     conn.execute("CREATE TABLE holdings (user_id TEXT, code TEXT, quantity INTEGER, "
                  "cost_price REAL, enabled INTEGER)")
     # T+1 只认成交日，所以这张表也得能建出来（列名与后端 db/sql/trades.py 一致）
     conn.execute("CREATE TABLE trade_records (user_id TEXT, trade_date TEXT, stock_code TEXT, "
                  "direction TEXT, price REAL, quantity INTEGER)")
     conn.executemany("INSERT INTO select_jobs VALUES (?, ?, ?)", jobs)
-    conn.executemany("INSERT INTO select_results VALUES (?, ?, ?)", results)
+    conn.executemany("INSERT INTO select_results (job_id, code, rank_no) VALUES (?, ?, ?)",
+                     results)
     conn.executemany("INSERT INTO holdings VALUES (?, ?, ?, ?, ?)", holdings)
     conn.executemany("INSERT INTO trade_records VALUES (?, ?, ?, ?, ?, ?)", trades)
     conn.commit()
@@ -135,6 +137,19 @@ def test_ranks_cover_only_the_truncated_hits(db):
     assert "601318" not in plan.ranks and "002855" not in plan.ranks
 
 
+def test_hot_pref_rows_do_not_enter_the_pool(tmp_path):
+    """hot_pref 已下线；旧批次残留的偏好榜行不能混进模型榜、占买入名额。"""
+    db = build(tmp_path, jobs=[("j1", "done", utc_text(NOW))],
+               results=[("j1", "600000", 1), ("j1", "300750", 1)])
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE select_results SET strategy='hot_pref' WHERE code='300750'")
+    conn.commit()
+    conn.close()
+    plan = load(db, now=NOW)
+    assert plan.codes == ["600000"]
+    assert plan.ranks == {"600000": 0}
+
+
 def test_bought_today_reads_only_todays_buys(tmp_path):
     db = build(tmp_path, holdings=[("u1", "002855", 400, 12.75, 1)],
                trades=[("u1", "2026-10-13", "2855", "buy", 12.75, 400),
@@ -148,7 +163,8 @@ def test_bought_today_survives_a_db_without_trades(tmp_path, caplog):
     path = tmp_path / "old.db"
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE select_jobs (job_id TEXT, status TEXT, created_at TEXT)")
-    conn.execute("CREATE TABLE select_results (job_id TEXT, code TEXT, rank_no INTEGER)")
+    conn.execute("CREATE TABLE select_results (job_id TEXT, code TEXT, rank_no INTEGER, "
+                 "strategy TEXT)")
     conn.execute("CREATE TABLE holdings (user_id TEXT, code TEXT, quantity INTEGER, "
                  "cost_price REAL, enabled INTEGER)")
     conn.execute("INSERT INTO holdings VALUES ('u1', '002855', 400, 12.75, 1)")
@@ -183,3 +199,15 @@ def test_nothing_to_monitor_raises(tmp_path):
     db = build(tmp_path, jobs=[("j1", "failed", utc_text(NOW))])
     with pytest.raises(PoolError, match="既没有成功的选股批次"):
         load(db, now=NOW)
+
+
+def test_同一只票进两条榜时不占两个盯盘名额(tmp_path):
+    """qlib 插件一次任务出两条榜（模型原始榜 + 热门偏好榜），同一只票会在同一个 job 里出现两行。
+
+    去重必须发生在 `limit` 截断**之前**：否则重复那行会吃掉一个候选名额，
+    盯池里就凭空少一只票，而页面上看不出任何异常。
+    """
+    db = build(tmp_path, jobs=[("j1", "done", utc_text(NOW - dt.timedelta(hours=1)))],
+               results=[("j1", "600000", 1), ("j1", "600000", 2), ("j1", "300750", 3)])
+    plan = load(db, limit=2, now=NOW)
+    assert plan.codes == ["600000", "300750"]

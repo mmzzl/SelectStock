@@ -13,8 +13,11 @@
     空位从**前 `entry_rank` 名**里按分高低补满（`topk` 只，买入时等权，之后不每日再平衡）。
   两臂共用同一个 Exchange、同一套挡单/成本/`risk_degree`、同样先卖后买，
   所以数字上的差别只来自纪律本身。
-- `position_cap_pct / target_amount / max_hold_days / stop_loss_pct / take_profit_pct / 规则串`
-  这些自研内核的参数两个纪律都不看，带这些参数提交时 core/backtest_params.py 直接报错，不做静默忽略。
+- `position_cap_pct / target_amount / max_hold_days / 规则串` 这些自研内核的参数两个纪律都不看，
+  带这些参数提交时 core/backtest_params.py 直接报错，不做静默忽略。
+- `stop_loss_pct / take_profit_pct` 只在 `band` 下按「相对买入价」生效（默认 0=关闭），
+  `dropout` 没有买入价跟踪，传了直接报错。日频只能按收盘判断/同一收盘成交，是乐观上界；
+  后端白名单暂未放行，先给研究脚本用，验证过再决定是否上线上。
 - **收益一律按扣成本净值**（`report["account"]` = 现金+持仓市值）。qlib 的 `report["return"]`
   是**扣成本前**的毛收益（`backtest/account.py:283` 把当天手续费加回去了），看毛利会得出完全相反的结论，
   所以毛利只作为 `gross_return` 并排放在一起。
@@ -32,7 +35,7 @@ import pandas as pd
 from qlib.backtest.decision import Order, OrderDir, TradeDecisionWO
 from qlib.contrib.strategy.signal_strategy import BaseSignalStrategy
 
-from stock_selector_qlib import artifacts, serving
+from stock_selector_qlib import artifacts, guardrails, serving
 
 TRADING_DAYS = 243  # 与自研内核同一口径（A 股年交易日）
 
@@ -70,13 +73,19 @@ def run_qlib_backtest(args, progress_cb=None, signal: pd.Series | None = None):
     days = serving.calendar()
     req_beg, req_end = str(params["start"]), str(params["end"])
     beg, end = _snap_window(days, req_beg, req_end)
+    # 与线上打分共用同一个票池函数：8003 在 universe 模式下读每日全市场名单，
+    # 回测如果还写死 art.pool（训练池 300 只），跑出来的 IR 就不能拿来替线上背书。
+    pool = serving.score_pool(art)
+    auto_signal = signal is None
+    guard_on = bool(params.get("guardrails", False)) and serving.guardrails_enabled()
 
-    if signal is None:
-        signal = score_panel(art, beg, end, progress_cb=progress_cb)
+    if auto_signal:
+        signal = score_panel(art, beg, end, pool=pool, guardrails=guard_on,
+                             progress_cb=progress_cb)
     else:
         signal = signal.loc[beg:end]
     if signal.empty:
-        raise RuntimeError(f"{beg}→{end} 窗口内票池 {len(art.pool)} 只没有一行分数")
+        raise RuntimeError(f"{beg}→{end} 窗口内票池 {len(pool)} 只没有一行分数")
 
     _tick(progress_cb, 40, f"qlib 撮合中（{hold_rule}，日频没有逐日回调）")
     from qlib.contrib.evaluate import backtest_daily
@@ -88,8 +97,8 @@ def run_qlib_backtest(args, progress_cb=None, signal: pd.Series | None = None):
                                        exchange_kwargs=EXCHANGE_KWARGS)
     _tick(progress_cb, 85, "汇总读数")
 
-    shares = _shares_frame(positions, art.pool)
-    closes = _close_panel(list(art.pool), beg, end)
+    shares = _shares_frame(positions, pool)
+    closes = _close_panel(pool, beg, end)
     trades = _trades(shares, closes)
     capital = float(params["capital"])
     # 净值与收益只能用 report['account']（现金 + 持仓市值，手续费已经扣掉）。
@@ -128,42 +137,107 @@ def run_qlib_backtest(args, progress_cb=None, signal: pd.Series | None = None):
             "n_drop": int(params["n_drop"]) if hold_rule == "dropout" else None,
             "entry_rank": int(params["entry_rank"]) if hold_rule == "band" else None,
             "exit_rank": int(params["exit_rank"]) if hold_rule == "band" else None,
+            "stop_loss_pct": float(params.get("stop_loss_pct") or 0.0),
+            "take_profit_pct": float(params.get("take_profit_pct") or 0.0),
+            "stop_note": ("按相对买入价、收盘判断/同一收盘成交；盘中/跳空未建模"
+                          if hold_rule == "band" else "dropout 不支持"),
             "benchmark": str(params["benchmark"]),
             "requested_window": f"{req_beg}→{req_end}",
             "traded_window": f"{beg}→{end}",
             "requested_end": str(params["end"]),
             "traded_end": end,
             "scored_rows": int(len(signal)),
+            # 口径标签：model 是训练池，universe 才是 8003 线上名单；护栏也必须一起看。
+            # 没有这两个字段，读者会把 300 池、无护栏的 IR 当成线上成绩。
+            "pool_source": serving.POOL_SOURCE,
+            "pool_size": len(pool),
+            "guardrails": guard_on,
+            "guardrails_applied": bool(auto_signal and guard_on),
+            "live_parity": bool(serving.POOL_SOURCE == "universe" and auto_signal and guard_on),
+            "parity_note": ("与 8003 同池（universe，当前名单；历史窗口有幸存者偏差）+ 同护栏"
+                            if serving.POOL_SOURCE == "universe" and auto_signal and guard_on
+                            else ("信号由调用方传入，护栏是否已叠加由调用方负责；不能当作线上同口径"
+                                  if not auto_signal else
+                                  f"票池={serving.POOL_SOURCE}、护栏={'开' if guard_on else '关'}；"
+                                  "与线上不一致时不能用本结果替线上背书")),
         },
     )
 
 
-def score_panel(art, beg: str, end: str, progress_cb=None) -> pd.Series:
+def score_panel(art, beg: str, end: str, progress_cb=None,
+                pool: list[str] | None = None, guardrails: bool = False) -> pd.Series:
     """票池在 [beg, end] 每日的模型分数（MultiIndex: datetime, instrument）。
+
+    `pool` 缺省走 `serving.score_pool`（与 8003 同一个来源），研究脚本要跑固定池时显式传入。
+    `guardrails=True` 时逐日剔掉线上那两条名单护栏挡下的票；只用于生产同口径回测，
+    四臂 AB 自己会传 signal，不会在这里被重复筛。
 
     因子窗口要往回多取 `WARMUP_DAYS` 天：Alpha158 里有 60 日窗口的项，从 beg 起取会让
     开头一段全是 NaN。归一化的 mean/std 来自训练产物，不在这里重算。
     """
     days = serving.calendar()
+    pool = list(pool or serving.score_pool(art))
     warm_beg = days[max(0, days.index(beg) - serving.WARMUP_DAYS + 1)]
-    frame = serving.raw_features(art.pool, warm_beg, end)
+    frame = serving.raw_features(pool, warm_beg, end)
     _tick(progress_cb, 20, "逐日打分")
     pred = pd.Series(art.booster.predict(serving.normalize(frame, art)), index=frame.index)
     pred = pred.reorder_levels(["datetime", "instrument"]).sort_index()
-    return pred.loc[beg:end]
+    pred = pred.loc[beg:end]
+    if guardrails and serving.guardrails_enabled():
+        blocked = _guardrail_panel(pool, beg, end)
+        if blocked is not None and not blocked.empty:
+            hit = blocked.stack()
+            hit.index = hit.index.set_names(["datetime", "instrument"])
+            mask = hit.reindex(pred.index).fillna(False).astype(bool)
+            pred = pred[~mask]
+    return pred
+
+
+def _guardrail_panel(pool: list[str], beg: str, end: str) -> pd.DataFrame:
+    """[beg,end] 每日「被护栏挡下」的布尔宽表（index=日期，columns=代码）。
+
+    与 serving.guardrail_flags 用同一个 guardrails 定义；一次取回整段窗口，
+    避免回测逐日调用 D.features 几百次。
+    """
+    import qlib.data
+
+    days = serving.calendar()
+    warm_beg = days[max(0, days.index(beg) - serving.GUARD_WARM)]
+    frame = qlib.data.D.features(list(pool), ["$close", "$amount"],
+                                 start_time=warm_beg, end_time=end)
+    if frame is None or frame.empty:
+        raise RuntimeError(f"护栏要的两项行情（{warm_beg}→{end}，{len(pool)} 只）一行都没取到")
+    wide = {}
+    for field in ("$close", "$amount"):
+        w = frame[field].unstack("instrument")
+        w.index = pd.to_datetime(w.index)
+        wide[field] = w.sort_index()
+    blocked = (guardrails.thin_liquidity(wide["$amount"])
+               | guardrails.spike_fade(wide["$close"]))
+    return blocked.loc[beg:end]
 
 
 def _make_strategy(hold_rule: str, params: dict, signal: pd.Series):
     """两条纪律各自实例化策略；T−1 日读分数这件事两边都由 qlib 的 shift=1 负责。"""
     from qlib.contrib.strategy import TopkDropoutStrategy
 
+    stop_loss = float(params.get("stop_loss_pct") or 0.0)
+    take_profit = float(params.get("take_profit_pct") or 0.0)
+    risk_degree = params.get("risk_degree")  # 缺省沿用 qlib 0.95；小数可降仓位、降回撤
     if hold_rule == "dropout":
-        return TopkDropoutStrategy(topk=int(params["topk"]), n_drop=int(params["n_drop"]),
-                                   signal=signal, only_tradable=False)
+        if stop_loss or take_profit:
+            raise RuntimeError("qlib 止盈止损只支持 hold_rule=band；dropout 没有买入价可跟踪")
+        extra = {"signal": signal, "only_tradable": False}
+        if risk_degree is not None:
+            extra["risk_degree"] = float(risk_degree)
+        return TopkDropoutStrategy(topk=int(params["topk"]), n_drop=int(params["n_drop"]), **extra)
+    extra = {"stop_loss_pct": stop_loss, "take_profit_pct": take_profit}
+    if risk_degree is not None:
+        extra["risk_degree"] = float(risk_degree)
     return BandHoldStrategy(topk=int(params["topk"]), entry_rank=int(params["entry_rank"]),
                             exit_rank=int(params["exit_rank"]), signal=signal,
                             entry_gate=params.get("entry_gate"),
-                            scan_all=bool(params.get("scan_all", False)))
+                            scan_all=bool(params.get("scan_all", False)), **extra)
 
 
 def band_plan(scores: pd.Series, held, topk: int, entry_rank: int, exit_rank: int,
@@ -193,6 +267,32 @@ def band_plan(scores: pd.Series, held, topk: int, entry_rank: int, exit_rank: in
     return sells, buys
 
 
+def stop_take_exits(held, entry_px: dict, prices: dict,
+                    stop_loss_pct: float = 0.0, take_profit_pct: float = 0.0) -> list[str]:
+    """按「相对买入价」的固定止损/止盈挑出要卖的代码。
+
+    只做纯判断，方便单测；价格缺失/非正/不是有限数一律不触发（判不了就不编造成交）。
+    阈值是小数（0.08 = -8%），0 或负数表示关闭该边。
+    """
+    stop = float(stop_loss_pct or 0.0)
+    take = float(take_profit_pct or 0.0)
+    if stop <= 0 and take <= 0:
+        return []
+    out: list[str] = []
+    for code in held:
+        entry, price = entry_px.get(code), prices.get(code)
+        if entry is None or price is None:
+            continue
+        entry, price = float(entry), float(price)
+        if not (np.isfinite(entry) and np.isfinite(price)) or entry <= 0 or price <= 0:
+            continue
+        ret = price / entry - 1.0
+        # 92/100 在浮点里是 -7.999999999999996%，阈值边界要能触发
+        if (stop > 0 and ret <= -stop + 1e-12) or (take > 0 and ret >= take - 1e-12):
+            out.append(code)
+    return out
+
+
 class BandHoldStrategy(BaseSignalStrategy):
     """按 `band_plan` 的名单买卖，撮合与 `TopkDropoutStrategy` 逐行同构：同一个 Exchange、
     同样先卖后买、卖出所得现金按 `risk_degree` 等分给买入名单、涨跌停/停牌一律挡单。
@@ -203,16 +303,27 @@ class BandHoldStrategy(BaseSignalStrategy):
     `entry_gate` 是批次 O 的实验旋钮（docs §18）：一张 (datetime, instrument) 的 0/1 面板，
     在**信号日 F**（= 成交日 T−1，与分数同一信息集）决定该票当天能不能买；NaN/缺行按关门算。
     默认 None 时与旧版逐字相同。闸门只管买入，卖出/持有不受影响。
+
+    `stop_loss_pct` / `take_profit_pct` 按**相对买入价**判断，默认 0 = 关闭，行为与旧版逐字相同。
+    日频回测只能拿收盘价判断、按同一个收盘价成交；盘中破位、跳空和跌停卖不掉都不在模型里。
+    同一收盘成交偏乐观，但只看收盘触发会漏掉盘中破位，净偏差方向不定，不能当实盘止损价。
+
+    `risk_degree` 是现金缓冲，默认 0.95 = 95% 仓位；改小是**线性压仓位**。
+    回撤、超额、换手、成本大致按同一比例缩小；想靠它把回撤打到很低，收益也会跟着掉。
     """
 
     def __init__(self, *, topk: int, entry_rank: int, exit_rank: int,
-                 entry_gate: pd.Series | None = None, scan_all: bool = False, **kwargs):
+                 entry_gate: pd.Series | None = None, scan_all: bool = False,
+                 stop_loss_pct: float = 0.0, take_profit_pct: float = 0.0, **kwargs):
         super().__init__(**kwargs)
         self.topk = int(topk)
         self.entry_rank = int(entry_rank)
         self.exit_rank = int(exit_rank)
         self.entry_gate = entry_gate
         self.scan_all = bool(scan_all)
+        self.stop_loss_pct = max(0.0, float(stop_loss_pct or 0.0))
+        self.take_profit_pct = max(0.0, float(take_profit_pct or 0.0))
+        self._entry_px: dict[str, float] = {}
 
     def generate_trade_decision(self, execute_result=None):
         trade_step = self.trade_calendar.get_trade_step()
@@ -236,9 +347,31 @@ class BandHoldStrategy(BaseSignalStrategy):
                            if pd.notna(value) and float(value) >= 0.5}
 
         current = copy.deepcopy(self.trade_position)
-        sells, buys = band_plan(pred_score, current.get_stock_list(), self.topk,
+        held = current.get_stock_list()
+        forced = []
+        if self.stop_loss_pct or self.take_profit_pct:
+            # 持仓已被卖掉/清零就丢掉买入价，避免把旧成本套到下一次买入上
+            for code in list(self._entry_px):
+                if code not in held or (current.get_stock_amount(code) or 0.0) <= 0:
+                    self._entry_px.pop(code, None)
+            prices = {}
+            for code in held:
+                price = self.trade_exchange.get_deal_price(
+                    stock_id=code, start_time=trade_start_time, end_time=trade_end_time,
+                    direction=OrderDir.BUY)
+                if price is not None and np.isfinite(price) and price > 0:
+                    prices[code] = float(price)
+                    # 只对「开始跟踪前就持有」的仓位用今天收盘价当成本，当天不触发
+                    self._entry_px.setdefault(code, float(price))
+            forced = stop_take_exits(held, self._entry_px, prices,
+                                     self.stop_loss_pct, self.take_profit_pct)
+        band_held = [code for code in held if code not in forced]
+        sells, buys = band_plan(pred_score, band_held, self.topk,
                                 self.entry_rank, self.exit_rank,
                                 allowed=allowed, scan_all=self.scan_all)
+        if forced:
+            sells = list(dict.fromkeys(forced + sells))
+            buys = [code for code in buys if code not in forced]
         cash = current.get_cash()
         orders = []
         for code in sells:
@@ -267,6 +400,8 @@ class BandHoldStrategy(BaseSignalStrategy):
                           end_time=trade_end_time, direction=Order.BUY)
             if self.trade_exchange.check_order(order):
                 orders.append(order)
+                if self.stop_loss_pct or self.take_profit_pct:
+                    self._entry_px[code] = float(price)
         return TradeDecisionWO(orders, self)
 
 

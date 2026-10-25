@@ -112,9 +112,13 @@ def latest_batch(conn: sqlite3.Connection) -> tuple[str | None, dt.datetime | No
         return None, None, []
     job = jobs[0]
     rows = _query(conn, "SELECT code FROM select_results WHERE job_id=? "
+                        "AND COALESCE(strategy, '') <> 'hot_pref' "
                         "ORDER BY rank_no IS NULL, rank_no", (job["job_id"],))
     created = _to_local(job["created_at"])
-    return job["job_id"], created, [str(r["code"]) for r in rows if str(r["code"]).strip()]
+    # hot_pref 已下线；旧批次里残留的偏好榜行不进盘中池，否则会和模型榜混排名次、占买入名额。
+    # 保序去重：旧批次可能同时有两条榜，同一只票会有两行；留第一次出现=它最好的那个名次。
+    codes = list(dict.fromkeys(str(r["code"]) for r in rows if str(r["code"]).strip()))
+    return job["job_id"], created, codes
 
 
 def _to_local(raw) -> dt.datetime | None:

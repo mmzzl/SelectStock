@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from stock_selector_qlib import artifacts
+from stock_selector_qlib import artifacts, guardrails, pref
 
 logger = logging.getLogger("qlib_serving")
 # 每天靠这一条 INFO 确认「真的给整个名单打了分、几只进榜、耗时多少」，而模块自建的 logger
@@ -213,6 +213,84 @@ def score_frame(art: artifacts.Artifacts, beg: str | None = None,
     return pred, stats
 
 
+# ---------------------------------------------------------------------------
+# 名单护栏（薄流动 / 拉升后阴跌）：定义在 stock_selector_qlib/guardrails.py，与回测四臂同源
+# ---------------------------------------------------------------------------
+# 往回看的 K 线数：妖痕要在 71 根里找 20 日拉升，流动性要 20 日均额，取最大再加拉升步长
+GUARD_WARM = max(guardrails.SPIKE_SPAN, guardrails.AMT_WINDOW) + guardrails.SPIKE_STEP
+
+
+def guardrails_enabled() -> bool:
+    """总开关：环境变量 `QLIB_GUARDRAILS=off` 就整个关掉（读一次调一次，改环境不用改代码）。"""
+    return os.environ.get("QLIB_GUARDRAILS", "on").strip().lower() not in ("off", "0", "false", "no")
+
+
+def _judge(flags: pd.Series, tail: pd.Series) -> pd.Series:
+    """把护栏判定对齐到名单上：判不了（NaN / 这只票不在护栏表里）一律算「不拦」。"""
+    if flags is None or len(flags) == 0:
+        return pd.Series(False, index=tail.index)
+    hit = pd.to_numeric(flags, errors="coerce").reindex(tail.index).fillna(0.0)
+    return hit.astype(bool)
+
+
+THIN_REASON = "薄流动"
+YAO_REASON = "拉升后阴跌"
+
+
+def apply_guardrails(tail: pd.Series, thin: pd.Series, yao: pd.Series) -> tuple[pd.Series, dict]:
+    """当日名单上的两条护栏。
+
+    `tail` 是当日全池分数（index=代码，已按分数降序）。返回剔过之后的分数和计数；
+    计数里带 `guard_notes`（代码 → 被谁拦、拦之前排第几），持仓页查名次时要靠它解释
+    「明明在池里、也打了分，名单上怎么没有」。
+    """
+    stats = {"guard_thin": 0, "guard_yao": 0, "guard_dropped": 0, "guard_notes": {},
+             "guard_off": False}
+    if not guardrails_enabled():
+        stats["guard_off"] = True
+        return tail, stats
+    t, y = _judge(thin, tail), _judge(yao, tail)
+    stats["guard_thin"], stats["guard_yao"] = int(t.sum()), int(y.sum())
+    hit = t | y
+    stats["guard_dropped"] = int(hit.sum())
+    order = {code: position + 1 for position, code in enumerate(tail.index)}
+    stats["guard_notes"] = {
+        code: {"rank_raw": order[code],
+               "reason": "、".join(w for w, on in ((THIN_REASON, t[code]), (YAO_REASON, y[code])) if on)}
+        for code in tail.index[hit]}
+    return tail[~hit], stats
+
+
+def guardrail_flags(date: str, pool: list[str]) -> tuple[pd.Series, pd.Series]:
+    """往回取 GUARD_WARM 根 K 线，算出 `date` 那天两条护栏的判定（布尔 Series，index=代码）。
+
+    面板停在别的日子就直接报错：护栏读的是行情，行情迟一天，判定就是拿昨天挡今天。
+    """
+    import qlib.data
+
+    days = calendar()
+    beg = days[max(0, days.index(date) - GUARD_WARM)]
+    frame = qlib.data.D.features(list(pool), ["$close", "$amount"], start_time=beg, end_time=date)
+    if frame is None or frame.empty:
+        raise RuntimeError(f"护栏要的两项行情（{beg}→{date}，{len(pool)} 只）一行都没取到")
+    wide = {}
+    for field in ("$close", "$amount"):
+        w = frame[field].unstack("instrument")
+        w.index = pd.to_datetime(w.index)
+        wide[field] = w.sort_index()
+    thin = guardrails.thin_liquidity(wide["$amount"])
+    yao = guardrails.spike_fade(wide["$close"])
+    if str(thin.index[-1])[:10] != date:
+        raise RuntimeError(f"护栏面板最后一天是 {thin.index[-1]}，不是打分日 {date}")
+    return thin.iloc[-1], yao.iloc[-1]
+
+
+def guard_notes() -> dict:
+    """最近一次打分里被护栏挡下的票（代码 → {rank_raw, reason}）；没开护栏时是空表。"""
+    with _cache_lock:
+        return dict(_cache.get("guard") or {})
+
+
 class RankingNotReady(RuntimeError):
     """当日全票池的分数还没算好，而这条调用明确说了「不等」。
 
@@ -305,7 +383,14 @@ def day_ranking(refresh: bool = False, wait: bool = True) -> list[dict]:
         day = pd.Timestamp(date)
         if not (pred.index.get_level_values("datetime") == day).any():
             raise RuntimeError(f"{date} 票池里没有可打分的股票（日线断档或票池过期）")
-        tail = pred.xs(day, level="datetime").sort_values(ascending=False)
+        # 同分必须按代码升序兜底：只按分数排序时，同分顺序取决于行情表/插入顺序，
+        # 换台机器或换一次面板就可能换出另一个 #1，页面和台账都没法复现。
+        tail = (pred.xs(day, level="datetime").sort_index()
+                .sort_values(ascending=False, kind="mergesort"))
+        raw_order = {inst: position + 1 for position, inst in enumerate(tail.index)}
+        scored = len(tail)  # 护栏之前真正打到分的只数：覆盖率告警看的是它，不是剔过之后的数
+        tail, guard = apply_guardrails(tail, *guardrail_flags(date, list(tail.index)))
+        guard_stats = {k: v for k, v in guard.items() if k != "guard_notes"}
         total = len(tail)
         rows = [{
             "code": str(inst)[2:],
@@ -316,18 +401,23 @@ def day_ranking(refresh: bool = False, wait: bool = True) -> list[dict]:
             # 否则 topk 一改分位数就变，前后两批结果没法比
             "score": float((total - position) / total),
             "rank": position + 1,
+            # 护栏前的名次：被挡下的原始第一不会出现在 rows 里，但留下的票能说清自己原来第几
+            "raw_rank": raw_order[inst],
             "universe": total,
         } for position, (inst, raw) in enumerate(tail.items())]
         with _cache_lock:
             _cache["key"] = key
             _cache["rows"] = rows
-            _cache["stats"] = {**score_stats, "universe": total,
-                               "seconds": round(time.time() - started, 1)}
-        logger.info("qlib 打分 %s：%d/%d 只进榜（因子不足 %d 行、整批无数据 %d 只），耗时 %.1f 秒",
-                    date, total, score_stats["pool"], score_stats["thin_rows"],
-                    score_stats["no_row"], time.time() - started)
+            _cache["guard"] = {str(sym)[2:]: note for sym, note in guard["guard_notes"].items()}
+            _cache["stats"] = {**score_stats, **guard_stats, "scored_names": scored,
+                               "universe": total, "seconds": round(time.time() - started, 1)}
+        logger.info("qlib 打分 %s：%d/%d 只进榜（因子不足 %d 行、整批无数据 %d 只；护栏挡下 %d 只："
+                    "薄流动 %d、拉升后阴跌 %d），耗时 %.1f 秒",
+                    date, total, score_stats["pool"], score_stats["thin_rows"], score_stats["no_row"],
+                    guard_stats["guard_dropped"], guard_stats["guard_thin"],
+                    guard_stats["guard_yao"], time.time() - started)
         # 分数照样返回（半市场的名单也比没有强），但「只剩半个市场」这件事必须自己说出口
-        alert_ranking_coverage(ranking_coverage_problem(date, total, score_stats["pool"]))
+        alert_ranking_coverage(ranking_coverage_problem(date, scored, score_stats["pool"]))
         return rows
 
 
@@ -370,7 +460,57 @@ def latest_scores(topk: int = DEFAULT_TOPK, refresh: bool = False) -> list[dict]
         closes = _closes([row["qlib_symbol"] for row in rows], rows[0]["date"])
         for row in rows:
             row["price"] = closes.get(row["qlib_symbol"])
+        # 原始第一被护栏挡下时，名单上的护栏后第一要能说清「谁被谁挡了」；
+        # 否则页面只看到第 1 名换了一只票，却不知道原第一根本没进名单。
+        blocked_top = next(({"code": str(sym), **note}
+                            for sym, note in guard_notes().items()
+                            if note.get("rank_raw") == 1), None)
+        if blocked_top:
+            rows[0]["guard_blocked_top"] = blocked_top
     return rows
+
+
+def pref_enabled() -> bool:
+    """热门偏好榜的总开关：默认下线，`PREF_LIST=on` 才启用（改环境+重启，不动代码）。"""
+    return os.environ.get("PREF_LIST", "off").strip().lower() not in ("off", "0", "false", "no")
+
+
+def latest_pref(topk: int | None = None, refresh: bool = False) -> list[dict]:
+    """用户点名的那条榜：热门板块 + 新闻利好 + 排除小市值 + 趋势向上。
+
+    不重新打分——它读的就是 `day_ranking()` 那一次全池打分的结果（所以自动带着两条护栏），
+    然后在榜内按他的四条判据重排。判据与装载都在 `pref.py`，这里只管接线和补收盘价。
+
+    每一路各挡了多少、热度/新闻是哪天的，都存进 `_cache["pref"]` 给 /health 和台账看：
+    静默筛数是缺陷，静默用昨天的数据当今天说的也是。
+    """
+    rows = day_ranking(refresh)
+    if not rows:
+        return []
+    res = pref.build_from_rows(rows, day=rows[0]["date"], top=topk or pref.DEFAULT_TOPK)
+    out = res.rows
+    if out:
+        closes = _closes([r["qlib_symbol"] for r in out if r.get("qlib_symbol")], rows[0]["date"])
+        for r in out:
+            r["price"] = closes.get(r.get("qlib_symbol")) or r.get("price")
+    with _cache_lock:
+        _cache["pref"] = res.stats
+    logger.info("热门偏好榜 %s：候选 %d 只 → 出榜 %d 只（无热门板块 %d、小市值 %d、市值缺数 %d、"
+                "趋势向下 %d、趋势判不了 %d）；热度取自 %s、新闻取自 %s",
+                rows[0]["date"], res.stats["candidates"], res.stats["out"],
+                res.stats["no_hot_board"], res.stats["small_cap"], res.stats["mv_missing"],
+                res.stats["trend_down"], res.stats["trend_unknown"],
+                res.stats.get("heat_day"), res.stats.get("news_day"))
+    if res.stats.get("data_missing"):
+        logger.warning("热门偏好榜的输入整路是空的：%s（出榜 %d 只不代表「今天没有票」，"
+                       "是那些数据没落盘）", "、".join(res.stats["data_missing"]), res.stats["out"])
+    return out
+
+
+def last_pref_stats() -> dict:
+    """最近一次热门偏好榜的筛数与数据时点；没跑过返回空表（不编一个零）。"""
+    with _cache_lock:
+        return dict(_cache.get("pref") or {})
 
 
 def ranks_by_code(codes: list[str], wait: bool = True) -> dict:
@@ -385,6 +525,7 @@ def ranks_by_code(codes: list[str], wait: bool = True) -> dict:
     art = artifacts.load()
     rows = day_ranking(wait=wait)
     by_code = {row["code"]: row for row in rows}
+    blocked = guard_notes()
     # 成员判定必须跟 day_ranking 用的是同一份名单：universe 模式下 art.pool 是训练池（300 只），
     # 实际打分的是 universe.txt（约 5,000 只），拿 art.pool 判会把「今天真被打过分」的票说成没打过。
     scored_pool = score_pool(art)
@@ -397,6 +538,13 @@ def ranks_by_code(codes: list[str], wait: bool = True) -> dict:
         if hit is not None:
             items.append({"code": code, "in_pool": True, "rank": hit["rank"],
                           "universe": universe, "score_raw": round(hit["score_raw"], 6)})
+        elif code in blocked:
+            # 被护栏挡下 ≠ 没打分、也 ≠ 没行情：这句话必须分清，不然持仓页看到的是同一个「没上榜」，
+            # 而三件事的应对完全不一样（模型不给分 / 行情缺数 / 名单规则拦住了）
+            why = blocked[code]
+            items.append({"code": code, "in_pool": True, "rank": None, "universe": universe,
+                          "note": f"当日排第 {why['rank_raw']} 名，但被名单护栏挡下"
+                                  f"（{why['reason']}），不进名单"})
         elif code in pool_codes:
             items.append({"code": code, "in_pool": True, "rank": None, "universe": universe,
                           "note": f"在 {pool_size} 只候选池里，但当日没有可打分的行情（停牌或日线断档）"})
