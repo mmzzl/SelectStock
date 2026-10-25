@@ -146,17 +146,26 @@ def write_instruments(qlib_dir: Path, name: str, symbols: list[str]) -> Path:
     return path
 
 
-def build_dataset(qlib, instruments: str, fit_end: str, segments: dict, label: str = LABEL):
+def build_dataset(qlib, instruments: str, fit_end: str, segments: dict,
+                  label: str = LABEL, feature_set: str = "trend"):
     """因子表 + 训练段拟合的稳健标准化。fit 窗口只到 fit_end，绝不越过训练段末尾。
 
-    特征 = stock_selector_qlib.alpha.Alpha158Trend（训练与线上打分同一个类，列序一字不差）。
+    特征集由 --feature-set 选（trend=Alpha158+批次N，style=+批次O，full=两者）；
+    **线上打分永远发 Alpha158Full 超集、按 artifact 的 norm 列取子集**，训练臂只需
+    列名落在超集里即可。同一实验臂只能在 stock_selector_qlib.alpha*.py 里定义一次。
     """
     from qlib.data.dataset import DatasetH
     from qlib.data.dataset.processor import CSRankNorm, DropnaLabel, Fillna, RobustZScoreNorm
 
     from stock_selector_qlib.alpha import Alpha158Trend
+    from stock_selector_qlib.alpha_style import Alpha158Full, Alpha158Style
 
-    handler = Alpha158Trend(
+    handler_cls = {"base": None, "trend": Alpha158Trend, "style": Alpha158Style,
+                   "full": Alpha158Full}[feature_set]
+    if handler_cls is None:
+        from qlib.contrib.data.handler import Alpha158
+        handler_cls = Alpha158
+    handler = handler_cls(
         instruments=instruments,
         start_time=segments["train"][0],
         end_time=segments["test"][1],
@@ -427,6 +436,9 @@ def main() -> int:
     ap.add_argument("--label-horizon", type=int, default=5,
                     help="标签周期 H：T+1→T+H 的收益（默认 5 = 历史口径）。批次 P 用它比较 T+10/T+20；"
                          "改了它就是改训练目标，与历史读数不可直接比")
+    ap.add_argument("--feature-set", choices=["base", "trend", "style", "full"], default="trend",
+                    help="特征集：base=Alpha158 原味；trend=+批次N趋势列（历史可比口径）；"
+                         "style=+批次O风格残余列；full=两者。线上打分永远是超集按 norm 列取数")
     ap.add_argument("--smoke", action="store_true", help="200 只 + 短窗，只验管道")
     ap.add_argument("--backtest", action="store_true")
     ap.add_argument("--topk", type=int, default=30)
@@ -512,7 +524,8 @@ def main() -> int:
     }
     # 用落盘文件的实际名（已小写），不要用传进来的 --inst-name 原样
     # fit_end 必须是**训练段**末尾（稳健标准化统计的拟合窗），不能跟着 --pool-end 走
-    dataset = build_dataset(qlib, inst_file.stem, train_end_eff, segments, label=label)
+    dataset = build_dataset(qlib, inst_file.stem, train_end_eff, segments, label=label,
+                            feature_set=args.feature_set)
 
     from qlib.contrib.model.gbdt import LGBModel
 

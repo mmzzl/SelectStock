@@ -134,12 +134,16 @@ def refresh() -> dict:
 
 
 def raw_features(pool: list[str], beg: str, end: str) -> pd.DataFrame:
-    """未归一化因子表：index=(datetime, instrument)，columns=Alpha158 + 批次N 趋势扩展（166 列）。"""
+    """未归一化因子超集：Alpha158 + 批次N(tf_) + 批次O(so_)，175 列。
+
+    打分固定用超集：normalize 按 art.columns 取训练时的列子集，
+    base/trend/style/full 四代 artifact 在这里共用一个取数路径不漂移。
+    """
     from qlib_run import LABEL
 
-    from .alpha import Alpha158Trend
+    from .alpha_style import Alpha158Full
 
-    handler = Alpha158Trend(
+    handler = Alpha158Full(
         instruments=list(pool),
         start_time=beg,
         end_time=end,
