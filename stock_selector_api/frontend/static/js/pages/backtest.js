@@ -271,9 +271,17 @@
       ? '<div class="hint">判据快照（规则集 ' + esc(String(p.rule_set_id || '-')) + '）：卖出 ' +
         esc(p.sell_rule) + ' ｜ 加仓 ' + esc(p.add_rule || '无') + '</div>'
       : '';
+    // 票池/护栏口径必须和收益并排出现：300 只训练池的结果不能拿来替线上全市场名单背书。
+    const ex = r.executability || {};
+    const parity = ex.pool_source
+      ? '<div class="hint">口径：票池 ' + esc(ex.pool_size) + '（' + esc(ex.pool_source) + '）· ' +
+        (ex.guardrails_applied ? '护栏已叠加' : '护栏未叠加') + ' · ' +
+        (ex.live_parity ? '与线上同池同护栏' : '未对齐线上') + ' · ' +
+        esc(ex.parity_note || '') + '</div>'
+      : '';
     return '<div class="hint">策略 ' + esc(job.result ? r.strategy : '-') + ' · ' +
       esc(r.start_date || '') + ' ~ ' + esc(r.end_date || '') +
-      ' · 内核任务号 ' + esc(r.task_id || '-') + '</div>' + snapshot +
+      ' · 内核任务号 ' + esc(r.task_id || '-') + '</div>' + snapshot + parity +
       '<div class="cards">' + cards.map((c) =>
         '<div class="card num" style="min-width:110px">' + esc(c[0]) + '<b style="font-size:20px">' +
         esc(c[1]) + '</b></div>').join('') + '</div>' +

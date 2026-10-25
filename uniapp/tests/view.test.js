@@ -5,7 +5,8 @@ import { toHoldingRow, toTradeRow, toPnlView, toSelectionJobRow, toSelectionResu
          priceStampText, convictionText, convictionHead, convictionLevelText, convictionLevelClass,
          convictionNote, hasConviction, takeProfitText, gameText,
          riskText, riskClass, isNa, sortByRiskDesc, buyLevelText, sellTriggerText,
-         orderPlanText, riskAdjustText, posteriorText, gateText, dayRankText } from "../src/logic/view.js";
+         orderPlanText, riskAdjustText, posteriorText, gateText, dayRankText,
+         scoreText, toStrategyOption } from "../src/logic/view.js";
 
 test("时间格式化：naive UTC 转本地、压到分钟；带时区/非法值不崩", async () => {
   const { execFileSync } = await import("node:child_process");
@@ -306,11 +307,22 @@ test("买点文案：判据里有几个位就说几个，都没有就整行不�
   assert.equal(buyLevelText({ buyRef: null, buyInvalid: null }), "");
   assert.equal(buyLevelText({}), "");
   // 引擎声明不算买点（qlib 没有均线/箱沿这类判据）时这行必须说话，
-  // 因为「没有失效位」看着像"这笔买入不会错"，实际是"没人给你算过"
+  // 因为「没有失效位」看着像"这笔买入不会错"，实际是"没人给你算过"。
+  // 措辞不能写「该引擎不出价」：同张卡片上方就显示着基准价（信号日收盘），
+  // 那句话自相矛盾；缺的是**判据价位**，不是价格本身。
   assert.equal(buyLevelText({ buyRef: null, buyInvalid: null, naFields: ["buy_ref_price"] }),
-               "买点参考位/失效位 · 不适用（该引擎不出价位）");
+               "买点参考位/失效位 · 不适用（该引擎只出排序分，不给价位；能对照的只有上方基准价）");
   // 有数字时不适用让位给数字（同一引擎不会既不算又算出来）
   assert.equal(buyLevelText({ buyRef: 10.3, naFields: ["buy_ref_price"] }), "买入参考 10.30");
+});
+
+test("口径段：选股页不得声称引擎「不出价」，要写实测过的价位止损结论", async () => {
+  const { readFileSync } = await import("node:fs");
+  const page = readFileSync(new URL("../src/pages/selection/index.vue", import.meta.url), "utf8");
+  assert.ok(!page.includes("不出价位"), "页头口径段还在说「该引擎不出价位」——基准价就在卡片上，这句话自相矛盾");
+  assert.ok(page.includes("价位止损") && page.includes("少赚"),
+            "口径段要交代价位止损在这份名单上实测过（设了反而扣分）");
+  assert.ok(page.includes("换出纪律是名次"), "口径段要给出真正的换出口径，不然读者只剩「不适用」三个字");
 });
 
 test("行解析：na_fields 逗号串拆成数组，缺列拆成空数组", () => {
@@ -379,6 +391,15 @@ test("展示顺序：按预期超额降序，没判分的排最后且互保名�
   assert.deepEqual(sortByRiskDesc(rows).map((r) => r.code), ["C", "E", "B", "A", "D"]);
   assert.deepEqual(rows.map((r) => r.code), ["A", "B", "C", "D", "E"]);   // 不改原数组
   assert.equal(sortByRiskDesc([]).length, 0);
+});
+
+test("展示顺序：模型榜按护栏后名次排在最前，旧 hot_pref 的 #1 不能抢第一行", () => {
+  const rows = [
+    { code: "H1", strategy: "hot_pref", rank: 1, risk: 9 },
+    { code: "Q2", strategy: "qlib_alpha158", rank: 2, risk: null },
+    { code: "Q1", strategy: "qlib_alpha158", rank: 1, risk: null },
+  ];
+  assert.deepEqual(sortByRiskDesc(rows).map((r) => r.code), ["Q1", "Q2", "H1"]);
 });
 // —— 板块热力图：颜色档、文案与字段透传 ——
 test("heatColor：红涨绿跌分档，缺值给中性灰而不是 0% 的平色", async () => {
@@ -507,4 +528,36 @@ test("当日榜内名次：有名次就说名次，拿不到就说原因，绝�
   assert.equal(dayRankText({ code: "600000", in_pool: true, rank: "3", universe: 299 },
     { supported: true, pool_size: 300, universe: 0, exit_rank: null }),
     "榜内名次 · 第 3 名");
+});
+
+test("排序分展示成百分制：0~1 的分位乘成 0~100，空值给「—」", () => {
+  // 引擎落库的是「当日票池里的位置」(0~1，第一名正好 1.000)。使用者要的是满分 100，
+  // 所以乘法放在展示层做一次；口径不变、只换刻度。
+  assert.equal(scoreText({ score: 1 }), "100");
+  assert.equal(scoreText({ score: 0.997 }), "99.7");
+  assert.equal(scoreText({ score: 0.8732 }), "87.3");
+  assert.equal(scoreText({ score: 0 }), "0");
+  assert.equal(scoreText({ score: null }), "—");
+  assert.equal(scoreText({}), "—");
+  // 越界的脏数据不能显示成 120 分
+  assert.equal(scoreText({ score: 1.2 }), "100");
+});
+
+test("策略选项：插件给了 label 就用它，没给才从 description 抠前缀", () => {
+  assert.equal(toStrategyOption({ name: "hot_pref", label: "热门偏好榜",
+                                  description: "热门偏好榜：四条判据" }).label, "热门偏好榜");
+  assert.equal(toStrategyOption({ name: "x", description: "自研内核：三条规则" }).label, "自研内核");
+  assert.equal(toStrategyOption({ name: "x" }).label, "x");
+});
+
+test("口径段：选股页要说清「满分 100」和两条榜各是什么", async () => {
+  const { readFileSync } = await import("node:fs");
+  const page = readFileSync(new URL("../src/pages/selection/index.vue", import.meta.url), "utf8");
+  assert.ok(page.includes("scoreText"), "排序分那一格必须走 scoreText，不能再拿 fixed3 直接印 0~1");
+  assert.ok(page.includes("满分 100"), "要写清分数是百分制刻度");
+  assert.ok(page.includes("热门偏好榜"), "第二条榜是什么得在页面上说一句");
+  assert.ok(page.includes("不能当买入理由") || page.includes("不是把握"), "分高≠把握大这句话不能丢");
+  // 两条榜可以各含同一只票，:key 只用代码会让 Vue 拿到重复键
+  assert.ok(/:key="[^"]*strategy[^"]*code[^"]*"/.test(page),
+            "结果卡的 :key 要带上策略名，否则同一只票进两条榜时 Vue 键冲突");
 });

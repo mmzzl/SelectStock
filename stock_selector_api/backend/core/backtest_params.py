@@ -37,14 +37,19 @@ DEFAULTS: dict = {
     # 引擎开关：回测没有 HTTP 插件缝（Celery 任务名 backtest.run 就是那条缝），
     # 所以「换插件」在这里表现为一个参数，worker 按它 import 不同内核。
     "engine": "self",       # self = scripts/backtest_main.py；qlib = stock_selector_qlib.backtest
-    "topk": 30,             # 仅 engine=qlib：持仓只数
+    # 默认按线上「只买最高分一只」的口径；要看多票组合再显式传 topk。
+    "topk": 1,              # 仅 engine=qlib：持仓只数
     "n_drop": 5,            # 仅 engine=qlib（hold_rule=dropout）：每日强制换掉最低分的几只
     "benchmark": "SH510300",  # 仅 engine=qlib：qlib 面板里的基准（指数 399xxx 只有 2025 年后数据）
     # 持仓纪律（仅 engine=qlib）：dropout = 每天换掉 n_drop 只；
     # band = 还在前 exit_rank 名就继续拿，空位从前 entry_rank 名补。自研内核不读这三个键。
-    "hold_rule": "dropout",
+    # 单票默认用 band：进榜严、出榜松，不每天追着 #1 换票。
+    "hold_rule": "band",
     "entry_rank": 50,       # 买入候选 = 当日分数前 entry_rank 名
     "exit_rank": 100,       # 跌出前 exit_rank 名才卖
+    # 仅 engine=qlib：是否在回测信号上叠加线上那两条名单护栏（薄流动/拉升后阴跌）。
+    # 关闭只用于研究对照；默认开着，避免回测与线上差一层筛子却没人知道。
+    "guardrails": True,
 }
 
 ENGINES = ("self", "qlib")
@@ -60,7 +65,8 @@ _QLIB_UNUSED_KEYS = ("strategy", "rule_set_id", "sell_rule", "add_rule", "max_ho
 # topk/n_drop/benchmark 也要列进来：worker 是 `SimpleNamespace(**merged)` 整包喂内核的
 # （tasks/backtest_tasks.py:108），自研内核没有这三个属性，收了就静默忽略——
 # 那正好是本模块开头要避免的「前端能填、回测跑不到」。
-_SELF_UNUSED_KEYS = ("hold_rule", "entry_rank", "exit_rank", "topk", "n_drop", "benchmark")
+_SELF_UNUSED_KEYS = ("hold_rule", "entry_rank", "exit_rank", "topk", "n_drop", "benchmark",
+                     "guardrails")
 
 # 字符串参数：{键: 长度上限}
 _STR_SPEC: dict = {"rule_set_id": 36, "sell_rule": 2000, "add_rule": 2000,
@@ -146,7 +152,7 @@ def validate(raw: dict | None) -> dict:
             out[key] = name
         elif key in _STR_SPEC:
             out[key] = _text(key, value)
-        elif key == "no_save":
+        elif key in ("no_save", "guardrails"):
             out[key] = bool(value)
         else:
             typ, lo, hi = _NUM_SPEC[key]
@@ -179,8 +185,10 @@ def _check_engine(raw: dict, effective: dict) -> None:
     if given:
         raise BizError(f"engine={engine} 不支持这些参数（{why}）：{', '.join(given)}",
                        code=400, status_code=400)
-    # n_drop 只属于 dropout：band 不每天强制换票，收着它照跑就会把读数标成「换过 5 只」
-    if engine == "qlib" and effective["hold_rule"] == "band" and raw.get("n_drop") is not None:
+    # n_drop 只属于 dropout：band 不每天强制换票，收着它照跑就会把读数标成「换过 5 只」。
+    # 缺省表单会把 n_drop=5 一起提交，band 默认下放行这个缺省值；显式改成别的数才拒。
+    if (engine == "qlib" and effective["hold_rule"] == "band"
+            and raw.get("n_drop") is not None and raw.get("n_drop") != DEFAULTS["n_drop"]):
         raise BizError("hold_rule=band 不看 n_drop（它只卖跌出 exit_rank 的持仓，不每天强制换票）；"
                        "要跑 TopkDropout 请设 hold_rule=dropout", code=400, status_code=400)
 

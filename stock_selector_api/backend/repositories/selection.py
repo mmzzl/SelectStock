@@ -45,4 +45,16 @@ class SelectResultRepo(RepoBase):
         # 必须显式排序：qlib 引擎下 risk_ex10_pp 全是 null，App 的 sortByRiskDesc 对同值保序，
         # 于是页面顺序 = 本接口的顺序 = 模型名次。不写 ORDER BY 就只剩「SQLite 恰好按插入序返回」
         # 这个未定义行为在兜着，一旦换后端存储（Mongo 无序）名次就散了。
-        return await self._find_all(filters={"job_id": job_id}, order_by="rank_no")
+        # rank_no 为 NULL 的旧行（自研内核没有全池名次）排最后；SQL/Mongo 的 NULL 默认序不同，
+        # 所以在 Python 里收口，别让换存储把「没名次」排到第一。
+        rows = await self._find_all(filters={"job_id": job_id})
+        # 混合批次里模型榜必须排在旧 hot_pref 前面：两条榜都从 1 开始编号，
+        # 只按 rank 排会让旧榜的 #1 抢在模型 #1 前面。页面也按同一规则兜底。
+        return sorted(rows, key=lambda r: (0 if r.get("strategy") == "qlib_alpha158" else 1,
+                                           r.get("rank_no") is None,
+                                           r.get("rank_no") if r.get("rank_no") is not None else 0,
+                                           str(r.get("code") or "")))
+
+    async def delete_by_job(self, job_id: str) -> None:
+        """任务失败时清掉半截结果：页面不能把「写了一半的名单」当成完整名单展示。"""
+        await self._delete_from(self.table, {"job_id": job_id})

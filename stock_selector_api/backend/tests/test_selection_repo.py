@@ -42,6 +42,32 @@ async def test_enriched_fields_roundtrip():
     assert row["risk_reason"].startswith("[position]")
 
 
+async def test_list_by_job_puts_null_rank_last_and_is_deterministic():
+    """rank_no=NULL 的旧行不能靠 SQLite 的默认 NULL 顺序跑到第一名前面。"""
+    job = await select_jobs_repo.create({"user_id": "s1r", "strategies": "[]",
+                                         "status": "done", "source": "manual"})
+    for code, rank in (("600003", None), ("600002", 2), ("600001", 1)):
+        await select_results_repo.create({"job_id": job["job_id"], "code": code,
+                                          "name": code, "signal": "x", "reason": "x",
+                                          "rank_no": rank})
+    rows = await select_results_repo.list_by_job(job["job_id"])
+    assert [r["code"] for r in rows] == ["600001", "600002", "600003"]
+
+
+async def test_list_by_job_puts_model_rows_before_old_pref_rows():
+    """两条榜的 #1 都叫 1；旧 hot_pref 不能因为代码更小就排在模型 #1 前面。"""
+    job = await select_jobs_repo.create({"user_id": "s1q", "strategies": "[]",
+                                         "status": "done", "source": "manual"})
+    for code, strategy, rank in (("300296", "hot_pref", 1), ("600396", "qlib_alpha158", 1),
+                                 ("688627", "qlib_alpha158", 2)):
+        await select_results_repo.create({"job_id": job["job_id"], "code": code,
+                                          "name": code, "signal": "x", "reason": "x",
+                                          "strategy": strategy, "rank_no": rank})
+    rows = await select_results_repo.list_by_job(job["job_id"])
+    assert [(r["code"], r["strategy"]) for r in rows] == [
+        ("600396", "qlib_alpha158"), ("688627", "qlib_alpha158"), ("300296", "hot_pref")]
+
+
 async def test_find_running_and_list():
     await select_jobs_repo.create({"user_id": "s2", "strategies": "[]", "status": "queued", "source": "manual"})
     r = await select_jobs_repo.find_running("s2")

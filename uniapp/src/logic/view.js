@@ -317,14 +317,18 @@ export function riskAdjustText(r) {
 
 /** 买点文案：两个位都来自策略自己的判据，缺哪个就不说哪个；都没有就整行不显示。
  *  例外是引擎显式声明不算买点（qlib 没有均线/箱沿这类判据）——那时必须显示一句不适用，
- *  因为「没有失效位」看起来像"这笔买入不会错"，而实际是"没人给你算过"。 */
+ *  因为「没有失效位」看起来像"这笔买入不会错"，而实际是"没人给你算过"。
+ *  措辞别说"该引擎不出价"：同一张卡片上方就显示着基准价（信号日收盘），
+ *  那句话当场自相矛盾；这里缺的是**判据价位**，不是价格。 */
 export function buyLevelText(r) {
   const ref = num(r?.buyRef);
   const stop = num(r?.buyInvalid);
   const parts = [];
   if (ref !== null) parts.push(`买入参考 ${ref.toFixed(2)}`);
   if (stop !== null) parts.push(`跌破 ${stop.toFixed(2)} 失效`);
-  if (!parts.length && isNa(r, "buy_ref_price")) return "买点参考位/失效位 · 不适用（该引擎不出价位）";
+  if (!parts.length && isNa(r, "buy_ref_price")) {
+    return "买点参考位/失效位 · 不适用（该引擎只出排序分，不给价位；能对照的只有上方基准价）";
+  }
   return parts.join(" · ");
 }
 
@@ -344,26 +348,56 @@ export function riskClass(v, na = false) {
   return Number(v) >= 0 ? "up" : "down";
 }
 
-/** 结果页展示顺序：按「预期 10 日超额」从高到低，没有风险分的排最后。
+/**
+ * 排序分：引擎落库的是「这只票在当日票池里的位置」（0~1，第一名正好 1.000），
+ * 使用者要看的是满分 100 的刻度，所以乘法只在展示层做一次，落库口径不动（两条榜同一个口径）。
+ * 刻度换了，含义没换：它只决定谁排在谁前面，不是把握的大小，所以越界的脏数据夹在 0~100，
+ * 而不是原样印出一个 120 分。
+ */
+export function scoreText(r) {
+  const v = num(r && r.score);
+  if (v === null || Number.isNaN(v)) return "—";
+  const pct = Math.max(0, Math.min(100, Math.round(v * 1000) / 10));
+  return pct % 1 === 0 ? String(pct) : pct.toFixed(1);
+}
+
+/** 结果页展示顺序：qlib 模型榜先按护栏后名次升序，其他榜再按「预期 10 日超额」降序。
  *
- *  不用后端的 rank：box_oscillate 的强度分会饱和到 1.000，同分再按代码字符串兜底，
- *  头部名次并不携带任何信息（2026-10-11 实测榜首是货币 ETF）。缺值排最后而不是排 0，
- *  因为"闸门没判出来"和"预测跑平大盘"是两回事。
+ *  qlib 的 risk 全是 null，不能让它跟着其他榜的风险分混排；模型榜的 #1 必须是页面第一行，
+ *  否则同一个任务里旧 hot_pref 的 #1 会排在模型 #1 前面。自研策略仍按风险分排，
+ *  因为 box_oscillate 的强度分饱和到 1.000，rank 头部不携带信息（2026-10-11 实测榜首是货币 ETF）。
+ *  缺风险分排最后而不是排 0，因为"闸门没判出来"和"预测跑平大盘"是两回事。
  */
 export function sortByRiskDesc(rows) {
+  const isModel = (r) => r?.strategy === "qlib_alpha158";
   const value = (r) => {
     const v = r?.risk;
     if (v === null || v === undefined || Number.isNaN(Number(v))) return -Infinity;
     return Number(v);
   };
-  // 两个都没判分时 y-x 会是 NaN（规范按 0 处理，但不依赖实现），显式返回 0 让它们保序
-  return [...rows].sort((a, b) => (value(a) === value(b) ? 0 : value(b) - value(a)));
+  const rank = (r) => {
+    const v = r?.rank;
+    return v === null || v === undefined || Number.isNaN(Number(v)) ? Infinity : Number(v);
+  };
+  return [...rows].sort((a, b) => {
+    if (isModel(a) !== isModel(b)) return isModel(a) ? -1 : 1;
+    if (isModel(a)) {
+      const ar = rank(a), br = rank(b);
+      if (ar !== br) return ar - br;
+      return String(a?.code || "").localeCompare(String(b?.code || ""));
+    }
+    // 两个都没判分时 y-x 会是 NaN（规范按 0 处理，但不依赖实现），显式返回 0 让它们保序
+    return value(a) === value(b) ? 0 : value(b) - value(a);
+  });
 }
 
 /** 插件 /strategy-detail 的一行 → 前端选项。中文标签只来自 description，不硬编码策略名。 */
 export function toStrategyOption(d) {
   return {
-    name: d.name || "", label: (d.description || "").split("：")[0] || d.name || "",
+    // 插件显式给 label 就用它（两条榜并存时，芯片上的字要说得清是哪条榜）；
+    // 没给才退回从 description 抠「：」前缀的老办法。
+    name: d.name || "",
+    label: d.label || (d.description || "").split("：")[0] || d.name || "",
     desc: d.description || "", requiredRows: num(d.required_rows), asOf: Boolean(d.as_of),
   };
 }

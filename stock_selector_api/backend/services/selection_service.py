@@ -22,6 +22,9 @@ logger = logging.getLogger("selection_service")
 
 # 进程内单飞表：DB 状态查询与后台任务间存在调度间隙，内存判定保证确定性
 _inflight: dict[str, str] = {}
+# 两个请求同时进来时，「查 DB → 建 job → 写 _inflight」之间有 await，必须串行化，
+# 否则两边都查到没有运行中，各建一条任务。API 是单进程（deploy 注释），这把锁够用。
+_start_lock = asyncio.Lock()
 
 _RANK_MAX_CODES = 60
 # 名次查询现在是**毫秒级**的：引擎侧那条路由不等打分——当日榜单没算好时它立刻回
@@ -137,10 +140,12 @@ def split_codes(raw: str) -> list[str]:
         token = part.strip()
         if not token:
             continue
-        match = re.search(r"\d{6}", token)
+        # 只认「6 位代码 + 可选市场前缀/后缀」；原来的 search 会把 1234567 截成 123456，
+        # 把脏串当成真代码去查，页面就多一个查不到的名次。
+        match = re.fullmatch(r"(?:SH|SZ|BJ)?(\d{6})(?:\.(?:SH|SZ|BJ))?", token, re.IGNORECASE)
         if not match:
             raise BizError(f"代码格式不对：{token}（要 6 位数字代码）")
-        code = match.group(0)
+        code = match.group(1)
         if code not in out:
             out.append(code)
     if len(out) > _RANK_MAX_CODES:
@@ -148,18 +153,7 @@ def split_codes(raw: str) -> list[str]:
     return out
 
 
-async def _default_strategies() -> list[str]:
-    """页面没勾策略时问插件要名单，不在后端写死策略名。
 
-    写死自研那两个名字之后，把选股切到 qlib 插件（它只认 qlib_alpha158）会让插件按契约
-    返回空名单——落库 0 条、页面上看起来就是「今天没有票」，而真实原因是名字对不上。
-    """
-    try:
-        names = await list_strategies()
-    except Exception as exc:  # noqa: BLE001 - 问不到就退回旧默认，让真正那次请求去暴露错误
-        logger.warning("缺省策略名单取不到，用内置兜底：%s", exc)
-        return ["trend_rebound", "box_oscillate"]
-    return names or ["trend_rebound", "box_oscillate"]
 
 
 async def _mock_run(strategies: list[str]) -> list[dict]:
@@ -279,6 +273,11 @@ async def _release_stale(user_id: str) -> dict | None:
         return job
     await select_jobs_repo.update(job["job_id"],
                                  {"status": "failed", "error": _STALE_MSG.format(min=STALE_MINUTES)})
+    # 进程被杀时可能已经写了几行；僵尸任务既然判失败，半截名单也要一起清掉。
+    try:
+        await select_results_repo.delete_by_job(job["job_id"])
+    except Exception:           # noqa: BLE001 - 清理失败不能挡住新任务
+        logger.exception("清理僵尸选股结果失败: %s", job["job_id"])
     logger.warning("清理僵尸选股任务 %s（建于 %.0f 分钟前，状态 %s）", job["job_id"],
                    _age_minutes(job), job.get("status"))
     return None
@@ -288,20 +287,41 @@ async def start_run(user_id: str, strategies: list[str] | None,
                     source: str = "manual") -> dict:
     if not user_id:
         raise BizError("user_id 不能为空", code=400, status_code=400)
-    if user_id in _inflight:
-        raise BizError(f"已有选股任务运行中: {_inflight[user_id]}", code=409, status_code=409)
-    running = await _release_stale(user_id)
-    if running:
-        raise BizError(f"已有选股任务运行中: {running['job_id']}", code=409, status_code=409)
-    strategies = strategies or await _default_strategies()
-    job = await select_jobs_repo.create({
-        "user_id": user_id,
-        "strategies": json.dumps(strategies, ensure_ascii=False),
-        "status": "queued",
-        "source": source,
-    })
-    _inflight[user_id] = job["job_id"]
-    asyncio.create_task(_run_job(job["job_id"], user_id, strategies))
+    async with _start_lock:
+        if user_id in _inflight:
+            raise BizError(f"已有选股任务运行中: {_inflight[user_id]}", code=409, status_code=409)
+        running = await _release_stale(user_id)
+        if running:
+            raise BizError(f"已有选股任务运行中: {running['job_id']}", code=409, status_code=409)
+
+        # 策略名单只从插件拿，失败/为空就报错，绝不回退旧名字。回退的后果是插件按契约
+        # 返回空名单 → 落库 0 条 → 页面显示「今天没有票」，真实原因却是「名字对不上」。
+        available: list[str] | None = None
+        if not strategies or settings.selection_plugin_mode == "http":
+            try:
+                available = await list_strategies()
+            except Exception as exc:  # noqa: BLE001
+                raise BizError(f"策略列表取不到：{exc}", code=503, status_code=503) from exc
+        if strategies:
+            if available is not None:
+                unknown = [s for s in strategies if s not in available]
+                if unknown:
+                    raise BizError(f"策略已下线或不可用：{', '.join(unknown)}",
+                                   code=400, status_code=400)
+            chosen = list(strategies)
+        else:
+            chosen = list(available or [])
+        if not chosen:
+            raise BizError("选股插件没有可用策略", code=503, status_code=503)
+
+        job = await select_jobs_repo.create({
+            "user_id": user_id,
+            "strategies": json.dumps(chosen, ensure_ascii=False),
+            "status": "queued",
+            "source": source,
+        })
+        _inflight[user_id] = job["job_id"]
+    asyncio.create_task(_run_job(job["job_id"], user_id, chosen))
     return {"job_id": job["job_id"], "status": "queued"}
 
 
@@ -315,12 +335,14 @@ async def _run_job(job_id: str, user_id: str, strategies: list[str]) -> None:
         for r in results:
             await select_results_repo.create({"job_id": job_id, **r})
         await select_jobs_repo.update(job_id, {"status": "done", "result_count": len(results)})
-        await inbox_notify.notify_user(
-            user_id, "selection_completed", "选股完成",
-            f"本次选股命中 {len(results)} 只（策略: {'/'.join(strategies)}）",
-            related_type="select_jobs", related_id=job_id)
     except Exception as exc:    # noqa: BLE001
         logger.exception("选股任务失败: %s", job_id)
+        # 失败时清掉已经写进去的半截名单：任务状态是 failed，结果区却躺着 3 行，
+        # 页面很容易把「写了一半」当成「今天只有这 3 只」。
+        try:
+            await select_results_repo.delete_by_job(job_id)
+        except Exception:       # noqa: BLE001 - 清理失败不能掩盖原始错误
+            logger.exception("清理选股半截结果失败: %s", job_id)
         await select_jobs_repo.update(job_id, {"status": "failed", "error": str(exc)[:512]})
         try:
             await inbox_notify.notify_user(
@@ -328,22 +350,37 @@ async def _run_job(job_id: str, user_id: str, strategies: list[str]) -> None:
                 related_type="select_jobs", related_id=job_id)
         except Exception:       # noqa: BLE001
             logger.exception("选股失败通知发送失败: %s", job_id)
+        return
     finally:
         if _inflight.get(user_id) == job_id:
             _inflight.pop(user_id, None)
+
+    # 完成通知是旁路：发不出去只记日志，不能把已经 done 的任务翻成 failed。
+    try:
+        await inbox_notify.notify_user(
+            user_id, "selection_completed", "选股完成",
+            f"本次选股命中 {len(results)} 只（策略: {'/'.join(strategies)}）",
+            related_type="select_jobs", related_id=job_id)
+    except Exception:           # noqa: BLE001
+        logger.exception("选股完成通知发送失败: %s", job_id)
 
 
 async def run_status(user_id: str, job_id: str) -> dict:
     job = await select_jobs_repo.get(job_id)
     if not job or job["user_id"] != user_id:
         raise NotFoundError("选股任务不存在")
-    job["results"] = await select_results_repo.list_by_job(job_id)
+    # 只有 done 才给结果。running 时写了一半、failed 时残留的旧行都不能当完整名单展示；
+    # 失败原因走 job.error，页面另起一行显示。
+    job["results"] = (await select_results_repo.list_by_job(job_id)
+                      if job.get("status") == "done" else [])
     return job
 
 
 async def list_runs(user_id: str, page: int = 1, size: int = 20) -> dict:
     items, total = await select_jobs_repo.list_by_user(user_id, page, size)
     for job in items:
-        rows = await select_results_repo.list_by_job(job["job_id"])
+        # 未完成/失败的任务不给「现在有几行」：那是写了一半的中间态，不是可用的名单数量。
+        rows = (await select_results_repo.list_by_job(job["job_id"])
+                if job.get("status") == "done" else [])
         job["result_count_now"] = len(rows)
     return {"items": items, "total": total}

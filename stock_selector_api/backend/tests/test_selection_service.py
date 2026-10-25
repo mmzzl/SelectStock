@@ -238,6 +238,85 @@ async def test_mock_run_failure_notifies(monkeypatch):
     assert (await inbox_repo.get(mid))["event_code"] == "selection_failed"
 
 
+async def test_strategy_list_failure_does_not_create_an_empty_job(monkeypatch):
+    """插件连不上时不能回退旧策略名，更不能建一条最终落 0 条的任务。"""
+    monkeypatch.setattr(selection_service, "_inflight", {})
+
+    async def boom():
+        raise RuntimeError("plugin down")
+
+    monkeypatch.setattr(selection_service, "list_strategies", boom)
+    with pytest.raises(BizError, match="策略列表取不到"):
+        await selection_service.start_run(_mk_user(), None)
+
+
+async def test_http_mode_rejects_a_strategy_that_is_not_offered(monkeypatch):
+    """hot_pref 下线后，页面残留的旧选项必须 400，不能发出去换回 0 条。"""
+    monkeypatch.setattr(selection_service, "_inflight", {})
+    monkeypatch.setattr(selection_service.settings, "selection_plugin_mode", "http")
+    monkeypatch.setattr(selection_service, "list_strategies",
+                        _async_return(["qlib_alpha158"]))
+    with pytest.raises(BizError, match="已下线"):
+        await selection_service.start_run(_mk_user(), ["hot_pref"])
+
+
+async def test_partial_results_are_removed_when_the_job_fails(monkeypatch):
+    """写结果写到一半失败：failed 任务的结果区必须是空的，不能拿半截名单当完整名单。"""
+    uid = _mk_user()
+    rows = [
+        {"code": "600000", "name": "浦发银行", "signal": "x", "reason": "x",
+         "strategy": "trend_rebound", "asof": "2026-09-24", "price": 1.0,
+         "score": 1.0, "rank_no": 1},
+        {"code": "600001", "name": "邯郸钢铁", "signal": "x", "reason": "x",
+         "strategy": "trend_rebound", "asof": "2026-09-24", "price": 1.0,
+         "score": 0.9, "rank_no": 2},
+    ]
+
+    async def two_rows(strategies):
+        return rows
+
+    original = select_results_repo.create
+    calls = {"n": 0}
+
+    async def flaky_create(data):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("write failed")
+        return await original(data)
+
+    monkeypatch.setattr(selection_service, "_mock_run", two_rows)
+    monkeypatch.setattr(select_results_repo, "create", flaky_create)
+    out = await selection_service.start_run(uid, ["trend_rebound"])
+    job = await _wait_job(out["job_id"])
+    assert job["status"] == "failed" and "write failed" in job["error"]
+    assert await select_results_repo.list_by_job(out["job_id"]) == []
+
+
+async def test_notify_failure_does_not_flip_a_done_job_to_failed(monkeypatch):
+    """站内信是旁路；发送失败只能记日志，不能把已经落完的名单改判失败。"""
+    async def boom(*args, **kwargs):
+        raise RuntimeError("inbox down")
+
+    monkeypatch.setattr(selection_service.inbox_notify, "notify_user", boom)
+    out = await selection_service.start_run(_mk_user(), ["trend_rebound"])
+    job = await _wait_job(out["job_id"])
+    assert job["status"] == "done" and job["result_count"] > 0
+
+
+async def test_run_status_hides_results_until_done():
+    """running 时只给状态，不给写了一半的 results；页面用 error 单独显示失败原因。"""
+    uid = _mk_user()
+    job = await select_jobs_repo.create({"user_id": uid, "strategies": "[]",
+                                         "status": "running", "source": "manual"})
+    await select_results_repo.create({"job_id": job["job_id"], "code": "600000",
+                                      "name": "浦发银行", "signal": "x", "reason": "x"})
+    detail = await selection_service.run_status(uid, job["job_id"])
+    assert detail["results"] == []
+    await select_jobs_repo.update(job["job_id"], {"status": "done"})
+    detail = await selection_service.run_status(uid, job["job_id"])
+    assert len(detail["results"]) == 1
+
+
 # ── 僵尸任务：单飞位不能被一个已经死掉的作业永久锁死 ────────────────────────────
 # 2026-10-13 实测踩到：手动验证时进程在 `_run_job` 真正跑起来之前退出，那条作业永远停在
 # queued，于是 App 上每点一次「开始选股」都是「已有选股任务运行中」，而那条任务早就不存在了。
@@ -429,5 +508,9 @@ def test_split_codes_rules():
     assert selection_service.split_codes("") == []
     with pytest.raises(BizError):
         selection_service.split_codes("600000,平安银行")
+    with pytest.raises(BizError):
+        selection_service.split_codes("1234567")          # 不能截成 123456
+    with pytest.raises(BizError):
+        selection_service.split_codes("abc600396")        # 前缀只能是市场代码
     with pytest.raises(BizError):
         selection_service.split_codes(",".join(f"60{i:04d}" for i in range(61)))

@@ -36,9 +36,11 @@ def test_validate_defaults_are_self_consistent():
     merged = merge(validate({}))
     assert merged["target_amount"] < merged["capital"] * merged["position_cap_pct"]
     assert merged["start"] < merged["end"]
-    # 只切引擎、其余全缺省：qlib 侧的 topk/n_drop/hold_rule 都取得到值
+    # 只切引擎、其余全缺省：qlib 侧按线上单票 band 口径
     qlib = merge(validate({"engine": "qlib"}))
-    assert qlib["hold_rule"] == "dropout" and qlib["topk"] == 30
+    assert qlib["hold_rule"] == "band" and qlib["topk"] == 1
+    # 页面把缺省表单整包提交时 n_drop=5 也要能过；band 不读它
+    assert merge(validate({"engine": "qlib", "n_drop": DEFAULTS["n_drop"]}))["topk"] == 1
 
 
 def test_validate_band_rule_params():
@@ -51,11 +53,11 @@ def test_validate_band_rule_params():
     with pytest.raises(BizError):
         validate({"engine": "qlib", "hold_rule": "band", "topk": 30, "entry_rank": 20})
     with pytest.raises(BizError):
-        validate({"engine": "qlib", "hold_rule": "band", "n_drop": 5})
+        validate({"engine": "qlib", "hold_rule": "band", "n_drop": 3})
     with pytest.raises(BizError):
         validate({"engine": "qlib", "hold_rule": "hold"})
     # dropout 才读 n_drop；qlib 的那几个键自研内核一条都不读（整包 SimpleNamespace 喂进去会静默失效）
-    assert validate({"engine": "qlib", "n_drop": 3})["n_drop"] == 3
+    assert validate({"engine": "qlib", "hold_rule": "dropout", "n_drop": 3})["n_drop"] == 3
     for key in ("hold_rule", "entry_rank", "exit_rank", "topk", "n_drop", "benchmark"):
         with pytest.raises(BizError):
             validate({"engine": "self", key: 10 if key != "benchmark" else "SH510300"})

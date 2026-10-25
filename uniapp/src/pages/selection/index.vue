@@ -3,7 +3,7 @@
 import { computed, ref } from "vue";
 import { onShow, onUnload } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
-import { toSelectionResultRow, toStrategyOption, riskText, riskClass, isNa, sortByRiskDesc, buyLevelText, orderPlanText, riskAdjustText, posteriorText, gateText } from "../../logic/view.js";
+import { toSelectionResultRow, toStrategyOption, riskText, riskClass, isNa, sortByRiskDesc, buyLevelText, orderPlanText, riskAdjustText, posteriorText, gateText, scoreText } from "../../logic/view.js";
 
 const { selection } = useClient();
 const strategies = ref([]);        // [{ name, label, desc }]
@@ -15,14 +15,21 @@ const err = ref("");
 let timer = null;
 
 onShow(async () => {
-  if (strategies.value.length) return;
+  // 每次进页都刷新：策略下线（例如 hot_pref）后，旧选项不能继续留在页面上被点中。
+  // 刷新失败时保留旧列表并报错，不能把「插件连不上」显示成「没有策略」。
   try {
-    strategies.value = (await selection.strategyDetail() || []).map(toStrategyOption);
+    const details = await selection.strategyDetail() || [];
+    if (!details.length) throw new Error("选股插件没有可用策略");
+    strategies.value = details.map(toStrategyOption);
   } catch (e) {
     try {
-      strategies.value = (await selection.strategies() || []).map((n) => ({ name: n, label: n, desc: "" }));
-    } catch (e2) { err.value = e2.message || "选股插件不可用"; }
+      const names = await selection.strategies() || [];
+      if (!names.length) throw new Error("选股插件没有可用策略");
+      strategies.value = names.map((n) => ({ name: n, label: n, desc: "" }));
+    } catch (e2) { err.value = e2.message || "选股插件不可用"; return; }
   }
+  err.value = "";
+  chosen.value = chosen.value.filter((n) => strategies.value.some((s) => s.name === n));
 });
 onUnload(() => { clearInterval(timer); timer = null; });
 
@@ -39,7 +46,8 @@ function startPoll(jobId) {
   timer = setInterval(async () => {
     try {
       const d = await selection.runDetail(jobId);
-      job.value = { jobId: d.job_id, status: d.status, strategies: d.strategies, results: d.results || [] };
+      job.value = { jobId: d.job_id, status: d.status, strategies: d.strategies,
+                    error: d.error || "", results: d.results || [] };
       results.value = (d.results || []).map(toSelectionResultRow);
       if (d.status === "done" || d.status === "failed") { clearInterval(timer); timer = null; polling.value = false; }
     } catch (e) { clearInterval(timer); timer = null; polling.value = false; err.value = e.message; }
@@ -50,11 +58,11 @@ const goHistory = () => uni.navigateTo({ url: "/pages/selection/history" });
 // 展示顺序按预期 10 日超额降序（后端 rank 是策略规则名次，头部无信息，见 view.js 的说明）
 const ordered = computed(() => sortByRiskDesc(results.value));
 
-// 结果里的 strategy 是插件策略名，中文标签统一取自 /strategy-detail 的 description
-const labelOf = (s) => strategies.value.find((x) => x.name === s)?.label || s || "信号";
+// 结果里的 strategy 是插件策略名，中文标签统一取自 /strategy-detail 的 description。
+// 旧任务里的 hot_pref 已下线，历史页/旧结果里要标明，不能再让人以为它还在出票。
+const labelOf = (s) => strategies.value.find((x) => x.name === s)?.label
+  || (s === "hot_pref" ? "热门偏好榜（已下线）" : s || "信号");
 const fixed2 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) ? "—" : Number(v).toFixed(2));
-// 强度是 0~1 的排序分，相邻名次常只差 0.001，两位小数会全显示成 1.00 而看不出差异
-const fixed3 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) ? "—" : Number(v).toFixed(3));
 </script>
 <template>
   <view>
@@ -86,33 +94,49 @@ const fixed3 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) 
       </view>
 
       <text v-if="err" class="err">{{ err }}</text>
+      <text v-if="job && job.error" class="err">{{ job.error }}</text>
 
       <view v-if="results.length" class="sec">选股结果（{{ results.length }} 只）</view>
       <view v-if="results.length" class="sortnote">
-        按「预期 10 日超额」从高到低排列；框内数字是策略规则名次，不代表优先级。
-        该超额为买入风险模型的预测值：经验证的是「低于阈值的剔除」，高分不等于必涨；
+        框内数字是这只票在它那条榜里的名次。模型榜排在最前，按护栏后的名次升序；
+        旧任务里可能还留着已下线的「热门偏好榜」行，只作历史回看，不再进盘中池。
+        它当年按你点名的四条重排（热门板块 + 新闻利好 + 排除小市值 + 趋势向上），
+        和模型榜用的是两把不同的尺子，不是重复计票。
+        「预期 10 日超额」是买入风险模型的预测值：经验证的是「低于阈值的剔除」，高分不等于必涨；
         显示「—」的表示模型没能判分（多为场内基金），排在最后。
         显示「不适用」的表示当前选股引擎根本不算这项（qlib 只出横截面排序分），
         它和「—」（算了但没判出来）是两回事，更不能读成「预测为零/没有风险」。
-        「排序分」只用来决定谁排在谁前面，不是把握的大小：qlib 给的是这只票在整个候选池里的位置
-        （第一名正好 1.000，第二名 0.997，差的只是名次）；自研引擎给的是规则强度，几条同时满足会
-        顶到 1.000 不再往上走。两种都不是「上涨概率」，1.000 也不代表必涨。
+        「排序分」是满分 100 的刻度，只用来决定谁排在谁前面，不是把握的大小：
+        引擎落库的是这只票在当日整个候选池里的位置（0~1），第一名正好 100 分、第二名 99.7 分，
+        差的只是名次；自研引擎给的是规则强度，几条同时满足会顶到满分不再往上走。
+        两种都不是「上涨概率」，100 分也不代表必涨。
+        「热门偏好榜」的分数是四路加权（板块热度 45%、趋势 35%、新闻利好 20%），
+        市值、趋势、板块是三道硬闸，闸不过的票连分数都不给；它用的板块热度与新闻利好
+        都是**前一天**落地的（板块热度 18:30、新闻 22:00，都晚于 17:30 的选股），
+        而板块热度没有历史存档、流通市值只有 2026-10-12 起的日快照，
+        所以这条榜**没有回测过**——它是按你的偏好排的名次，不是经验证有超额的名次。
         「买入参考/跌破失效」是策略判据里的日均线位（收盘口径），只用来对照盘面，不是实时挂单价；
-        引擎不出价位时那一句直接写「不适用」。
+        qlib 只出排序分，没有这类判据价位，所以那行写「不适用」——它不等于「这笔买入不会错」，
+        这条名单上能对照的价位只有上方「基准价」（信号日收盘，回测也是按这个价成交的）。
+        价位止损别自己补：同一只模型的留出段（300 只池、673 个信号日、每日前 30 名、2.0 万笔、毛收益未扣成本）
+        实测名单里的票 10 日内最深下探中位只有 −3.7%，设 −5%/−10%/−20% 的止损线每笔分别少赚
+        0.34/0.21/0.06 个百分点（按 10 日重叠折算后 t = −3.1/−3.2/−2.1），被止损的票里一半以上拿满 10 日更赚；
+        且那里按「盘中触线就成交」记，跳空低开时真实成交更差，所以那三个数还是偏乐观的。
+        这条名单验证过的换出纪律是名次（跌出第 100 名换出），不是价位。
         「建议股数/预估成交/预估滑点」是风控层给的下单口径：涨停买不进、盘子太薄、超过单票上限的信号
         已经在风控这一步被剔除，不会出现在列表里；橙色一句表示风控改过建议下单量。
         灰色一句「依据」说的是这条判据本身历史上值多少钱（T+10 相对当日全样本的超额，
         按时代与股票抽样各跑一遍合成），不是这只票的评分；写「未标定」或「会翻号」时
         表示这条判据现在没有可复现的历史优势，名次只是规则排序，不能当买入理由。
       </view>
-      <view v-for="r in ordered" :key="r.code" class="card">
+      <view v-for="r in ordered" :key="`${r.strategy}|${r.code}`" class="card">
         <view class="row1">
           <text><text v-if="r.rank" class="rank">{{ r.rank }}</text> {{ r.name }}（{{ r.code }}）</text>
           <text class="badge sig">{{ labelOf(r.strategy) }}</text>
         </view>
         <view class="kv3">
           <view class="k"><text class="n">{{ fixed2(r.price) }}</text><text class="l">基准价</text></view>
-          <view class="k"><text class="n">{{ fixed3(r.score) }}</text><text class="l">排序分</text></view>
+          <view class="k"><text class="n">{{ scoreText(r) }}</text><text class="l">排序分/满分100</text></view>
           <view class="k"><text class="n date" :class="riskClass(r.risk, isNa(r, 'risk_ex10_pp'))">{{ riskText(r.risk, isNa(r, 'risk_ex10_pp')) }}</text><text class="l">预期10日超额</text></view>
           <view class="k"><text class="n date">{{ r.asof || "—" }}</text><text class="l">基准交易日</text></view>
         </view>

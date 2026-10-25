@@ -28,6 +28,9 @@ STALE_SECONDS = 3 * 3600
 
 # 进程内单飞表：DB 落库与投递之间有间隙，内存判定保证重复点击的确定性
 _inflight: dict[str, str] = {}
+# 与选股同一类竞态：查 DB → 建 job → 投递之间都有 await，两个请求会各建一条。
+# API 是单进程（deploy 注释），这把锁把「查重 + 落库 + 投递」串行化。
+_start_lock = asyncio.Lock()
 
 
 def list_strategies() -> list[str]:
@@ -68,32 +71,33 @@ async def start_run(user_id: str, params: dict | None, source: str = "manual") -
         raise BizError("user_id 不能为空", code=400, status_code=400)
     payload = validate(params)
     payload = await _with_rule_set_snapshot(payload)
-    if user_id in _inflight:
-        raise BizError(f"已有回测任务运行中: {_inflight[user_id]}", code=409, status_code=409)
-    inflight = await backtest_jobs_repo.find_inflight(user_id)
-    if inflight:
-        raise BizError(f"已有回测任务运行中: {inflight['job_id']}", code=409, status_code=409)
+    async with _start_lock:
+        if user_id in _inflight:
+            raise BizError(f"已有回测任务运行中: {_inflight[user_id]}", code=409, status_code=409)
+        inflight = await backtest_jobs_repo.find_inflight(user_id)
+        if inflight:
+            raise BizError(f"已有回测任务运行中: {inflight['job_id']}", code=409, status_code=409)
 
-    job_id = new_uuid()
-    await backtest_jobs_repo.create({
-        "job_id": job_id,
-        "user_id": user_id,
-        "status": "queued",
-        "source": source,
-        "params": json.dumps(payload, ensure_ascii=False),
-    })
-    try:
-        # 按任务名投递：API 进程因此不需要 import worker 侧任务模块
-        result = await asyncio.to_thread(
-            celery_app.send_task, settings.backtest_task_name, args=[payload])
-    except Exception as exc:  # noqa: BLE001  broker/redis 不可达
-        message = f"任务投递失败: {exc}"[:512]
-        await backtest_jobs_repo.update(job_id, {"status": "failed", "error": message})
-        raise BizError(f"{message}（请确认 Celery worker 与 Redis 已启动）",
-                       code=503, status_code=503) from exc
+        job_id = new_uuid()
+        await backtest_jobs_repo.create({
+            "job_id": job_id,
+            "user_id": user_id,
+            "status": "queued",
+            "source": source,
+            "params": json.dumps(payload, ensure_ascii=False),
+        })
+        try:
+            # 按任务名投递：API 进程因此不需要 import worker 侧任务模块
+            result = await asyncio.to_thread(
+                celery_app.send_task, settings.backtest_task_name, args=[payload])
+        except Exception as exc:  # noqa: BLE001  broker/redis 不可达
+            message = f"任务投递失败: {exc}"[:512]
+            await backtest_jobs_repo.update(job_id, {"status": "failed", "error": message})
+            raise BizError(f"{message}（请确认 Celery worker 与 Redis 已启动）",
+                           code=503, status_code=503) from exc
 
-    await backtest_jobs_repo.update(job_id, {"celery_task_id": result.id})
-    _inflight[user_id] = job_id
+        await backtest_jobs_repo.update(job_id, {"celery_task_id": result.id})
+        _inflight[user_id] = job_id
     return {"job_id": job_id, "celery_task_id": result.id, "status": "queued"}
 
 
