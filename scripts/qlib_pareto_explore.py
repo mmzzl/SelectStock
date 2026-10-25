@@ -1,8 +1,9 @@
 """qlib 回测参数扫描：同一份分数面板上找「回撤小、收益高」的组合。
 
 预注册（跑之前写死，读数之后不改）：
-- 模型本体不动：分数复用 fullmarket_validation_20261025_signal_st.parquet
-  （动态票池 + 两条名单护栏的产物）。换/改模型是另一条训练线，不属于本次探索。
+- 模型本体不动（默认）：分数复用 fullmarket_validation_20261025_signal_st.parquet
+  （动态票池 + 两条名单护栏的产物）。**换/改模型走 --signal 给同窗同口径的新面板**
+  （如 live h5 vs 批次 P h10 的全市场复检），网格与成本口径不变才可比。
 - 扫描维度（都只用已验证过的旋钮）：
   topk ∈ {1,3,5,10}；risk_degree ∈ {0.95,0.7,0.5}；exit_rank ∈ {100,200}（entry_rank 固定 50）。
   hold_rule=band；不带止损止盈、不带 MA5 闸门（2026-10-25 均已验证更差）。
@@ -74,6 +75,8 @@ def main() -> int:
     ap.add_argument("--risks", default=",".join(str(x) for x in RISKS))
     ap.add_argument("--exits", default=",".join(str(x) for x in EXITS))
     ap.add_argument("--out", type=Path, default=OUT)
+    ap.add_argument("--signal", type=Path, default=SIGNAL,
+                    help="分数面板 parquet（默认 live h5 的全市场验证产物；换模型臂传自己的）")
     args = ap.parse_args()
     topks = tuple(int(x) for x in args.topk.split(",") if x.strip())
     risks = tuple(float(x) for x in args.risks.split(",") if x.strip())
@@ -81,7 +84,7 @@ def main() -> int:
     serving.init_qlib()
     days = serving.calendar()
     start, end = _snap_window(days, START, END)
-    sig = pd.read_parquet(SIGNAL)["score"].loc[start:end]
+    sig = pd.read_parquet(args.signal)["score"].loc[start:end]
     pool = sorted(set(sig.index.get_level_values("instrument")))
     print(f"窗口 {start}→{end}，信号 {len(sig):,} 行、{len(pool)} 只；"
           f"网格 {len(topks) * len(risks) * len(exits)} 臂 + 前沿补压力档", flush=True)
