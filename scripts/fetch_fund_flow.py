@@ -278,8 +278,9 @@ def build_daily_frame(rows: list[dict], *, trade_date: str, data_ts: str) -> pd.
 
 
 def _try_refresh_cookie() -> bool:
-    """被节流时现种一份新浏览器身份（headless Chrome 跑站点 JS），成功=True。
+    """现种一份新浏览器身份（headless Chrome 跑站点 JS），成功=True。
 
+    两个调用点：开跑前（身份不是今天种的就先换，见 run_daily）和连续两页被掐时的自救。
     起不了浏览器（没装 selenium/driver 下载失败）不算错误：维持拉长间隔的原路，
     绝不为刷 Cookie 把整轮采集拖死。
     """
@@ -290,13 +291,21 @@ def _try_refresh_cookie() -> bool:
         tmp = COOKIE_PATH.with_suffix(".tmp")
         tmp.write_text(cookie, encoding="utf-8")
         tmp.replace(COOKIE_PATH)
-        logger.info("[daily] 已现种浏览器身份（%d 项 Cookie），换会话重试",
+        logger.info("[daily] 已现种浏览器身份（%d 项 Cookie），下一个请求走新会话",
                     cookie.count("="))
         return True
     except Exception as exc:  # noqa: BLE001
         logger.warning("[daily] 现种 Cookie 失败（%s: %s），维持原节奏",
                        type(exc).__name__, exc)
         return False
+
+
+def _cookie_seeded_today() -> bool:
+    """身份文件是不是今天种的（看落盘时刻，不看内容：种它的那步就是往这个文件写）。"""
+    if not COOKIE_PATH.exists():
+        return False
+    seeded = datetime.fromtimestamp(COOKIE_PATH.stat().st_mtime, TZ_CN)
+    return seeded.strftime("%Y-%m-%d") == datetime.now(TZ_CN).strftime("%Y-%m-%d")
 
 
 def run_daily(*, limit_pages: int = 0, max_pages: int = 0, page_sleep: float | None = None,
@@ -316,6 +325,12 @@ def run_daily(*, limit_pages: int = 0, max_pages: int = 0, page_sleep: float | N
     daily_dir = OUTPUT_DIR / DAILY_SUBDIR
     known = stored_dates(daily_dir) if known is None else known
     today = datetime.now(TZ_CN).strftime("%Y-%m-%d")
+
+    global _SESSION
+    # 开跑前先换一次浏览器身份（一天一次）：10-22 带着 2 天大的身份在 36、37 页连续 403，
+    # 中途现种换新会话后 38-60 页全过——提前换就把那两页省下来，代价约 25 秒。
+    if TRANSPORT == "cffi" and not _cookie_seeded_today() and _try_refresh_cookie():
+        _SESSION = None
 
     first = None
     for round_no in range(ROUND_RETRIES + 1):
@@ -364,7 +379,6 @@ def run_daily(*, limit_pages: int = 0, max_pages: int = 0, page_sleep: float | N
             # 同窗实测带站点 Cookie 的存活远高于裸指纹（见 COOKIE_PATH 注释）。
             if (streak >= 2 and not cookie_refreshed and TRANSPORT == "cffi"
                     and _try_refresh_cookie()):
-                global _SESSION
                 _SESSION = None      # 重建会话，吃进新 Cookie
                 streak = 0
                 cookie_refreshed = True

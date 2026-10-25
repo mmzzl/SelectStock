@@ -18,7 +18,7 @@ Redis 键约定（前缀 notice:）：
     失败/崩溃 -> failcount+retry 持久化在 redis，重启后到期任务自动重爬。
     默认只爬最近 N 天（from_date_offset_days），配合位图天然支持"每天增量"。
 
-反爬（沿用 batch_download_announ.py）：
+反爬（沿用早期公告下载器的策略）：
     curl_cffi impersonate 随机浏览器指纹(chrome131/chrome124/edge101/firefox133)
     + 随机小间隔(RateLimiter，interval+jitter 从 config 读)。
 
@@ -76,7 +76,7 @@ _INVALID_FILENAME = re.compile(r'[\\/:*?"<>|\r\n\t]+')
 
 
 # ---------------------------------------------------------------------------
-# 稳定请求会话（模仿 batch_download_announ.py 的 anti-爬 策略）
+# 稳定请求会话（沿用早期公告下载器的 anti-爬 策略）
 # ---------------------------------------------------------------------------
 class StableCninfoSession:
     def __init__(self, interval: float, jitter: float):

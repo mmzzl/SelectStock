@@ -16,7 +16,7 @@ llm:
   max_tokens: 2048
   timeout: 60
 
-# 公告下载配置（scripts/notice_spider_cninfo.py / notice_crawler.py / notice_tracker.py）
+# 公告下载配置（scripts/notice_spider_cninfo.py / notice_tracker.py）
 notice:
   track_dir: "data/downloaded_notices"   # bitmap 去重跟踪目录(文件版,备用)
   detail_dir: "data/notices"             # 公告PDF落盘目录（按股票代码分目录）

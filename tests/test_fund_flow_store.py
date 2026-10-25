@@ -6,7 +6,10 @@
 """
 
 import importlib.util
+import os
 import sys
+import time
+import types
 from pathlib import Path
 
 import pandas as pd
@@ -57,6 +60,11 @@ def tmp_daily(tmp_path, monkeypatch):
     monkeypatch.setattr(fetch, "OUTPUT_DIR", tmp_path)
     monkeypatch.setattr(fetch, "KLINE_DIR", tmp_path / "kline")
     monkeypatch.setattr(fetch, "SNAPSHOT_DIR", tmp_path / "snapshot")
+    # 身份文件也指到 tmp 并默认「现种失败」：COOKIE_PATH 是模块常量，patch OUTPUT_DIR
+    # 带不走它。不钉死的话，用例一旦走到换身份分支就会起真 Chrome 打真东财，
+    # 并把 data/fund_flow/em_cookie.txt 改写掉（2026-10-23 实测踩过）。
+    monkeypatch.setattr(fetch, "COOKIE_PATH", tmp_path / "em_cookie.txt")
+    monkeypatch.setattr(fetch, "_try_refresh_cookie", lambda: False)
     (tmp_path / "kline").mkdir()
     (tmp_path / "snapshot").mkdir()
     return tmp_path / store.DAILY_SUBDIR
@@ -324,6 +332,53 @@ def test_transport_defaults_to_curl_cffi_and_reuses_one_session(monkeypatch):
     assert isinstance(session, cffi_requests.Session)
     assert fetch.http_session() is session                       # 第二条连接不该被建出来
     assert issubclass(cffi_requests.exceptions.ConnectionError, fetch._CATCH)
+
+
+def test_run_daily_seeds_a_new_identity_before_the_first_request(tmp_daily, monkeypatch):
+    """身份文件不是当天种的就先现种一次再开跑。10-22 的读数：带着一颗 2 天大的身份翻到
+    36、37 页连续 403，16:30:54 现种换新会话后 38-60 页全过（页间隔都没拉长），代价是那
+    两页约 199 只票永久缺——批量接口只给当下。提前换就等于把那两页省下来。
+    """
+    cookie = fetch.COOKIE_PATH
+    cookie.write_text("qgqp_b_id=OLD", encoding="utf-8")
+    stale = time.time() - 86400
+    os.utime(cookie, (stale, stale))
+
+    order: list[str] = []
+
+    def fake_seed():
+        cookie.write_text("qgqp_b_id=NEW", encoding="utf-8")
+        order.append("seed")
+        return True
+
+    def fake_page(page, **kwargs):
+        # 读会话里真正会发出去的 Cookie 头：只验「调过现种」不够，
+        # 会话没重建的话旧头会一直带下去。
+        order.append(f"page{page}:{fetch.http_session().headers.get('Cookie')}")
+        return ([clist_row(code=f"{page:06d}")], 100)
+
+    monkeypatch.setattr(fetch, "_try_refresh_cookie", fake_seed)
+    # 脏会话：里面还揣着旧身份，只有被丢掉、重建后才会读进新种的 Cookie
+    monkeypatch.setattr(fetch, "_SESSION",
+                        types.SimpleNamespace(headers={"Cookie": "qgqp_b_id=OLD"}))
+    monkeypatch.setattr(fetch, "PAGE_SLEEP", 0)
+    monkeypatch.setattr(fetch, "fetch_daily_page", fake_page)
+
+    fetch.run_daily(sleeper=lambda *_: None)
+    assert order == ["seed", "page1:qgqp_b_id=NEW"]
+
+
+def test_run_daily_keeps_the_identity_seeded_today(tmp_daily, monkeypatch):
+    """当天已经种过就不再开 Chrome：一天一次够了，重复种只是多花约 25 秒、多打一次页面。"""
+    fetch.COOKIE_PATH.write_text("qgqp_b_id=TODAY", encoding="utf-8")
+    calls: list[str] = []
+    monkeypatch.setattr(fetch, "_try_refresh_cookie", lambda: calls.append("seed") or False)
+    monkeypatch.setattr(fetch, "PAGE_SLEEP", 0)
+    monkeypatch.setattr(fetch, "fetch_daily_page",
+                        lambda page, **kwargs: ([clist_row(code=f"{page:06d}")], 100))
+
+    fetch.run_daily(sleeper=lambda *_: None)
+    assert calls == []
 
 
 def test_run_daily_page1_failure_waits_and_restarts_the_round(tmp_daily, monkeypatch):
