@@ -134,11 +134,12 @@ def refresh() -> dict:
 
 
 def raw_features(pool: list[str], beg: str, end: str) -> pd.DataFrame:
-    """未归一化的 Alpha158 因子表：index=(datetime, instrument)，columns=158 个因子名。"""
+    """未归一化因子表：index=(datetime, instrument)，columns=Alpha158 + 批次N 趋势扩展（166 列）。"""
     from qlib_run import LABEL
-    from qlib.contrib.data.handler import Alpha158
 
-    handler = Alpha158(
+    from .alpha import Alpha158Trend
+
+    handler = Alpha158Trend(
         instruments=list(pool),
         start_time=beg,
         end_time=end,

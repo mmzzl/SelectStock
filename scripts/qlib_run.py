@@ -147,12 +147,16 @@ def write_instruments(qlib_dir: Path, name: str, symbols: list[str]) -> Path:
 
 
 def build_dataset(qlib, instruments: str, fit_end: str, segments: dict, label: str = LABEL):
-    """Alpha158 因子 + 训练段拟合的稳健标准化。fit 窗口只到 fit_end，绝不越过训练段末尾。"""
-    from qlib.contrib.data.handler import Alpha158
+    """因子表 + 训练段拟合的稳健标准化。fit 窗口只到 fit_end，绝不越过训练段末尾。
+
+    特征 = stock_selector_qlib.alpha.Alpha158Trend（训练与线上打分同一个类，列序一字不差）。
+    """
     from qlib.data.dataset import DatasetH
     from qlib.data.dataset.processor import CSRankNorm, DropnaLabel, Fillna, RobustZScoreNorm
 
-    handler = Alpha158(
+    from stock_selector_qlib.alpha import Alpha158Trend
+
+    handler = Alpha158Trend(
         instruments=instruments,
         start_time=segments["train"][0],
         end_time=segments["test"][1],
