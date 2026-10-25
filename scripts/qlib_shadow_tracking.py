@@ -174,7 +174,7 @@ def main() -> int:
     days = panel_calendar()
     today = days[-1]           # 补分记到最新交易日
     sim_end = days[-2]         # 撮合窗右端必须留 ≥1 天余量（_snap_window 的规矩）
-    if sim_end < SHADOW_BEG:
+    if sim_end < SHADOW_BEG and not args.warm_only:
         raise SystemExit(f"面板最新日 {today} 还没到影子起点 {SHADOW_BEG}+1，先跑不了")
     upto_idx = {d: i for i, d in enumerate(days)}
 
