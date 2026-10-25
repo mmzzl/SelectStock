@@ -81,9 +81,11 @@ def ensure_scores(art, union: list[str], days: list[str], seed_path: Path | None
     cache = SHADOW_DIR / (f"scores_{run_id_of(art)}.parquet" if not limit
                           else f"scores_{run_id_of(art)}_smoke.parquet")
     if cache.exists():
-        s = pd.read_parquet(cache)["score"]
+        f = pd.read_parquet(cache)
+        s = f.iloc[:, 0]
     elif seed_path is not None and seed_path.exists():
-        s = pd.read_parquet(seed_path)["score"]
+        f = pd.read_parquet(seed_path)
+        s = f[f.columns[0]]
         s = s[s.index.get_level_values(0) >= SHADOW_BEG_PREV]
         print(f"  种子 {len(s):,} 行", flush=True)
     else:
@@ -121,6 +123,7 @@ def ensure_scores(art, union: list[str], days: list[str], seed_path: Path | None
         have |= {d}
         print(f"  {run_id_of(art)} 补 {d}：{len(day_pred):,} 行（薄流动 {thin}），{time.time()-t0:.0f}s", flush=True)
     tmp = cache.with_suffix(".tmp")
+    s.name = "score"
     s.to_frame().to_parquet(tmp)
     tmp.replace(cache)
     # 归一日期层级为 Timestamp（种子/新补混合后保险），并给层级命名
@@ -200,7 +203,17 @@ def main() -> int:
     for rid, (art, seed) in by_model.items():
         s = ensure_scores(art, union, days, seed, upto_idx, args.limit_symbols)
         if args.warm_only:
-            print(f"warm-only：{rid} 缓存补到 {today}，不重放", flush=True)
+            sig, _ = fv.build_signal(s, st_u, close_w, amount_w, rid)
+            days_seen = sorted({str(x) for x in sig.index.get_level_values(0)})
+            out = {"run_id": rid, "top": TOPK, "entry_rank": ENTRY, "picks": {}}
+            for d in days_seen[-2:]:
+                sc = sig.xs(d, level="datetime").sort_values(ascending=False)
+                out["picks"][d] = {"tradeable": len(sc), "top20": sc.head(TOPK).index.tolist()}
+            (SHADOW_DIR / f"{rid}_day0.json").write_text(
+                json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+            print(f"warm-only：{rid} 缓存补到 {today}，不重放；首建名单 → {rid}_day0.json", flush=True)
+            for d, v in out["picks"].items():
+                print(f"  {d} 可买 {v['tradeable']}，前20 {v['top20'][:5]}…", flush=True)
             continue
         s = s.loc[SHADOW_BEG_PREV:today]
         sig_by_model[rid] = s
