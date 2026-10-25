@@ -186,12 +186,16 @@ def main() -> int:
     close, amount = fv.load_panel(symbols, days)
     _, st_u, _ = fv.build_universes(close, amount, SHADOW_BEG_PREV, today, st_codes,
                                     130, 1e8)
-    union = sorted(set(st_u.columns[st_u.any()]))
+    bad = [c for c in st_u.columns if serving.board_excluded(c)]
+    if bad:
+        st_u = st_u.drop(columns=bad)
+    union = sorted(c for c in st_u.columns[st_u.any()] if not serving.board_excluded(c))
     close_w = close.loc[days[max(0, upto_idx[SHADOW_BEG_PREV]) - serving.WARMUP_DAYS + 1]:today]
     amount_w = amount.loc[close_w.index]
     del close, amount
     gc.collect()
-    print(f"影子 {SHADOW_BEG}→{today}，st 票池并集 {len(union)} 只，可用内存 {fv.free_gb():.1f}G", flush=True)
+    print(f"影子 {SHADOW_BEG}→{today}，st 票池并集 {len(union)} 只"
+          f"（剔 300/301/688/689 {len(bad)} 只），可用内存 {fv.free_gb():.1f}G", flush=True)
 
     # 每个模型补一次分数（多臂共用同一模型缓存）
     by_model: dict[str, tuple] = {}

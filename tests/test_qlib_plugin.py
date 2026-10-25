@@ -504,8 +504,8 @@ def test_score_pool_follows_the_pool_source_switch(art_dir, tmp_path, monkeypatc
     listing.write_text("\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="空名单"):
         serving.score_pool(art)
-    listing.write_text("SH600000\nSZ301165\n", encoding="utf-8")
-    assert serving.score_pool(art) == ["SH600000", "SZ301165"]
+    listing.write_text("SH600000\nSZ002008\n", encoding="utf-8")
+    assert serving.score_pool(art) == ["SH600000", "SZ002008"]
 
 
 def test_ranks_by_code_membership_uses_the_scored_pool(art_dir, tmp_path, monkeypatch):
@@ -516,17 +516,17 @@ def test_ranks_by_code_membership_uses_the_scored_pool(art_dir, tmp_path, monkey
     """
     monkeypatch.setattr(artifacts, "MODEL_DIR", art_dir)
     listing = tmp_path / "universe.txt"
-    listing.write_text("SH600000\nSZ301165\n", encoding="utf-8")
+    listing.write_text("SH600000\nSZ002008\n", encoding="utf-8")
     monkeypatch.setattr(serving, "UNIVERSE_FILE", listing)
     monkeypatch.setattr(serving, "POOL_SOURCE", "universe")
     monkeypatch.setattr(serving, "day_ranking",
                         lambda refresh=False, wait=True: _ranking_rows())
 
-    out = serving.ranks_by_code(["301165", "510300"])
+    out = serving.ranks_by_code(["002008", "510300"])
     assert out["pool_size"] == 2
     by = {it["code"]: it for it in out["items"]}
-    assert by["301165"]["in_pool"] is True and by["301165"]["rank"] is None
-    assert "没有可打分的行情" in by["301165"]["note"]
+    assert by["002008"]["in_pool"] is True and by["002008"]["rank"] is None
+    assert "没有可打分的行情" in by["002008"]["note"]
     assert by["510300"]["in_pool"] is False
     assert "不在当前 2 只候选池里" in by["510300"]["note"]
 

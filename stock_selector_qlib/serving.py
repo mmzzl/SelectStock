@@ -170,8 +170,22 @@ def normalize(frame: pd.DataFrame, art: artifacts.Artifacts) -> np.ndarray:
     return X
 
 
+# 用户交易权限（2026-10-26 拍板）：科创板 688/689、创业板 300/301 没有开通，
+# 推荐了也买不了。在 score_pool 源头剔，名单/名次/回测共用同一份名单。
+BOARD_EXCLUDE = ("688", "689", "300", "301")
+
+
+def board_excluded(inst: str) -> bool:
+    """SH688498/SZ300308 这类 8 位交易所前缀码与 6 位裸码都能判。"""
+    return (inst[2:5] if len(inst) >= 8 else inst[:3]) in BOARD_EXCLUDE
+
+
 def score_pool(art: artifacts.Artifacts) -> list[str]:
-    """今天给哪些票打分。universe 模式读每天重算的全市场名单，model 模式沿用训练池。"""
+    """今天给哪些票打分。universe 模式读每天重算的全市场名单，model 模式沿用训练池。
+
+    板块过滤在源头做（2026-10-26 拍板）：科创板 688/689、创业板 300/301 用户没有交易
+    权限，推荐了也买不了；名单/名次/回测三层共用本名单，避免回测与线上各说各话。
+    """
     if POOL_SOURCE == "universe":
         if not UNIVERSE_FILE.exists():
             raise RuntimeError(f"QLIB_POOL_SOURCE=universe，但没有 {UNIVERSE_FILE}"
@@ -180,8 +194,8 @@ def score_pool(art: artifacts.Artifacts) -> list[str]:
                 if line.strip()]
         if not syms:
             raise RuntimeError(f"{UNIVERSE_FILE} 是空名单")
-        return syms
-    return list(art.pool)
+        return [s for s in syms if not board_excluded(s)]
+    return [s for s in art.pool if not board_excluded(s)]
 
 
 def score_frame(art: artifacts.Artifacts, beg: str | None = None,
@@ -554,8 +568,13 @@ def ranks_by_code(codes: list[str], wait: bool = True) -> dict:
             items.append({"code": code, "in_pool": True, "rank": None, "universe": universe,
                           "note": f"在 {pool_size} 只候选池里，但当日没有可打分的行情（停牌或日线断档）"})
         else:
+            note = (f"不在当前 {pool_size} 只候选池里，模型没给这只打过分")
+            if board_excluded(code):
+                # 这类票是被板块权限筛子剔掉的（2026-10-26），不是缺行情，别说成「模型没打过」
+                note = (f"{code[:3]} 开头按你的交易权限剔出了名单（科创板 688/689、"
+                        f"创业板 300/301），模型不给这些票打分")
             items.append({"code": code, "in_pool": False, "rank": None, "universe": universe,
-                          "note": f"不在当前 {pool_size} 只候选池里，模型没给这只打过分"})
+                          "note": note})
     return {"ready": True, "date": rows[0]["date"] if rows else calendar()[-1],
             "pool_size": pool_size, "universe": universe, "items": items}
 

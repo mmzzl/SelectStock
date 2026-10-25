@@ -25,3 +25,6 @@ venv/
 
 # qlib/LightGBM 实验跟踪落盘（本地跑数产物，不入库）
 mlruns/
+
+# 本地出包产物（APK 15MB 级，不进库，走升级包表/网盘）
+dist/

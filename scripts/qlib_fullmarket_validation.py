@@ -439,10 +439,18 @@ def main() -> int:
     symbols = panel_stocks()
     st_codes = load_st_codes(args.st_file)
     close, amount = load_panel(symbols, days)
-    print(f"面板 {close.shape[0]} 天 × {close.shape[1]} 只，RSS {rss_mb():.0f} MB", flush=True)
+    # 板块剔筛与线上同源（serving.BOARD_EXCLUDE）：688/689/300/301 用户没有交易权限，
+    # 留在验证票池里，护栏 P25 分位和名次人口都不是线上那份名单，读数就没法对照。
+    bad = [c for c in close.columns if serving.board_excluded(c)]
+    if bad:
+        close = close.drop(columns=bad)
+        amount = amount.drop(columns=bad)
+    print(f"面板 {close.shape[0]} 天 × {close.shape[1]} 只"
+          f"（剔 300/301/688/689 {len(bad)} 只），RSS {rss_mb():.0f} MB", flush=True)
 
     all_u, st_u, ustats = build_universes(close, amount, start, end, st_codes,
                                           args.min_bars, args.min_amount)
+    ustats["board_excluded"] = len(bad)
     print("票池：" + json.dumps(ustats, ensure_ascii=False), flush=True)
     if args.limit_symbols:
         keep = sorted(set(all_u.columns[all_u.any()]))[:args.limit_symbols]
