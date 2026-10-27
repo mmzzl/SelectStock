@@ -65,6 +65,9 @@ def tmp_daily(tmp_path, monkeypatch):
     # 并把 data/fund_flow/em_cookie.txt 改写掉（2026-10-23 实测踩过）。
     monkeypatch.setattr(fetch, "COOKIE_PATH", tmp_path / "em_cookie.txt")
     monkeypatch.setattr(fetch, "_try_refresh_cookie", lambda: False)
+    # 现种是「一个进程一次」，用例之间共享同一个模块状态，不钉回 False 的话第二条用例
+    # 会因为「这个进程已经种过了」而跳过——测到的就不是开跑前的那一步。
+    monkeypatch.setattr(fetch, "_IDENTITY_SEEDED", False, raising=False)
     (tmp_path / "kline").mkdir()
     (tmp_path / "snapshot").mkdir()
     return tmp_path / store.DAILY_SUBDIR
@@ -368,17 +371,35 @@ def test_run_daily_seeds_a_new_identity_before_the_first_request(tmp_daily, monk
     assert order == ["seed", "page1:qgqp_b_id=NEW"]
 
 
-def test_run_daily_keeps_the_identity_seeded_today(tmp_daily, monkeypatch):
-    """当天已经种过就不再开 Chrome：一天一次够了，重复种只是多花约 25 秒、多打一次页面。"""
+def test_run_daily_seeds_identity_before_crawling_even_if_seeded_today(tmp_daily, monkeypatch):
+    """每次开跑前都现种一份新身份并落盘（2026-10-27 拍板）：节流是按会话累计的，
+    带着一颗已经翻过 60 页的身份当天重跑，第 1 页就可能被掐。代价约 25 秒。"""
     fetch.COOKIE_PATH.write_text("qgqp_b_id=TODAY", encoding="utf-8")
+    order: list[str] = []
+    monkeypatch.setattr(fetch, "_try_refresh_cookie",
+                        lambda: order.append("seed") or True)
+    monkeypatch.setattr(fetch, "PAGE_SLEEP", 0)
+
+    def fake_page(page, **kwargs):
+        order.append(f"page{page}")
+        return ([clist_row(code=f"{page:06d}")], 100)
+
+    monkeypatch.setattr(fetch, "fetch_daily_page", fake_page)
+    fetch.run_daily(sleeper=lambda *_: None, force=True)
+    assert order == ["seed", "page1"]
+
+
+def test_identity_is_seeded_once_per_process(tmp_daily, monkeypatch):
+    """同一轮里 daily 跑完还要走有界补抓，两个都是爬虫，但只该开一次 Chrome。"""
     calls: list[str] = []
-    monkeypatch.setattr(fetch, "_try_refresh_cookie", lambda: calls.append("seed") or False)
+    monkeypatch.setattr(fetch, "_try_refresh_cookie", lambda: calls.append("seed") or True)
     monkeypatch.setattr(fetch, "PAGE_SLEEP", 0)
     monkeypatch.setattr(fetch, "fetch_daily_page",
-                        lambda page, **kwargs: ([clist_row(code=f"{page:06d}")], 100))
+                        lambda page, **kwargs: ([clist_row()], 100))
 
-    fetch.run_daily(sleeper=lambda *_: None)
-    assert calls == []
+    fetch.run_daily(sleeper=lambda *_: None, force=True)
+    fetch.run_repair([DAY], ["000001"], budget=1, sleeper=lambda *_: None)
+    assert calls == ["seed"]
 
 
 def test_run_daily_page1_failure_waits_and_restarts_the_round(tmp_daily, monkeypatch):
@@ -449,6 +470,18 @@ def test_repair_writes_only_target_days(tmp_daily, monkeypatch):
     monkeypatch.setattr(fetch, "amount_series", lambda code, days: pd.Series([10.0] * len(days)))
     fetch.run_repair([DAY], ["600000"], budget=1, sleeper=lambda *_: None)
     assert store.stored_dates(tmp_daily) == {DAY: 1}          # 10-09 不在目标日就不写
+
+
+def test_repair_seeds_identity_before_the_first_request(tmp_daily, monkeypatch):
+    """补抓也能当独立入口跑（`--self-check` 只走它）：逐只请求之前同样要先现种身份落盘。"""
+    calls: list[str] = []
+    monkeypatch.setattr(fetch, "_try_refresh_cookie", lambda: calls.append("seed") or True)
+    monkeypatch.setattr(fetch, "fetch_individual_history",
+                        lambda code, **kwargs: history_frame(code, [DAY]))
+    monkeypatch.setattr(fetch, "amount_series", lambda code, days: pd.Series([10.0] * len(days)))
+
+    fetch.run_repair([DAY], ["000001"], budget=1, sleeper=lambda *_: None)
+    assert calls == ["seed"]
 
 
 def test_repair_skips_when_there_is_no_gap(tmp_daily):

@@ -150,6 +150,9 @@ _HEADERS = {
 # 所以换传输层是为了少浪费配额、并把能拿到的日子拿到手，硬窗口只能靠「多个时段重试」兜。
 TRANSPORT = "cffi"
 _SESSION = None
+# 这个进程有没有已经现种过浏览器身份（见 `_ensure_fresh_identity`）：一轮采集里 daily
+# 跑完接着走有界补抓，两个入口共用一次 Chrome，不该种两遍。
+_IDENTITY_SEEDED = False
 # 「一次失败请求长什么样」：随通道创建，重试循环据此决定是重试还是记失败。
 _CATCH: tuple = (requests.RequestException, ValueError)
 
@@ -280,7 +283,7 @@ def build_daily_frame(rows: list[dict], *, trade_date: str, data_ts: str) -> pd.
 def _try_refresh_cookie() -> bool:
     """现种一份新浏览器身份（headless Chrome 跑站点 JS），成功=True。
 
-    两个调用点：开跑前（身份不是今天种的就先换，见 run_daily）和连续两页被掐时的自救。
+    两个调用点：开跑前（每轮一次，见 `_ensure_fresh_identity`）和连续两页被掐时的自救。
     起不了浏览器（没装 selenium/driver 下载失败）不算错误：维持拉长间隔的原路，
     绝不为刷 Cookie 把整轮采集拖死。
     """
@@ -291,21 +294,28 @@ def _try_refresh_cookie() -> bool:
         tmp = COOKIE_PATH.with_suffix(".tmp")
         tmp.write_text(cookie, encoding="utf-8")
         tmp.replace(COOKIE_PATH)
-        logger.info("[daily] 已现种浏览器身份（%d 项 Cookie），下一个请求走新会话",
+        logger.info("[cookie] 已现种浏览器身份（%d 项 Cookie），下一个请求走新会话",
                     cookie.count("="))
         return True
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[daily] 现种 Cookie 失败（%s: %s），维持原节奏",
+        logger.warning("[cookie] 现种失败（%s: %s），维持原节奏",
                        type(exc).__name__, exc)
         return False
 
 
-def _cookie_seeded_today() -> bool:
-    """身份文件是不是今天种的（看落盘时刻，不看内容：种它的那步就是往这个文件写）。"""
-    if not COOKIE_PATH.exists():
-        return False
-    seeded = datetime.fromtimestamp(COOKIE_PATH.stat().st_mtime, TZ_CN)
-    return seeded.strftime("%Y-%m-%d") == datetime.now(TZ_CN).strftime("%Y-%m-%d")
+def _ensure_fresh_identity() -> None:
+    """开跑前先现种一份浏览器身份、写进 `COOKIE_PATH`，然后才发请求（一个进程只种一次）。
+
+    2026-10-27 把「一天一次」改成「每轮一次」：节流是按会话累计的，带着一颗当天已经翻过
+    60 页的身份重跑（补数据、改档后手动重来），第 1 页就可能被掐，而批量接口只给当下——
+    被掐掉的这一天之后没法重取，只能靠很慢的逐只补抓。代价是每轮多约 25 秒起一次 Chrome。
+    """
+    global _IDENTITY_SEEDED, _SESSION
+    if TRANSPORT != "cffi" or _IDENTITY_SEEDED:
+        return
+    _IDENTITY_SEEDED = True
+    if _try_refresh_cookie():
+        _SESSION = None      # 丢掉旧会话，下一个请求才吃得到刚落盘的新 Cookie
 
 
 def run_daily(*, limit_pages: int = 0, max_pages: int = 0, page_sleep: float | None = None,
@@ -327,10 +337,9 @@ def run_daily(*, limit_pages: int = 0, max_pages: int = 0, page_sleep: float | N
     today = datetime.now(TZ_CN).strftime("%Y-%m-%d")
 
     global _SESSION
-    # 开跑前先换一次浏览器身份（一天一次）：10-22 带着 2 天大的身份在 36、37 页连续 403，
-    # 中途现种换新会话后 38-60 页全过——提前换就把那两页省下来，代价约 25 秒。
-    if TRANSPORT == "cffi" and not _cookie_seeded_today() and _try_refresh_cookie():
-        _SESSION = None
+    # 开跑前现种一份新身份（每个进程一次）：10-22 带着 2 天大的身份在 36、37 页连续 403，
+    # 中途换新会话后 38-60 页全过——提前换就把那两页省下来。
+    _ensure_fresh_identity()
 
     first = None
     for round_no in range(ROUND_RETRIES + 1):
@@ -562,6 +571,9 @@ def run_repair(target_days: list[str], universe: list[str], *, budget: int,
 
     split = cursor % len(universe)
     batch = [code for code in universe[split:] + universe[:split] if code in need][:budget]
+    # 逐只通道同样吃节流，所以在第一个请求之前也要有现种的新身份；跳过「没缺口」的分支
+    # 才走到这里，白跑一轮不该开 Chrome。
+    _ensure_fresh_identity()
     logger.info("[repair] 目标日 %s，缺口 %d 只，本轮取 %d 只（游标 %d）",
                 target_days, len(need), len(batch), cursor)
 
