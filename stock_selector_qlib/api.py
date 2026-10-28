@@ -21,12 +21,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from stock_selector.features import chips
+from stock_selector.features.base_columns import is_limit_up
 from stock_selector.models.result import SelectResult
 from stock_selector_qlib import artifacts, pref, serving
 
 logger = logging.getLogger("qlib_plugin")
 
 STRATEGY = "qlib_alpha158"
+STRATEGY_BOARD = "qlib_boards"          # 板后低吸榜：今日板票 × 模型分板内名次（2026-10-29）
 
 app = FastAPI(title="qlib 插件化量化选股系统", version="0.1.0")
 
@@ -97,6 +99,22 @@ _STRATEGY_DETAIL = {
     "na_fields": list(_NA_FIELDS),
 }
 
+_BOARD_DETAIL = {
+    "name": STRATEGY_BOARD,
+    "label": "板后低吸",
+    "description": ("今日涨停票的模型分切片：行=当日涨停且过两条护栏的票，名次=模型分在板内的名次"
+                    "（同一份线上模型自己的分数，换个人群切，不是人工塞票）。行内价位块=板后低吸规则价："
+                    "明早开盘≤今收×0.95（低开5%起）挂开盘价买、≤×0.905（≈跌停一字）放弃、"
+                    "买入后涨了就卖、收盘无条件出。"),
+    "as_of": True,
+    "required_columns": ["date", "open", "high", "low", "close", "volume"],
+    "required_rows": serving.WARMUP_DAYS,
+    "params": {"population": "当日涨停（base_columns.is_limit_up，主板10%口径）",
+               "invalid_rule": "开盘≤今收×0.905 放弃（跌停一字买不进）",
+               "label": "由线上模型 meta 提供"},
+    "na_fields": list(_NA_FIELDS),
+}
+
 
 @app.get("/api/strategy/list")
 def strategy_list():
@@ -115,12 +133,12 @@ def strategy_detail():
     _STRATEGY_DETAIL["params"]["label"] = art.meta.get("label")
     _STRATEGY_DETAIL["params"]["label_horizon"] = h
     _STRATEGY_DETAIL["params"]["model"] = art.run_id
-    return {"code": 0, "data": [_STRATEGY_DETAIL] + _pref_details()}
+    return {"code": 0, "data": [_STRATEGY_DETAIL, _BOARD_DETAIL] + _pref_details()}
 
 
 def _strategies() -> list[str]:
     """本插件能出票的策略名。热门偏好榜默认下线，只有 `PREF_LIST=on` 才出现。"""
-    return [STRATEGY] + ([pref.STRATEGY] if serving.pref_enabled() else [])
+    return [STRATEGY, STRATEGY_BOARD] + ([pref.STRATEGY] if serving.pref_enabled() else [])
 
 
 def _pref_details() -> list[dict]:
@@ -180,6 +198,13 @@ def selector_run(req: RunRequest):
             logger.exception("qlib 打分失败")
             raise HTTPException(status_code=502, detail=f"qlib 打分失败：{exc}") from exc
         out += _model_rows(art, rows)
+    if STRATEGY_BOARD in want:
+        try:
+            brows = serving.board_scores(topk=req.topk or serving.DEFAULT_TOPK)
+        except Exception as exc:  # noqa: BLE001 - 板切片失败不能拖累主榜照常出票
+            logger.exception("板后低吸榜失败")
+            raise HTTPException(status_code=502, detail=f"板后低吸榜打分失败：{exc}") from exc
+        out += _model_rows(art, brows, board_slice=True)
     if pref.STRATEGY in want:
         try:
             prows = serving.latest_pref(topk=req.topk)
@@ -197,29 +222,66 @@ def _names_for(rows: list[dict]) -> dict[str, str]:
         return {}
 
 
-def _model_rows(art, rows: list[dict]) -> list[dict]:
+def _dip_levels(row: dict, pct: float | None) -> dict | None:
+    """板票行把筹码价位块换成「板后低吸」规则价（2026-10-28 用户拍板的交易语义）。
+
+    买线=今收×0.95：明早开盘 ≤ 买线（低开 5% 起）→ 挂开盘价买，开盘高于它不追；
+    失效线=今收×0.905：开盘 ≤ 失效线（≈跌停一字）→ 放弃，单子打不进；
+    卖出无目标价：涨了就卖，收盘无条件出。三个键复用 App 已消费的扁平键，
+    板票行用本块**替换**筹码块（板票的交易语义是低吸，不是筹码主峰回踩）。
+    """
+    price = row.get("price")
+    if not price or pct is None or not is_limit_up(row["code"], pct * 100):
+        return None
+    buy, invalid = round(price * 0.95, 2), round(price * 0.905, 2)
+    return {
+        "buy_ref_price": buy,
+        "sell_target_price": None,
+        "buy_invalid_price": invalid,
+        "level_note": (f"今日涨停（{pct * 100:.1f}%）→ 板后低吸规则价（非模型预测）："
+                       f"明早开盘≤{buy}（低开5%起）挂开盘价买、开盘高于它不追；"
+                       f"开盘≤{invalid}（≈跌停一字）放弃；买入后涨了就卖，收盘无条件出。"
+                       f"历史回放：低开5%~9.4%生效带净+1.57pp/笔 t9.31，触发~118次/年"),
+    }
+
+
+def _model_rows(art, rows: list[dict], board_slice: bool = False) -> list[dict]:
     label_map = _names_for(rows)
     chip, chip_missing = _chip_levels(rows)
+    try:
+        pcts = serving.pct_of_day([r["qlib_symbol"] for r in rows], rows[0]["date"])
+    except Exception:  # noqa: BLE001 - 涨幅判不出就按非板走筹码块，不能打断出票
+        logger.warning("pct_of_day 失败，板票行退回筹码价位块", exc_info=True)
+        pcts = {}
     h = _label_horizon(art.meta.get("label"))
     signal = f"预期{h}日收益排名" if h else "预期收益排名"
+    if board_slice:
+        signal = f"板后低吸·{signal}"
     out = []
     for row in rows:
         raw_rank = int(row.get("raw_rank") or row["rank"])
-        rank_text = (f"护栏后第 {row['rank']}" if raw_rank == row["rank"]
-                     else f"原始第 {raw_rank}、护栏后第 {row['rank']}")
+        if board_slice:
+            rank_text = f"板内第 {row['rank']} / {row['universe']} 只当日板票（全榜第 {raw_rank}）"
+        else:
+            rank_text = (f"护栏后第 {row['rank']}" if raw_rank == row["rank"]
+                         else f"原始第 {raw_rank}、护栏后第 {row['rank']}")
+        pool_note = "" if board_slice else f"（护栏后票池 {row['universe']} 只）"
         reason = (f"Alpha158+LightGBM 原始分 {row['score_raw']:.4f}，"
-                  f"{rank_text}（护栏后票池 {row['universe']} 只）；"
+                  f"{rank_text}{pool_note}；"
                   f"模型 {art.run_id}（训练止于 {art.meta.get('train_end')}，名单日为样本外）")
         blocked_top = row.get("guard_blocked_top")
         if blocked_top:
             reason += (f"；原始第 1 的 {blocked_top['code']} 被"
                        f"{blocked_top['reason']}挡下")
+        dip = _dip_levels(row, pcts.get(row["qlib_symbol"]))
+        if dip:
+            reason += f"；价位块为板后低吸规则价（今日涨停 {pcts.get(row['qlib_symbol']) * 100:.1f}%）"
         out.append(SelectResult(
             code=row["code"],
             name=label_map.get(row["code"], ""),
             signal=signal,
             reason=reason,
-            strategy=STRATEGY,
+            strategy=STRATEGY_BOARD if board_slice else STRATEGY,
             asof=row["date"],
             price=row["price"],
             score=round(row["score"], 6),
@@ -233,7 +295,7 @@ def _model_rows(art, rows: list[dict]) -> list[dict]:
                 "universe": row["universe"],
                 "feature_count": art.meta.get("feature_count"),
                 "na_fields": list(_NA_FIELDS),
-                **_level_fields(chip.get(row["qlib_symbol"]), chip_missing),
+                **(dip or _level_fields(chip.get(row["qlib_symbol"]), chip_missing)),
             },
         ).to_dict())
     return out

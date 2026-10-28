@@ -73,7 +73,22 @@ LABEL_OPEN_FMT = "Ref($close, -{h}) / Ref($open, -1) - 1"
 # loss="mse" 配 −1/0/+1 的标签 ⇒ 预测值 ≈ P(涨) − P(跌)，按分数排就是按明天红的概率排。
 # 除标签外与 W3（entry=open）一字不动，所以两臂的差只能归因到「幅度 vs 方向」这一个维度。
 LABEL_DIR_FMT = "Sign(" + LABEL_OPEN_FMT + ")"
-LABEL_ENTRIES = ("next", "close", "open", "dir")
+# 批次 F2（2026-10-29 凌晨）：把用户的**条件交易**写进标签。batchF1 实测 lu 特征 gain=0——
+# 无条件「明收/明开」里板后次日没有优待，树学到的方向是躲开板票（§41.3）。他真正做的交易是：
+# 今天板 + 明天低开 5%~9.5% 才买（9.5% 以深≈跌停一字买不进）、当天收盘卖。标签=触发日内收益，
+# 非触发日 0（不交易=不赚不亏）。触发带与 api._dip_levels 的规则价同源，改一处必须同步另一处。
+_LABEL_RET = "Div(Sub(Ref($close, -1), Ref($open, -1)), Ref($open, -1))"
+_LABEL_GAP = "Div(Ref($open, -1), $close)"
+LABEL_DIP_FMT = f"If(And(Gt({_LABEL_GAP}, 0.905), Lt({_LABEL_GAP}, 0.95)), {_LABEL_RET}, 0)"
+LABEL_ENTRIES = ("next", "close", "open", "dir", "dip")
+# 批次 F2 判决（2026-10-29 00:1x，§41.4）：31 棵树 lu_ 列 gain 仍为 0、ic_valid t −1.91——
+# 触发带不带板门，非板票明天也会低开，正样本被稀释。F3 把「今天板」门也写进标签：
+# 今天板（今收/昨收−1 ≥ 0.0975）∩ 明开/今收 ∈ (0.905, 0.95) ⇒ 标签=明开→明收收益；
+# 其余一律 0。⇒ 模型要压低 l2 就必须学会给「今天板」的行打高分，板票浮到前排是目标函数
+# 的直接后果，不是塞票。改一处必须同步 api._dip_levels 的规则价。
+_LABEL_BOARD = "Gt(Div(Sub($close, Ref($close,1)), Ref($close,1)), 0.0975)"
+LABEL_DIP_FMT = (f"If(And({_LABEL_BOARD}, And(Gt({_LABEL_GAP}, 0.905), Lt({_LABEL_GAP}, 0.95))), "
+                 f"{_LABEL_RET}, 0)")
 
 
 def label_formula(horizon: int = 5, entry: str = "next") -> str:
@@ -90,7 +105,9 @@ def label_formula(horizon: int = 5, entry: str = "next") -> str:
     if entry == "next" and horizon == 1:
         raise ValueError("entry=next 时 H 至少为 2：H=1 会让分子分母都是 Ref($close,-1)，标签恒等于 0")
     fmt = {"next": LABEL_FMT, "close": LABEL_CLOSE_FMT, "open": LABEL_OPEN_FMT,
-           "dir": LABEL_DIR_FMT}[entry]
+           "dir": LABEL_DIR_FMT, "dip": LABEL_DIP_FMT}[entry]
+    if entry == "dip" and horizon != 1:
+        raise ValueError("entry=dip 固定 H=1（低开买、当天收盘卖），--label-horizon 必须为 1")
     return fmt.format(h=horizon)
 
 
@@ -183,10 +200,10 @@ def build_dataset(qlib, instruments: str, fit_end: str, segments: dict,
     from qlib.data.dataset.processor import CSRankNorm, DropnaLabel, Fillna, RobustZScoreNorm
 
     from stock_selector_qlib.alpha import Alpha158Trend
-    from stock_selector_qlib.alpha_style import Alpha158Full, Alpha158Style
+    from stock_selector_qlib.alpha_style import Alpha158Full, Alpha158Style, Alpha158TrendLU
 
     handler_cls = {"base": None, "trend": Alpha158Trend, "style": Alpha158Style,
-                   "full": Alpha158Full}[feature_set]
+                   "full": Alpha158Full, "trendlu": Alpha158TrendLU}[feature_set]
     if handler_cls is None:
         from qlib.contrib.data.handler import Alpha158
         handler_cls = Alpha158
@@ -463,10 +480,12 @@ def main() -> int:
                          "改了它就是改训练目标，与历史读数不可直接比")
     ap.add_argument("--label-entry", choices=list(LABEL_ENTRIES), default="next",
                     help="入场口径：next=T+1 收盘买（历史批次全部如此，T→T+1 那段不在标签里）；"
-                         "close=信号日收盘就买（批次 U 用，对应 App 给的基准价与用户实际的尾盘买入）")
-    ap.add_argument("--feature-set", choices=["base", "trend", "style", "full"], default="trend",
+                         "close=信号日收盘就买（批次 U 用，对应 App 给的基准价与用户实际的尾盘买入）；"
+                         "dip=条件交易（批次 F2 用：明开低开 5%~9.5% 才买、当天收盘卖，非触发日 0）")
+    ap.add_argument("--feature-set", choices=["base", "trend", "style", "full", "trendlu"], default="trend",
                     help="特征集：base=Alpha158 原味；trend=+批次N趋势列（历史可比口径）；"
-                         "style=+批次O风格残余列；full=两者。线上打分永远是超集按 norm 列取数")
+                         "style=+批次O风格残余列；full=两者；trendlu=+批次F板后列（batchF）。"
+                         "线上打分永远是超集按 norm 列取数")
     ap.add_argument("--smoke", action="store_true", help="200 只 + 短窗，只验管道")
     ap.add_argument("--backtest", action="store_true")
     ap.add_argument("--topk", type=int, default=30)

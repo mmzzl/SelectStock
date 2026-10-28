@@ -41,6 +41,22 @@ STYLE_FACTORS: list[tuple[str, str]] = [
     ("so_overnight", "Div(Sub($open, Ref($close,1)), Ref($close,1))"),
     ("so_intraday", "Div(Sub($close, $open), $open)"),
 ]
+
+# 批次 F（2026-10-28 用户拍板「涨停强信号必须通过模型排到前面」)：板后显式特征族 lu_。
+# 此前所有特征都不含「当日涨幅/板旗」，模型无从知晓 002636 这类板票的存在（§40.5 实测
+# 排 104 名）。板旗阈值 0.0975：主板低价票真实涨停最低 ~9.8%（p=1.02 档），0.095 会把
+# 9.5%+ 的准板误旗（10-28 实测 600252 9.52% 非板）；创业板/科创板在 score_pool 源头已剔，
+# 北交所 30% 板同样落旗（同属强信号，一并捕捉）。不碰标签，W_c3 配方只换特征集。
+_LU_PCT = "Div(Sub($close, Ref($close,1)), Ref($close,1))"   # 当日涨幅
+_LU_FLAG = f"Gt({_LU_PCT}, 0.0975)"                          # 当日涨停旗（0/1）
+LU_FACTORS: list[tuple[str, str]] = [
+    ("lu_pct", _LU_PCT),
+    ("lu_flag", _LU_FLAG),
+    ("lu_cnt5", f"Mean({_LU_FLAG}, 5)"),    # 近5日板天占比（板后热度）
+    ("lu_cnt10", f"Mean({_LU_FLAG}, 10)"),  # 近10日板天占比
+]
+LU_NAMES = [name for name, _ in LU_FACTORS]
+LU_WINDOW_MAX = 10
 STYLE_NAMES = [name for name, _ in STYLE_FACTORS]
 WINDOW_MAX = 60
 
@@ -53,14 +69,24 @@ class Alpha158Style(Alpha158):
         return fields + [expr for _, expr in STYLE_FACTORS], names + STYLE_NAMES
 
 
+class Alpha158TrendLU(Alpha158):
+    """Alpha158 + 批次 N 趋势列 + 批次 F 板后列（batchF 训练用）：W_c3 配方只换特征集。"""
+
+    def get_feature_config(self):
+        fields, names = super().get_feature_config()
+        extra = [expr for _, expr in TREND_FACTORS] + [expr for _, expr in LU_FACTORS]
+        return fields + extra, names + TREND_NAMES + LU_NAMES
+
+
 class Alpha158Full(Alpha158):
-    """Alpha158 + 批次 N + 批次 O（175 列）的超集。
+    """Alpha158 + 批次 N + 批次 O + 批次 F 板后列（179 列）的超集。
 
     线上打分固定用这一个类：normalize 按 art.columns 取训练时的列，于是
-    base/trend/style/full 四代 artifact 都能从一个超集面板里合规取数。
+    base/trend/style/full/trendlu 五代 artifact 都能从一个超集面板里合规取数。
     """
 
     def get_feature_config(self):
         fields, names = super().get_feature_config()
-        extra = [expr for _, expr in TREND_FACTORS] + [expr for _, expr in STYLE_FACTORS]
-        return fields + extra, names + TREND_NAMES + STYLE_NAMES
+        extra = ([expr for _, expr in TREND_FACTORS] + [expr for _, expr in STYLE_FACTORS]
+                 + [expr for _, expr in LU_FACTORS])
+        return fields + extra, names + TREND_NAMES + STYLE_NAMES + LU_NAMES

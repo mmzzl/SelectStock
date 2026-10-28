@@ -112,11 +112,11 @@ def test_api_contract_matches_backend_consumption(art_dir, monkeypatch):
     monkeypatch.setattr(serving, "stock_names", lambda codes: {"600000": "浦发银行"})
     client = TestClient(api.app)
 
-    assert client.get("/api/strategy/list").json()["data"] == ["qlib_alpha158"]
+    assert client.get("/api/strategy/list").json()["data"] == ["qlib_alpha158", "qlib_boards"]
     detail = client.get("/api/strategy/detail").json()["data"][0]
     assert detail["name"] == "qlib_alpha158" and detail["as_of"] is True
 
-    body = client.post("/api/selector/run", json={"strategies": None}).json()
+    body = client.post("/api/selector/run", json={"strategies": ["qlib_alpha158"]}).json()
     assert body["code"] == 0
     item = body["data"][0]
     for key in ("code", "name", "signal", "reason", "strategy", "asof", "price", "score",
@@ -632,20 +632,20 @@ def _wire_two_strategies(art_dir, monkeypatch, *, pref=True):
 
 def test_策略列表里要带上热门偏好(art_dir, monkeypatch):
     client = _wire_two_strategies(art_dir, monkeypatch)
-    assert client.get("/api/strategy/list").json()["data"] == ["qlib_alpha158", "hot_pref"]
+    assert client.get("/api/strategy/list").json()["data"] == ["qlib_alpha158", "qlib_boards", "hot_pref"]
 
 
 def test_热门偏好默认下线(art_dir, monkeypatch):
     monkeypatch.delenv("PREF_LIST", raising=False)
     client = _wire_two_strategies(art_dir, monkeypatch, pref=None)
-    assert client.get("/api/strategy/list").json()["data"] == ["qlib_alpha158"]
+    assert client.get("/api/strategy/list").json()["data"] == ["qlib_alpha158", "qlib_boards"]
 
 
 def test_热门偏好在PREF_LIST关掉时整条消失(art_dir, monkeypatch):
     client = _wire_two_strategies(art_dir, monkeypatch, pref=False)
-    assert client.get("/api/strategy/list").json()["data"] == ["qlib_alpha158"]
+    assert client.get("/api/strategy/list").json()["data"] == ["qlib_alpha158", "qlib_boards"]
     assert client.get("/api/strategy/detail").json()["code"] == 0
-    assert [d["name"] for d in client.get("/api/strategy/detail").json()["data"]] == ["qlib_alpha158"]
+    assert [d["name"] for d in client.get("/api/strategy/detail").json()["data"]] == ["qlib_alpha158", "qlib_boards"]
 
 
 def test_只要热门偏好时不出模型票(art_dir, monkeypatch):
@@ -653,6 +653,37 @@ def test_只要热门偏好时不出模型票(art_dir, monkeypatch):
     data = client.post("/api/selector/run", json={"strategies": ["hot_pref"]}).json()["data"]
     assert [r["code"] for r in data] == ["600123"]
     assert data[0]["strategy"] == "hot_pref"
+
+
+def test_板切片榜的契约与名次口径(monkeypatch, art_dir):
+    """板后低吸榜：行=当日板票、名次=模型分板内名次、行内=板后低吸规则价。
+
+    2026-10-29 用户拍板「必须通过模型进榜」：这只榜是模型自己的分数换个人群切
+    （板内名次），不是人工塞票——但塞没塞票要能从 reason 里当场读出来。
+    """
+    from fastapi.testclient import TestClient
+
+    from stock_selector_qlib import api
+
+    monkeypatch.setenv("PREF_LIST", "off")
+    monkeypatch.setattr(artifacts, "MODEL_DIR", art_dir)
+    monkeypatch.setattr(serving, "board_scores", lambda topk=30, refresh=False: [
+        {"code": "002636", "qlib_symbol": "SZ002636", "date": "2026-10-28", "score_raw": 0.0302,
+         "score": 0.9, "rank": 5, "raw_rank": 104, "price": 10.0, "universe": 28,
+         "board_pct": 10.01},
+    ])
+    monkeypatch.setattr(serving, "stock_names", lambda codes: {"002636": "金安国纪"})
+    monkeypatch.setattr(serving, "pct_of_day", lambda symbols, date: {"SZ002636": 0.1001})
+    monkeypatch.setattr(serving, "chip_levels",
+                        lambda symbols, date, window=serving.CHIP_WINDOW: {})
+    item = TestClient(api.app).post(
+        "/api/selector/run", json={"strategies": ["qlib_boards"]}).json()["data"][0]
+    assert item["strategy"] == "qlib_boards" and item["rank"] == 5
+    assert item["name"] == "金安国纪" and "板后低吸" in item["signal"]
+    assert "板内第 5 / 28 只当日板票（全榜第 104）" in item["reason"]
+    ex = item["extra"]
+    assert (ex["buy_ref_price"], ex["buy_invalid_price"]) == (9.5, 9.05)
+    assert ex["sell_target_price"] is None and "板后低吸" in ex["level_note"]
 
 
 def test_缺省请求两条都出且模型在前(art_dir, monkeypatch):
@@ -680,8 +711,8 @@ def test_热门偏好行的契约与分数口径(art_dir, monkeypatch):
 def test_两条策略的详情各自带说明(art_dir, monkeypatch):
     client = _wire_two_strategies(art_dir, monkeypatch)
     details = client.get("/api/strategy/detail").json()["data"]
-    assert [d["name"] for d in details] == ["qlib_alpha158", "hot_pref"]
-    pref_detail = details[1]
+    assert [d["name"] for d in details] == ["qlib_alpha158", "qlib_boards", "hot_pref"]
+    pref_detail = details[2]
     assert "热门板块" in pref_detail["description"]
     assert pref_detail["na_fields"] == list(_na_fields())
     # 阈值不是秘密：市值线、热度滞后、新闻滞后都要在 params 里看得见
@@ -861,3 +892,39 @@ def test_价位取数失败不能把整张名单带走(art_dir, monkeypatch):
     ex = body["data"][0]["extra"]
     assert body["code"] == 0 and ex["buy_ref_price"] is None
     assert ex["level_note"]                            # 缺数要当场说出来，不能留空白
+
+
+def test_board_rows_swap_chip_levels_for_dip_rule(monkeypatch, art_dir):
+    """板票行（今日涨停）的价位块换成板后低吸规则价：买=今收×0.95、失效=×0.905、卖出无目标。
+
+    用户 2026-10-28 拍板的交易语义（明天跌了买、涨了卖）；三个键复用 App 已消费的扁平键，
+    板票行的筹码块不再出现——两套规则价不能同框打架；准板（9.52%<主板10%）仍走筹码块。
+    """
+    from fastapi.testclient import TestClient
+
+    from stock_selector_qlib import api
+
+    monkeypatch.setenv("PREF_LIST", "off")
+    monkeypatch.setattr(artifacts, "MODEL_DIR", art_dir)
+    monkeypatch.setattr(serving, "latest_scores", lambda topk=30, refresh=False: [
+        {"code": "600252", "qlib_symbol": "SH600252", "date": "2026-10-28", "score_raw": 0.5,
+         "score": 0.6, "rank": 1, "price": 4.8, "universe": 1273},
+        {"code": "002636", "qlib_symbol": "SZ002636", "date": "2026-10-28", "score_raw": 1.0,
+         "score": 0.9, "rank": 2, "price": 10.0, "universe": 1273},
+    ])
+    monkeypatch.setattr(serving, "stock_names", lambda codes: {})
+    monkeypatch.setattr(serving, "pct_of_day",
+                        lambda symbols, date: {"SH600252": 0.0952, "SZ002636": 0.1001})
+    monkeypatch.setattr(serving, "chip_levels", lambda symbols, date, window=serving.CHIP_WINDOW: {
+        "SH600252": {"buy_ref_price": 4.2, "sell_target_price": 5.1, "buy_invalid_price": 3.9,
+                     "chip_peak_low": 4.2, "chip_peak_high": 5.1, "atr14": 0.1,
+                     "close": 4.8, "close_below_peak": False, "peak_gap_pct": 0.0,
+                     "peak_weight_pct": 40.0, "chip_window": 60}})
+    data = TestClient(api.app).post("/api/selector/run", json={"strategies": None}).json()["data"]
+    chip_row = next(r for r in data if r["code"] == "600252")["extra"]
+    dip_row = next(r for r in data if r["code"] == "002636")["extra"]
+    assert chip_row["buy_ref_price"] == 4.2 and "主峰" in chip_row["level_note"]   # 准板走筹码块
+    assert (dip_row["buy_ref_price"], dip_row["buy_invalid_price"]) == (9.5, 9.05)
+    assert dip_row["sell_target_price"] is None            # 涨了就卖，无固定目标价
+    assert "板后低吸" in dip_row["level_note"] and "涨停" in dip_row["level_note"]
+    assert "板后低吸规则价" in next(r for r in data if r["code"] == "002636")["reason"]

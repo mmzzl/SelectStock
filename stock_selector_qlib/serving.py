@@ -489,6 +489,38 @@ def latest_scores(topk: int = DEFAULT_TOPK, refresh: bool = False) -> list[dict]
     return rows
 
 
+def board_scores(topk: int = DEFAULT_TOPK, refresh: bool = False) -> list[dict]:
+    """今日板票的模型分切片（板后低吸榜的数据源，2026-10-29 用户拍板「必须通过模型进榜」）。
+
+    行集 = day_ranking()（两条护栏已挡在前面）再按「当日涨停」过滤——过滤用的是
+    base_columns.is_limit_up 同一函数，与价位块规则价同源；名次 = 模型分在板内的名次。
+    这是模型自己的分数换个人群切，不是往名单里塞票。board_pct 随行带上，页面上要能
+    说清这只票今天板在多少。
+    """
+    from stock_selector.features.base_columns import is_limit_up
+
+    rows = day_ranking(refresh)
+    if not rows:
+        return []
+    pcts = pct_of_day([r["qlib_symbol"] for r in rows], rows[0]["date"])
+    board_rows = []
+    for r in rows:
+        p = pcts.get(r["qlib_symbol"])
+        if p is None or not is_limit_up(r["code"], p * 100):
+            continue
+        board_rows.append({**r, "board_pct": round(p * 100, 2), "raw_rank": r["rank"]})
+    n_boards = len(board_rows)
+    out = board_rows[:topk]
+    if out:
+        for i, r in enumerate(out, 1):
+            r["rank"] = i                      # 板内名次；raw_rank 保留全榜名次
+        closes = _closes([r["qlib_symbol"] for r in out], out[0]["date"])
+        for r in out:
+            r["price"] = closes.get(r["qlib_symbol"])
+            r["universe"] = n_boards           # reason 里「票池 N 只」按板数说
+    return out
+
+
 def pref_enabled() -> bool:
     """热门偏好榜的总开关：默认下线，`PREF_LIST=on` 才启用（改环境+重启，不动代码）。"""
     return os.environ.get("PREF_LIST", "off").strip().lower() not in ("off", "0", "false", "no")
@@ -588,6 +620,32 @@ def _closes(symbols: list[str], date: str) -> dict[str, float]:
     frame = frame.droplevel("datetime")
     return {str(inst): (None if pd.isna(v) else float(v))
             for inst, v in frame["$close"].items()}
+
+
+def pct_of_day(symbols: list[str], date: str) -> dict[str, float | None]:
+    """信号日涨幅（今收/昨收−1），给「当日涨停」判定用。
+
+    昨收缺（新上市/停牌）⇒ None——「判不了」必须与「没涨」分开，调用方按 None 走非板路径。
+    """
+    cal = calendar()
+    i = cal.index(date) if date in cal else -1
+    prev = cal[i - 1] if i > 0 else None
+    if not prev:
+        return {s: None for s in symbols}
+    frame = _d_features(list(symbols), ["$close"], prev, date)
+    if frame is None or frame.empty:
+        return {s: None for s in symbols}
+    close = frame["$close"].unstack("instrument")
+    out: dict[str, float | None] = {}
+    for s in symbols:
+        col = close.get(s)
+        if col is None:
+            out[s] = None
+            continue
+        a, b = col.get(pd.Timestamp(prev)), col.get(pd.Timestamp(date))
+        out[s] = (b / a - 1) if (a is not None and b is not None
+                                 and not pd.isna(a) and not pd.isna(b) and a > 0) else None
+    return out
 
 
 # 筹码成本分布的窗口：用户点名的「近 60 日筹码主峰」。价位口径见 stock_selector/features/chips.py
