@@ -170,7 +170,7 @@ def test_water_line_needs_five_partitions_before_judging():
     """冷启动没有可信水位：返回 0 就意味着「永不跳过」，宁可重抓也不能漏一天。"""
     assert fetch.water_line({f"d{i}": 100 for i in range(4)}) == 0
     known = {f"d{i}": 5000 for i in range(6)}
-    assert fetch.water_line(known) == int(5000 * fetch.THIN_RATIO)
+    assert fetch.water_line(known) == 4750          # 水位就是「中位数的 95%」，改系数要连带改这里
 
 
 def write_kline(kline_dir, code, dates):
@@ -268,6 +268,30 @@ def test_run_daily_skips_a_complete_partition(tmp_daily, monkeypatch):
     assert result["skipped"] and result["trade_date"] == DAY
     assert calls == [1]                                      # 只花一个请求做判断
     assert store.partition_rows(store.partition_path(tmp_daily, DAY)) == 5000
+
+
+def test_run_daily_refetches_a_day_at_90_percent_of_median(tmp_daily, monkeypatch):
+    """只有中位数九成的一天不许当「已完整」：2026-10-27 16:30 那轮 15 页失败只写 4,500 行
+    （正常 5,925），0.8 的水位判它过线 ⇒ 当晚不重取，这一天永久欠着（批量接口只给当下）。"""
+    calls = []
+
+    def fake_page(page, **kwargs):
+        calls.append(page)
+        return [clist_row(code=f"{page:06d}")], 5000
+
+    monkeypatch.setattr(fetch, "fetch_daily_page", fake_page)
+    dense = pd.DataFrame([one_row(date=f"2026-10-{day}", code=f"{i:06d}")
+                          for day in range(11, 16) for i in range(5000)])
+    store.write_partitions(tmp_daily, store.normalize_and_flag(dense, data_ts="",
+                                                              collected_at=""))
+    partial = pd.DataFrame([one_row(date=DAY, code=f"{i:06d}") for i in range(4500)])
+    store.write_partitions(tmp_daily, store.normalize_and_flag(partial, data_ts="",
+                                                              collected_at=""))
+
+    result = fetch.run_daily(limit_pages=1)
+    assert fetch.water_line({f"d{i}": 5000 for i in range(6)}) == 4750   # 水位线本身钉死
+    assert not result.get("skipped")                          # 4,500 < 4,750 ⇒ 重取
+    assert calls == [1]
 
 
 def test_run_daily_fetches_all_pages_and_writes_one_partition(tmp_daily, monkeypatch):
@@ -571,7 +595,7 @@ def test_self_check_counts_rows_not_files_when_reporting(tmp_daily, monkeypatch)
     fill_days(tmp_daily, monkeypatch)
     report, _ = fetch.run_self_check(7, repair_budget=0, repair_cursor=0,
                                      sleeper=lambda *_: None)
-    assert report["water_line"] == int(10 * fetch.THIN_RATIO)
+    assert report["water_line"] == 9                  # 中位数 10 × 0.95
     assert report["stored"] == 6 and len(report["expected_days"]) == 7
     assert report["thin"] == {WEEK[5]: 2} and report["missing"] == [WEEK[6]]
 
