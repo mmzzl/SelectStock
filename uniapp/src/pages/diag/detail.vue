@@ -4,8 +4,8 @@ import { ref } from "vue";
 import { onLoad } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
 import { convictionHead, convictionLevelClass, convictionLevelText, convictionNote,
-         gameText, hasConviction, sellTriggerText, takeProfitText,
-         toHoldingRow } from "../../logic/view.js";
+         buyLevelText, gameText, hasConviction, levelNoteText, sellTriggerText,
+         takeProfitText, toHoldingRow } from "../../logic/view.js";
 
 const run = ref(null); const results = ref([]); const err = ref("");
 const { diag } = useClient();
@@ -50,6 +50,8 @@ const pnlCls = (v) => (v === null || v === undefined || v === 0 ? "" : v > 0 ? "
             <text v-if="convictionLevelText(r)" class="conv-lv" :class="convictionLevelClass(r)">{{ convictionLevelText(r) }}</text>
           </view>
           <text v-if="convictionNote(r)" class="conv-note">{{ convictionNote(r) }}</text>
+          <text v-if="buyLevelText(r)" class="conv-line chip">筹码价位 · {{ buyLevelText(r) }}</text>
+          <text v-if="levelNoteText(r)" class="conv-note">{{ levelNoteText(r) }}</text>
           <text v-if="sellTriggerText(r)" class="conv-line trig">止损 · {{ sellTriggerText(r) }}</text>
           <text v-if="takeProfitText(r)" class="conv-line tp">止盈 · {{ takeProfitText(r) }}</text>
           <text v-if="gameText(r)" class="conv-line game">{{ gameText(r) }}</text>

@@ -98,12 +98,14 @@ async def test_apply_import_skip_skips(_clean):
 
 
 async def test_list_holdings_snapshot_carries_diag_extra_fields():
-    """持仓列表快照要带上诊断新增的信念/止盈/博弈字段（页面直接读这些键）。"""
+    """持仓列表快照要带上诊断新增的信念/止盈/博弈字段 + 筹码三档价位（页面直接读这些键）。"""
     from repositories import portfolio_results, portfolio_runs
 
     extra = {
         "conviction_pct": 72.5, "conviction_level": "高", "conviction_text": "趋势确认",
         "take_profit_price": 1800.0, "game_v": 0.1, "game_s": 0.2, "game_text": "放量上攻",
+        "buy_ref_price": 1603.6, "sell_target_price": 1750.0, "buy_invalid_price": 1520.0,
+        "level_note": "近 60 日筹码主峰 1603.60~1750.00",
     }
     await holdings_service.create_holding("u9", {"code": "600519", "name": "茅台",
                                                  "quantity": 100, "cost_price": 1688.0})

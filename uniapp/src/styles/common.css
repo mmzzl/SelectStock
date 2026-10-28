@@ -285,6 +285,8 @@ button[disabled] {
 .conv .conv-line.trig { color: #e64545; }
 .conv .conv-line.tp { color: #1fa35f; }
 .conv .conv-line.game { font-size: 20rpx; color: #a2a9b5; }
+/* 筹码三档价位：规则算出来的挂单价，不是模型预测，所以用中性蓝而不是涨跌色 */
+.conv .conv-line.chip { color: #1f6feb; }
 
 /* 分组标题 */
 .grp {

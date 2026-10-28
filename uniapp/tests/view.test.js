@@ -6,7 +6,7 @@ import { toHoldingRow, toTradeRow, toPnlView, toSelectionJobRow, toSelectionResu
          convictionNote, hasConviction, takeProfitText, gameText,
          riskText, riskClass, isNa, sortByRiskDesc, buyLevelText, sellTriggerText,
          orderPlanText, riskAdjustText, posteriorText, gateText, dayRankText,
-         scoreText, toStrategyOption } from "../src/logic/view.js";
+         scoreText, levelNoteText, toStrategyOption } from "../src/logic/view.js";
 
 test("时间格式化：naive UTC 转本地、压到分钟；带时区/非法值不崩", async () => {
   const { execFileSync } = await import("node:child_process");
@@ -77,6 +77,32 @@ test("持仓行：结构化可信度/止盈/博弈字段透传；字段整段缺
   assert.equal(legacy.gameV, null);
   assert.equal(legacy.gameS, null);
   assert.equal(legacy.gameText, "");
+});
+
+test("持仓/诊断行：筹码三档价位透传，和名单页共用同一套文案函数", () => {
+  const row = toHoldingRow({
+    code: "600519", name: "贵州茅台", quantity: 100, cost_price: 1680.5, latest_price: 1500,
+    buy_ref_price: 1480.5, sell_target_price: 1610.0, buy_invalid_price: 1455.2,
+    level_note: "近 60 日筹码主峰 1480.50~1610.00（这段占了 34% 的成交额）",
+  });
+  assert.equal(row.buyRef, 1480.5);
+  assert.equal(row.sellTarget, 1610);
+  assert.equal(row.buyInvalid, 1455.2);
+  assert.equal(buyLevelText(row), "买入参考 1480.50 · 第一止盈 1610.00 · 跌破 1455.20 失效");
+  assert.equal(levelNoteText(row), "近 60 日筹码主峰 1480.50~1610.00（这段占了 34% 的成交额）");
+  // 只有价位、没有可信度/止损线/博弈时，那一块也得渲染出来
+  assert.equal(hasConviction(row), true);
+
+  // 算不出价位（新上市/历史不足）：价位留空，那句原因照常显示
+  const none = toHoldingRow({
+    code: "301999", quantity: 1, cost_price: 1,
+    level_note: "近 60 交易日历史不足（新上市或行情缺数），算不出筹码主峰",
+  });
+  assert.equal(none.buyRef, null);
+  assert.equal(none.sellTarget, null);
+  assert.equal(none.buyInvalid, null);
+  assert.equal(buyLevelText(none), "");
+  assert.equal(levelNoteText(none), "近 60 交易日历史不足（新上市或行情缺数），算不出筹码主峰");
 });
 
 test("可信度结构化：百分比取整 + 等级徽章 + 短说明；没有百分比就退回老 suggestion 文案", () => {
@@ -241,7 +267,7 @@ test("选股结果行：字段映射透传", () => {
   assert.deepEqual(row, {
     code: "600519", name: "茅台", signal: "trend_rebound", reason: "MACD金叉",
     strategy: "trend_rebound", asof: "", price: null, score: null, rank: null, risk: null,
-    buyRef: null, buyInvalid: null,
+    buyRef: null, buyInvalid: null, sellTarget: null, levelNote: "",
     riskVerdict: "", riskReason: "", riskShares: null, riskAmount: null,
     riskFill: null, riskSlippageBp: null,
     // 判据后验：后端没给这三列时必须是空串/null（页面据此显示「未标定」）
@@ -560,4 +586,34 @@ test("口径段：选股页要说清「满分 100」和两条榜各是什么", a
   // 两条榜可以各含同一只票，:key 只用代码会让 Vue 拿到重复键
   assert.ok(/:key="[^"]*strategy[^"]*code[^"]*"/.test(page),
             "结果卡的 :key 要带上策略名，否则同一只票进两条榜时 Vue 键冲突");
+});
+
+test("价位文案：买入、第一止盈、止损三档按顺序说全", () => {
+  assert.equal(buyLevelText({ buyRef: 33.1, sellTarget: 36.5, buyInvalid: 30.6 }),
+               "买入参考 33.10 · 第一止盈 36.50 · 跌破 30.60 失效");
+  // 只有止盈位时也不能吞掉（自研内核没有止盈列，qlib 榜三档齐全）
+  assert.equal(buyLevelText({ buyRef: 10.85, sellTarget: 12.4, buyInvalid: 10.31 }),
+               "买入参考 10.85 · 第一止盈 12.40 · 跌破 10.31 失效");
+  assert.equal(buyLevelText({ sellTarget: 12.4 }), "第一止盈 12.40");
+});
+
+test("价位口径：随行情给一句这三档是怎么来的，缺数时给缺数原因", () => {
+  assert.equal(levelNoteText({ levelNote: "近 60 日筹码主峰 33.10~36.50；规则价，不是模型预测" }),
+               "近 60 日筹码主峰 33.10~36.50；规则价，不是模型预测");
+  assert.equal(levelNoteText({}), "");     // 没有句子就不占一行
+});
+
+test("行解析：sell_target_price / level_note 映射进卡片行", () => {
+  const row = toSelectionResultRow({ code: "002484", sell_target_price: "36.5",
+                                     level_note: "近 60 日筹码主峰" });
+  assert.equal(row.sellTarget, 36.5);
+  assert.equal(row.levelNote, "近 60 日筹码主峰");
+  assert.equal(toSelectionResultRow({ code: "1" }).sellTarget, null);
+});
+
+test("选股页把三档价位和口径句子都渲染出来", async () => {
+  const { readFileSync } = await import("node:fs");
+  const page = readFileSync(new URL("../src/pages/selection/index.vue", import.meta.url), "utf8");
+  assert.ok(page.includes("buyLevelText(r)"), "价位行没接上");
+  assert.ok(page.includes("levelNoteText(r)"), "口径句子没渲染——光给三个数字会被读成模型预测的价格");
 });

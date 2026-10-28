@@ -22,6 +22,7 @@ _RESULT_FIELDS = (
     "quantity", "holding_pnl", "pnl_pct", "suggestion", "sell_trigger_price",
     "conviction_pct", "conviction_level", "conviction_text", "take_profit_price",
     "game_v", "game_s", "game_text",
+    "buy_ref_price", "sell_target_price", "buy_invalid_price", "level_note",
 )
 
 

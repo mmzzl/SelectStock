@@ -200,6 +200,10 @@ async def _http_run(strategies: list[str]) -> list[dict]:
         # 没有对应判据的策略给 None（不能落成 0，也不能从 reason 文本里抠）
         "buy_ref_price": _num((it.get("extra") or {}).get("buy_ref_price")),
         "buy_invalid_price": _num((it.get("extra") or {}).get("buy_invalid_price")),
+        # 第一止盈价 + 口径句子（qlib 榜按近 60 日筹码主峰给；自研内核没这条判据时是 None/空串，
+        # 不能落成 0——0 元是一个真实价位）
+        "sell_target_price": _num((it.get("extra") or {}).get("sell_target_price")),
+        "level_note": str((it.get("extra") or {}).get("level_note") or "")[:160],
         # 风控决策：信号已过风控规则才到这里（被拦的票内核就不返回了）。
         # allow=原样放行、adjust=放行但下单量被单票上限压过；空值=这批结果跑在风控关闭时。
         "risk_verdict": str((it.get("extra") or {}).get("risk_verdict") or "")[:8],

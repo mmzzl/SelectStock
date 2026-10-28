@@ -42,6 +42,9 @@ export function toHoldingRow(s) {
     takeProfit: num(s.take_profit_price),
     // 博弈参考：V/S 是参考数值、game_text 是定性描述，页面压到次要一行
     gameV: num(s.game_v), gameS: num(s.game_s), gameText: s.game_text || "",
+    // 筹码三档价位 + 口径句（名单页同一套函数渲染）
+    buyRef: num(s.buy_ref_price), sellTarget: num(s.sell_target_price),
+    buyInvalid: num(s.buy_invalid_price), levelNote: s.level_note || "",
     diagRunId: s.diag_run_id || null,
   };
 }
@@ -123,10 +126,13 @@ export function convictionText(r, withLine = false) {
   return [convictionHead(r, withLine), convictionNote(r)].filter(Boolean).join(" · ");
 }
 
-/** 可信度块是否有内容：任一子行有东西才渲染整块，全空时不出，免得留一段空边距。 */
+/** 可信度块是否有内容：任一子行有东西才渲染整块，全空时不出，免得留一段空边距。
+ *  筹码价位算不出时插件只给一句 level_note（「近 60 日历史不足」），那句话也得让块渲染出来，
+ *  否则使用者读到的是"这一栏没有"，而实际是"这一栏没算成"。 */
 export function hasConviction(r, withLine = false) {
   return Boolean(convictionText(r, withLine) || convictionLevelText(r)
-    || sellTriggerText(r) || takeProfitText(r) || gameText(r));
+    || sellTriggerText(r) || takeProfitText(r) || gameText(r)
+    || buyLevelText(r) || levelNoteText(r));
 }
 
 /** 止盈价格线：跟 sellTriggerText 一个口径——目标或现价缺一个就整行不显示，有数时按目标在
@@ -240,6 +246,8 @@ export function toSelectionResultRow(s) {
     risk: num(s.risk_ex10_pp),
     // 买点参考位/失效位：策略判据里算出的均线、箱体上沿、6 日低点（不是预测价）
     buyRef: num(s.buy_ref_price), buyInvalid: num(s.buy_invalid_price),
+    // 第一止盈价 + 价位口径句子（qlib 榜按近 60 日筹码主峰给：下沿买入、上沿止盈）
+    sellTarget: num(s.sell_target_price), levelNote: s.level_note || "",
     // 风控后的最终决策：allow=信号原样可下单，adjust=能下单但下单量被规则压过。
     // 被拦掉的票内核不会返回，所以这里不会出现 "block"；字段全空表示这批结果跑在风控关闭时。
     riskVerdict: s.risk_verdict || "", riskReason: s.risk_reason || "",
@@ -322,14 +330,22 @@ export function riskAdjustText(r) {
  *  那句话当场自相矛盾；这里缺的是**判据价位**，不是价格。 */
 export function buyLevelText(r) {
   const ref = num(r?.buyRef);
+  const target = num(r?.sellTarget);
   const stop = num(r?.buyInvalid);
   const parts = [];
   if (ref !== null) parts.push(`买入参考 ${ref.toFixed(2)}`);
+  if (target !== null) parts.push(`第一止盈 ${target.toFixed(2)}`);
   if (stop !== null) parts.push(`跌破 ${stop.toFixed(2)} 失效`);
   if (!parts.length && isNa(r, "buy_ref_price")) {
     return "买点参考位/失效位 · 不适用（该引擎只出排序分，不给价位；能对照的只有上方基准价）";
   }
   return parts.join(" · ");
+}
+
+/** 三档价位的口径：插件给的这句话就是「这些数是怎么来的」，必须原样显示。
+ *  光给三个数字，使用者会把它读成模型预测的价格——而那三条其实是一条固定规则。 */
+export function levelNoteText(r) {
+  return r?.levelNote || "";
 }
 
 /** 买入风险分的展示文本（百分点，带符号）。没值给占位符——0 是"预测跑平当日全市场"，

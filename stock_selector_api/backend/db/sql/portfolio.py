@@ -53,3 +53,9 @@ class PortfolioDiagResult(Base, IdMixin):
     game_v: Mapped[float | None] = mapped_column(Float, nullable=True)
     game_s: Mapped[float | None] = mapped_column(Float, nullable=True)
     game_text: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # 筹码三档价位（2026-10-28）：买入参考=近 60 日主峰下沿、第一止盈=主峰上沿、失效=买入−2×ATR。
+    # 算不出时留 NULL（0 元是真实价位，不能拿来当缺数），口径写在 level_note。
+    buy_ref_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sell_target_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    buy_invalid_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    level_note: Mapped[str] = mapped_column(String(160), default="")

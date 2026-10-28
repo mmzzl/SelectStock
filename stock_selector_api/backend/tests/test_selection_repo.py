@@ -130,3 +130,39 @@ def test_ensure_diag_result_columns_upgrades_old_table():
         conn.execute(text("INSERT INTO portfolio_diag_results (run_id, code, action,"
                           " sell_trigger_price) VALUES ('r', '000001', 'hold', 9.5)"))
         assert conn.execute(text("SELECT sell_trigger_price FROM portfolio_diag_results")).scalar() == 9.5
+
+
+async def test_chip_price_levels_roundtrip():
+    """买入价 / 第一止盈价 / 止损价 + 口径句子要能落库并回读（用户要的「显示买卖价」）。
+
+    卖出价必须是独立列：藏在 reason 文本里的话，页面就得从中文句子里抠数字，抠不出来就是空值。
+    """
+    job = await select_jobs_repo.create({"user_id": "s1f", "strategies": "[]",
+                                         "status": "queued", "source": "manual"})
+    await select_results_repo.create({
+        "job_id": job["job_id"], "code": "002484", "name": "江海股份",
+        "signal": "预期10日收益排名", "reason": "Alpha158 分数第一",
+        "strategy": "qlib_alpha158", "asof": "2026-10-27",
+        "price": 34.4, "score": 1.0, "rank_no": 1,
+        "buy_ref_price": 33.1, "sell_target_price": 36.5, "buy_invalid_price": 30.6,
+        "level_note": "近 60 日筹码主峰 33.10~36.50；规则价，不是模型预测"})
+    row = (await select_results_repo.list_by_job(job["job_id"]))[0]
+    assert row["buy_ref_price"] == 33.1
+    assert row["sell_target_price"] == 36.5
+    assert row["buy_invalid_price"] == 30.6
+    assert "筹码主峰" in row["level_note"]
+
+
+async def test_null_price_levels_stay_null():
+    """算不出主峰的票（新上市/缺数）落 NULL，不能被补成 0：0 元是一个真实存在的价位。"""
+    job = await select_jobs_repo.create({"user_id": "s1g", "strategies": "[]",
+                                         "status": "queued", "source": "manual"})
+    await select_results_repo.create({
+        "job_id": job["job_id"], "code": "603999", "name": "读者传媒",
+        "signal": "预期10日收益排名", "reason": "",
+        "strategy": "qlib_alpha158", "asof": "2026-10-27", "price": 9.9,
+        "buy_ref_price": None, "sell_target_price": None, "buy_invalid_price": None,
+        "level_note": "近 60 交易日历史不足，算不出筹码主峰"})
+    row = (await select_results_repo.list_by_job(job["job_id"]))[0]
+    assert row["buy_ref_price"] is None and row["sell_target_price"] is None
+    assert row["buy_invalid_price"] is None

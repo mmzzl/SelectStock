@@ -110,3 +110,49 @@ async def test_conviction_and_game_fields_roundtrip(monkeypatch):
     for key, val in extra.items():
         assert again["results"][0][key] == val, key
     await _clean()
+
+
+async def test_chip_price_levels_roundtrip(monkeypatch):
+    """筹码三档价位 + 口径句一路走到出参；算不出时必须是 None/说明，不能落 0。"""
+    await _clean()
+
+    extra = {
+        "buy_ref_price": 13.5, "sell_target_price": 14.5, "buy_invalid_price": 12.1,
+        "level_note": "近 60 日筹码主峰 13.50~14.50；买入挂下沿、止盈挂上沿",
+    }
+
+    async def fake_plugin(payload):
+        return {"results": [{
+            "code": "600519", "name": "贵州茅台", "action": "hold", "action_reason": "x",
+            "latest_price": 1688.0, "quantity": 100, "holding_pnl": 0.0, "pnl_pct": 0.0,
+            "suggestion": "", "sell_trigger_price": 1603.6,
+            **extra,
+        }, {
+            "code": "000858", "name": "五粮液", "action": "hold", "action_reason": "x",
+            "latest_price": 142.0, "quantity": 50, "holding_pnl": 0.0, "pnl_pct": 0.0,
+            "suggestion": "", "sell_trigger_price": None,
+            "buy_ref_price": None, "sell_target_price": None, "buy_invalid_price": None,
+            "level_note": "近 60 交易日历史不足（新上市或行情缺数），算不出筹码主峰",
+        }], "summary": {"action_counts": {"hold": 2}, "total_market_value": 2.0,
+                        "total_pnl": 0.0, "holding_count": 2}}
+
+    monkeypatch.setattr("services.portfolio_plugin.call_plugin_analyze", fake_plugin)
+    out = await portfolio_service.analyze("svc-u7", "2026-09-16", HOLDINGS)
+    got = {r["code"]: r for r in out["results"]}
+    first, second = got["600519"], got["000858"]
+    for key, val in extra.items():
+        assert first[key] == val, key
+    assert second["buy_ref_price"] is None and second["sell_target_price"] is None
+    assert second["level_note"].startswith("近 60 交易日历史不足")
+
+    rows = await portfolio_results.list_by_run(out["run_id"])
+    by_code = {r["code"]: r for r in rows}
+    for key, val in extra.items():
+        assert by_code["600519"][key] == val, key
+    assert by_code["000858"]["buy_invalid_price"] is None
+
+    again = await portfolio_service.analyze("svc-u7", "2026-09-16", HOLDINGS)
+    replayed = {r["code"]: r for r in again["results"]}
+    assert replayed["600519"]["sell_target_price"] == 14.5
+    assert replayed["000858"]["buy_ref_price"] is None
+    await _clean()

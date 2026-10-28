@@ -104,7 +104,8 @@ class _StubClient:
              "strategy": "trend_rebound", "asof": "2026-09-24",
              "price": "11.20", "score": 0.62, "rank": "1",
              "extra": {"risk_ex10_pp": "-0.21", "buy_ref_price": "10.85",
-                       "buy_invalid_price": "10.31",
+                       "buy_invalid_price": "10.31", "sell_target_price": "12.40",
+                       "level_note": "近 60 日筹码主峰 10.85~12.40；规则价，不是模型预测",
                        "risk_verdict": "adjust",
                        "risk_reason": "[position] 单票上限 4 万元，建议改为 3800 股",
                        "risk_shares": "3800", "risk_amount": "39140.0",
@@ -127,6 +128,9 @@ async def test_http_run_maps_enriched_fields(monkeypatch):
     assert row["risk_ex10_pp"] == -0.21
     # 买点参考位/失效位同样来自 extra
     assert row["buy_ref_price"] == 10.85 and row["buy_invalid_price"] == 10.31
+    # 第一止盈价 + 口径句子：用户要的「显示买入价、卖出价」，卖出价必须是独立一列
+    assert row["sell_target_price"] == 12.4
+    assert "筹码主峰" in row["level_note"]
     # 风控决策：App 要显示「买多少股、预估什么价成交、为什么改」，字段全部来自内核
     assert (row["risk_verdict"], row["risk_shares"]) == ("adjust", 3800)
     assert row["risk_amount"] == 39140.0 and row["risk_fill_price"] == 10.31

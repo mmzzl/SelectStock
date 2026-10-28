@@ -53,6 +53,10 @@ class PortfolioDiagResultCreate(BaseModel):
     game_v: float | None = None
     game_s: float | None = None
     game_text: str | None = None
+    buy_ref_price: float | None = None
+    sell_target_price: float | None = None
+    buy_invalid_price: float | None = None
+    level_note: str = ""
 
 
 class PortfolioRunOut(ORMModel):
@@ -88,3 +92,7 @@ class PortfolioResultOut(ORMModel):
     game_v: float | None = None
     game_s: float | None = None
     game_text: str | None = None
+    buy_ref_price: float | None = None
+    sell_target_price: float | None = None
+    buy_invalid_price: float | None = None
+    level_note: str = ""

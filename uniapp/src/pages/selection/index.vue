@@ -3,7 +3,7 @@
 import { computed, ref } from "vue";
 import { onShow, onUnload } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
-import { toSelectionResultRow, toStrategyOption, riskText, riskClass, isNa, sortByRiskDesc, buyLevelText, orderPlanText, riskAdjustText, posteriorText, gateText, scoreText } from "../../logic/view.js";
+import { toSelectionResultRow, toStrategyOption, riskText, riskClass, isNa, sortByRiskDesc, buyLevelText, levelNoteText, orderPlanText, riskAdjustText, posteriorText, gateText, scoreText } from "../../logic/view.js";
 
 const { selection } = useClient();
 const strategies = ref([]);        // [{ name, label, desc }]
@@ -141,6 +141,7 @@ const fixed2 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) 
           <view class="k"><text class="n date">{{ r.asof || "—" }}</text><text class="l">基准交易日</text></view>
         </view>
         <text v-if="buyLevelText(r)" class="levels">{{ buyLevelText(r) }}</text>
+        <text v-if="levelNoteText(r)" class="note">{{ levelNoteText(r) }}</text>
         <text v-if="orderPlanText(r)" class="levels">{{ orderPlanText(r) }}</text>
         <text v-if="riskAdjustText(r)" class="adjust">{{ riskAdjustText(r) }}</text>
         <text class="posterior">{{ posteriorText(r) }}</text>
@@ -159,6 +160,7 @@ const fixed2 = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) 
 }
 .kv3 .n.date { font-size: 24rpx; font-weight: 600; color: #5c6470; }
 .levels { display: block; margin-top: 8rpx; font-size: 24rpx; color: #2b5cff; }
+.note { display: block; margin-top: 4rpx; font-size: 22rpx; color: #8a8f99; }
 .adjust { display: block; margin-top: 6rpx; font-size: 22rpx; color: #c8641e; }
 .posterior { display: block; margin-top: 6rpx; font-size: 22rpx; color: #8a919f; }
 .gate { display: block; margin-top: 4rpx; font-size: 22rpx; color: #b8821f; }

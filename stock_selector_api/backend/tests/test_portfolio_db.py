@@ -10,6 +10,10 @@ DIAG_EXTRA_COLUMNS = (
     "conviction_pct", "conviction_level", "conviction_text",
     "take_profit_price", "game_v", "game_s", "game_text",
 )
+# 筹码三档价位 + 口径句（2026-10-28）：诊断页的「买入参考/第一止盈/跌破失效」就靠这四列
+DIAG_CHIP_COLUMNS = (
+    "buy_ref_price", "sell_target_price", "buy_invalid_price", "level_note",
+)
 
 
 def test_tables_registered():
@@ -31,7 +35,7 @@ def test_result_columns_and_unique():
     tbl = Base.metadata.tables["portfolio_diag_results"]
     for col in ("run_id", "code", "name", "action", "latest_price",
                 "quantity", "holding_pnl", "pnl_pct", "sell_trigger_price",
-                *DIAG_EXTRA_COLUMNS):
+                *DIAG_EXTRA_COLUMNS, *DIAG_CHIP_COLUMNS):
         assert col in tbl.columns
     uniques = [c for c in tbl.constraints if isinstance(c, UniqueConstraint)]
     assert any(set(uc.columns.keys()) == {"run_id", "code"} for uc in uniques)
@@ -77,19 +81,23 @@ def test_ensure_diag_result_columns_idempotent_on_fresh_db(tmp_path):
             _ensure_diag_result_columns(conn)
             _ensure_diag_result_columns(conn)  # 幂等：第二次不报错
             cols = {c["name"] for c in inspect(conn).get_columns("portfolio_diag_results")}
-            assert {"sell_trigger_price", *DIAG_EXTRA_COLUMNS} <= cols
+            assert {"sell_trigger_price", *DIAG_EXTRA_COLUMNS, *DIAG_CHIP_COLUMNS} <= cols
             # 存量行保留
             assert conn.execute(
                 text("SELECT name FROM portfolio_diag_results WHERE id='h1'")).scalar() == "浦发银行"
             # 新字段可写可读
             conn.execute(text(
                 "INSERT INTO portfolio_diag_results (run_id, code, action, conviction_pct,"
-                " conviction_level, conviction_text, take_profit_price, game_v, game_s, game_text)"
-                " VALUES ('r2', '000001', 'sell', 66.5, '中', '逆势', 12.3, 0.1, 0.2, 'g')"))
+                " conviction_level, conviction_text, take_profit_price, game_v, game_s, game_text,"
+                " buy_ref_price, sell_target_price, buy_invalid_price, level_note)"
+                " VALUES ('r2', '000001', 'sell', 66.5, '中', '逆势', 12.3, 0.1, 0.2, 'g',"
+                " 13.5, 14.5, 12.1, '近 60 日筹码主峰')"))
             row = conn.execute(text(
                 "SELECT conviction_pct, conviction_level, conviction_text, take_profit_price,"
-                " game_v, game_s, game_text FROM portfolio_diag_results WHERE run_id='r2'")).one()
-            assert tuple(row) == (66.5, "中", "逆势", 12.3, 0.1, 0.2, "g")
+                " game_v, game_s, game_text, buy_ref_price, sell_target_price,"
+                " buy_invalid_price, level_note FROM portfolio_diag_results WHERE run_id='r2'")).one()
+            assert tuple(row) == (66.5, "中", "逆势", 12.3, 0.1, 0.2, "g",
+                                  13.5, 14.5, 12.1, "近 60 日筹码主峰")
     finally:
         engine.dispose()
 
@@ -123,7 +131,7 @@ async def test_create_all_twice_upgrades_old_diag_db(tmp_path):
             cols = await conn.run_sync(
                 lambda c: {x["name"] for x in inspect(c).get_columns("portfolio_diag_results")}
             )
-            assert {"sell_trigger_price", *DIAG_EXTRA_COLUMNS} <= cols
+            assert {"sell_trigger_price", *DIAG_EXTRA_COLUMNS, *DIAG_CHIP_COLUMNS} <= cols
     finally:
         dbb._engine = prev
         await engine.dispose()

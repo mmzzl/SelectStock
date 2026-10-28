@@ -4,8 +4,8 @@ import { ref, computed } from "vue";
 import { onShow } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
 import { convictionHead, convictionLevelClass, convictionLevelText, convictionNote,
-         dayRankText, gameText, hasConviction, priceStampText, sellTriggerText, takeProfitText,
-         toHoldingRow, toPnlView } from "../../logic/view.js";
+         buyLevelText, dayRankText, gameText, hasConviction, levelNoteText, priceStampText,
+         sellTriggerText, takeProfitText, toHoldingRow, toPnlView } from "../../logic/view.js";
 
 const rows = ref([]); const loading = ref(false); const err = ref("");
 const summary = ref(null);           // 来自 /holdings/pnl 的 summary，前端不做加总
@@ -143,6 +143,8 @@ const goTrades = () => uni.navigateTo({ url: "/pages/trades/index" });
                 <text v-if="convictionLevelText(r)" class="conv-lv" :class="convictionLevelClass(r)">{{ convictionLevelText(r) }}</text>
               </view>
               <text v-if="convictionNote(r)" class="conv-note">{{ convictionNote(r) }}</text>
+              <text v-if="buyLevelText(r)" class="conv-line chip">筹码价位 · {{ buyLevelText(r) }}</text>
+              <text v-if="levelNoteText(r)" class="conv-note">{{ levelNoteText(r) }}</text>
               <text v-if="sellTriggerText(r)" class="conv-line trig">止损 · {{ sellTriggerText(r) }}</text>
               <text v-if="takeProfitText(r)" class="conv-line tp">止盈 · {{ takeProfitText(r) }}</text>
               <text v-if="gameText(r)" class="conv-line game">{{ gameText(r) }}</text>

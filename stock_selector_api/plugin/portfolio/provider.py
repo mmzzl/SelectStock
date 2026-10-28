@@ -31,13 +31,22 @@ class KlineProvider:
         self.natural_day = natural_day
         self.kline_dir = kline_dir
 
-    def latest_row(self, code: str) -> dict | None:
-        from portfolio.pricing import _code_file  # 复用文件名规则
+    def chip_levels(self, code: str, window: int = 60) -> dict | None:
+        """三档价位（主峰下沿/上沿 + 2×ATR 止损），口径与选股插件同一份 `chips.price_levels`。
 
-        if self.kline_dir is None:
-            p = _code_file(code)
-        else:
-            p = self.kline_dir / f"{code}.parquet"
+        必须在这里自己切 `date ≤ natural_day`：日线 parquet 18:00 才重建，诊断若切在昨天，
+        把今天的成交算进成本分布就是拿未来数据给今天定价。
+        """
+        df = self._history(code)
+        if df is None:
+            return None
+        from stock_selector.features.chips import price_levels
+
+        return price_levels(df.tail(window), window=window)
+
+    def _history(self, code: str) -> pd.DataFrame | None:
+        """date ≤ natural_day 的日线（升序）；文件缺失或没有落在切日之前的行时返回 None。"""
+        p = self._kline_file(code)
         if p is None or not Path(p).is_file():
             return None
         df = pd.read_parquet(p)
@@ -45,7 +54,20 @@ class KlineProvider:
         sub = df[df["date"] <= self.natural_day]
         if sub.empty:
             return None
-        last = sub.sort_values("date").iloc[-1]
+        return sub.sort_values("date")
+
+    def _kline_file(self, code: str):
+        from portfolio.pricing import _code_file  # 复用文件名规则
+
+        if self.kline_dir is None:
+            return _code_file(code)
+        return self.kline_dir / f"{code}.parquet"
+
+    def latest_row(self, code: str) -> dict | None:
+        df = self._history(code)
+        if df is None:
+            return None
+        last = df.iloc[-1]
         # 显式列清单 + 其余全带：显式那些缺了要能被发现（插件据此不给分），
         # 其余列（形态位等）带不带到都不影响判定正确性，但规则表达式要用就得在行里。
         row = {c: float(last[c]) for c in _INDICATOR_COLUMNS if c in last.index}

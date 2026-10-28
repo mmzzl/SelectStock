@@ -24,8 +24,10 @@ class SelectResultCreate(BaseModel):
     score: float | None = None
     rank_no: int | None = None
     risk_ex10_pp: float | None = None    # 买入风险分（百分点），闸门判不了时为 None
-    buy_ref_price: float | None = None       # 买点参考位（策略判据里的均线/箱沿）
+    buy_ref_price: float | None = None       # 买点参考位（策略判据里的均线/箱沿、筹码主峰下沿）
     buy_invalid_price: float | None = None   # 跌破它则本次信号失效
+    sell_target_price: float | None = None   # 第一止盈价（qlib 榜=筹码主峰上沿）
+    level_note: str = Field(default="", max_length=160)   # 这三档价位的口径，页面原样显示
     # 风控决策：内核风控放行后的最终口径，被拦下的票不会出现在这里。
     # 空串/None 表示这批结果是风控关闭时跑的（不能落成 0，0 是"建议买 0 股"）。
     risk_verdict: str = Field(default="", max_length=8)

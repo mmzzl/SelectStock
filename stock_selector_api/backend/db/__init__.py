@@ -63,6 +63,7 @@ def _ensure_select_result_columns(sync_conn) -> None:
                      ("price", "FLOAT"), ("score", "FLOAT"), ("rank_no", "INTEGER"),
                      ("risk_ex10_pp", "FLOAT"),
                      ("buy_ref_price", "FLOAT"), ("buy_invalid_price", "FLOAT"),
+                     ("sell_target_price", "FLOAT"), ("level_note", "VARCHAR(160) DEFAULT ''"),
                      ("risk_verdict", "VARCHAR(8) DEFAULT ''"),
                      ("risk_reason", "VARCHAR(512) DEFAULT ''"),
                      ("risk_shares", "INTEGER"), ("risk_amount", "FLOAT"),
@@ -76,7 +77,7 @@ def _ensure_select_result_columns(sync_conn) -> None:
 
 
 def _ensure_diag_result_columns(sync_conn) -> None:
-    """老库补列：portfolio_diag_results 承接插件反算的价格线 + 信念/博弈字段（幂等）。
+    """老库补列：portfolio_diag_results 承接插件反算的价格线 + 信念/博弈字段 + 筹码三档价位（幂等）。
 
     Mongo 无表结构（schemaless），新增字段由 schemas.PortfolioDiagResultCreate 白名单放行即可，
     本条 ALTER 仅作用于 sqlite。
@@ -91,7 +92,11 @@ def _ensure_diag_result_columns(sync_conn) -> None:
                      ("take_profit_price", "FLOAT"),
                      ("game_v", "FLOAT"),
                      ("game_s", "FLOAT"),
-                     ("game_text", "VARCHAR(512)")):
+                     ("game_text", "VARCHAR(512)"),
+                     ("buy_ref_price", "FLOAT"),
+                     ("sell_target_price", "FLOAT"),
+                     ("buy_invalid_price", "FLOAT"),
+                     ("level_note", "VARCHAR(160) DEFAULT ''")):
         if col not in cols:
             sync_conn.execute(text(f"ALTER TABLE portfolio_diag_results ADD COLUMN {col} {ddl}"))
 
