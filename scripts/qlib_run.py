@@ -60,13 +60,38 @@ QLIB_DIR = Path("/data/work/qlib_data/cn")
 CSV_DIR = Path("/data/work/qlib_data/csv")
 REPORT_DIR = Path("/data/work/SelectStock/data/qlib")
 LABEL_FMT = "Ref($close, -{h}) / Ref($close, -1) - 1"
+# 批次 U：把「什么时候进场」做成第二个维度。历史口径 entry=next（T+1 收盘买），
+# 特征日 T 收盘→T+1 收盘那段收益被标签丢掉；而 App 给的基准价就是 T 收盘价，用户实际是
+# T 收盘买进——entry=close 才是他真正在被优化的那一段（今天买、明天卖）。
+LABEL_CLOSE_FMT = "Ref($close, -{h}) / $close - 1"
+# 批次 W 之后补的第三条：entry=open ⇒ 分母是 **T+1 开盘价**。§37.12/§37.13 量出来
+# 「T 收盘→T+1 开盘」那段隔夜在宽人口上平均 −0.131%/日，而名单 17:30 才出、他根本拿不到那段
+# ⇒ entry=close 的标签里有一整条**交易不了的腿**在教模型学噪声。这条把目标钉死成能执行的那条腿：
+# H=1 就是 E1（明早开盘买、当天收盘看），H=2 是明早开盘买、后天收盘卖。
+LABEL_OPEN_FMT = "Ref($close, -{h}) / Ref($open, -1) - 1"
+# §37.15 批次 Y：同一个入场点（T+1 开盘）再切一刀，把目标从「涨多少」换成「涨不涨」。
+# loss="mse" 配 −1/0/+1 的标签 ⇒ 预测值 ≈ P(涨) − P(跌)，按分数排就是按明天红的概率排。
+# 除标签外与 W3（entry=open）一字不动，所以两臂的差只能归因到「幅度 vs 方向」这一个维度。
+LABEL_DIR_FMT = "Sign(" + LABEL_OPEN_FMT + ")"
+LABEL_ENTRIES = ("next", "close", "open", "dir")
 
 
-def label_formula(horizon: int = 5) -> str:
-    """T+1→T+H 的收益表达式。历史批次一律 H=5；批次 P 只改这一个数。"""
+def label_formula(horizon: int = 5, entry: str = "next") -> str:
+    """持有 H 天的收益表达式；entry 决定进场点是 T+1 收盘（历史口径）、T 收盘，还是 T+1 开盘。
+
+    entry="next"：T+1→T+H（历史批次 M/P/Q/R/S/T 全部是这个，别动默认值）。
+    entry="close"：T→T+H，即「信号日尾盘买、H 天后卖」——含 T→T+1 这段历史口径的死区。
+    entry="open"：T+1 开盘→T+H 收盘，即 §35.5 红线之后真正做得到的那条腿（E1/E2 口径）。
+    """
     if horizon < 1:
         raise ValueError(f"标签周期至少 1 天，收到 {horizon}")
-    return LABEL_FMT.format(h=horizon)
+    if entry not in LABEL_ENTRIES:
+        raise ValueError(f"入场口径只认 {LABEL_ENTRIES}，收到 {entry!r}")
+    if entry == "next" and horizon == 1:
+        raise ValueError("entry=next 时 H 至少为 2：H=1 会让分子分母都是 Ref($close,-1)，标签恒等于 0")
+    fmt = {"next": LABEL_FMT, "close": LABEL_CLOSE_FMT, "open": LABEL_OPEN_FMT,
+           "dir": LABEL_DIR_FMT}[entry]
+    return fmt.format(h=horizon)
 
 
 LABEL = label_formula(5)  # 历史读数口径；新代码请显式传 label，别依赖这个常量
@@ -436,6 +461,9 @@ def main() -> int:
     ap.add_argument("--label-horizon", type=int, default=5,
                     help="标签周期 H：T+1→T+H 的收益（默认 5 = 历史口径）。批次 P 用它比较 T+10/T+20；"
                          "改了它就是改训练目标，与历史读数不可直接比")
+    ap.add_argument("--label-entry", choices=list(LABEL_ENTRIES), default="next",
+                    help="入场口径：next=T+1 收盘买（历史批次全部如此，T→T+1 那段不在标签里）；"
+                         "close=信号日收盘就买（批次 U 用，对应 App 给的基准价与用户实际的尾盘买入）")
     ap.add_argument("--feature-set", choices=["base", "trend", "style", "full"], default="trend",
                     help="特征集：base=Alpha158 原味；trend=+批次N趋势列（历史可比口径）；"
                          "style=+批次O风格残余列；full=两者。线上打分永远是超集按 norm 列取数")
@@ -472,7 +500,7 @@ def main() -> int:
     if args.fixed_trees is not None and args.fixed_trees < 1:
         raise SystemExit(f"--fixed-trees 至少 1 棵，给了 {args.fixed_trees}")
     try:
-        label = label_formula(args.label_horizon)
+        label = label_formula(args.label_horizon, args.label_entry)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     run_id = args.run_id or pd.Timestamp.now().strftime("%Y%m%d-%H%M%S")
