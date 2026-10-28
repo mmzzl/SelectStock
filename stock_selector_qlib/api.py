@@ -20,6 +20,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from stock_selector.features import chips
 from stock_selector.models.result import SelectResult
 from stock_selector_qlib import artifacts, pref, serving
 
@@ -38,9 +39,45 @@ class RunRequest(BaseModel):
     topk: int | None = Field(default=None, ge=1, le=200, description="取前 N 只，缺省读 QLIB_TOPK")
 
 
-# qlib 只出横截面排序分：风险剔除层、判据买点、判据后验都在自研内核里，这里没有对应计算。
+# qlib 只出横截面排序分：风险剔除层、判据后验都在自研内核里，这里没有对应计算。
 # 必须显式声明而不是留 null：null 到 App 上是「—」或整行消失，使用者会把空白读成「没有风险」。
-_NA_FIELDS = ("risk_ex10_pp", "buy_ref_price", "buy_invalid_price", "posterior_verdict")
+# 2026-10-28：买点参考位/失效位从这里移出去了——现由近 60 日筹码主峰算（features/chips.py），
+# 单只票算不出时留空并写明原因，那是「判不出」而不是「不产」，两者在 na_fields 里必须分开。
+_NA_FIELDS = ("risk_ex10_pp", "posterior_verdict")
+
+
+def _level_fields(levels: dict | None, missing_reason: str | None) -> dict:
+    """把筹码价位块摊平成 extra 的扁平键（后端 _http_run 只认扁平键）。
+
+    三档全是**规则价**：买入=近 60 日筹码主峰下沿，第一止盈=主峰上沿，止损=买入价−2×ATR14。
+    口径句子必须随行返回——页面上光有三个数字，使用者会把它读成模型预测的价格。
+    """
+    if missing_reason:
+        return {"buy_ref_price": None, "sell_target_price": None, "buy_invalid_price": None,
+                "level_note": missing_reason}
+    if not levels:
+        return {"buy_ref_price": None, "sell_target_price": None, "buy_invalid_price": None,
+                "level_note": f"近 {serving.CHIP_WINDOW} 交易日历史不足（新上市或面板缺数），"
+                              f"算不出筹码主峰"}
+    note = chips.levels_note(levels)
+    return {"buy_ref_price": levels["buy_ref_price"],
+            "sell_target_price": levels["sell_target_price"],
+            "buy_invalid_price": levels["buy_invalid_price"],
+            "level_note": note}
+
+
+def _chip_levels(rows: list[dict]) -> tuple[dict, str | None]:
+    """按名单一次取回价位；整块失败时返回 (空表, 原因)，名单照常出。"""
+    symbols = [r["qlib_symbol"] for r in rows if r.get("qlib_symbol")]
+    # 模型榜的行用 date，偏好榜的行用 asof——同一个信号日，只是两条榜的行形状不同
+    day = next((r.get("date") or r.get("asof") for r in rows if (r.get("date") or r.get("asof"))), "")
+    if not symbols or not day:
+        return {}, None
+    try:
+        return serving.chip_levels(symbols, day), None
+    except Exception as exc:  # noqa: BLE001 - 展示层的缺数不能打断出票
+        logger.exception("筹码价位取数失败")
+        return {}, f"筹码价位没算出来（{type(exc).__name__}：{exc}）"
 
 
 def _label_horizon(label: str | None) -> int | None:
@@ -162,6 +199,7 @@ def _names_for(rows: list[dict]) -> dict[str, str]:
 
 def _model_rows(art, rows: list[dict]) -> list[dict]:
     label_map = _names_for(rows)
+    chip, chip_missing = _chip_levels(rows)
     h = _label_horizon(art.meta.get("label"))
     signal = f"预期{h}日收益排名" if h else "预期收益排名"
     out = []
@@ -195,6 +233,7 @@ def _model_rows(art, rows: list[dict]) -> list[dict]:
                 "universe": row["universe"],
                 "feature_count": art.meta.get("feature_count"),
                 "na_fields": list(_NA_FIELDS),
+                **_level_fields(chip.get(row["qlib_symbol"]), chip_missing),
             },
         ).to_dict())
     return out
@@ -203,6 +242,7 @@ def _model_rows(art, rows: list[dict]) -> list[dict]:
 def _pref_rows(rows: list[dict]) -> list[dict]:
     """热门偏好榜的行：分数是四路合成（0~1，和模型榜同口径），理由把四路各说一遍。"""
     label_map = _names_for(rows)
+    chip, chip_missing = _chip_levels(rows)
     out = []
     for row in rows:
         ex = row.get("extra") or {}
@@ -216,7 +256,8 @@ def _pref_rows(rows: list[dict]) -> list[dict]:
             price=row["price"],
             score=round(row["score"], 6),
             rank=row["rank"],
-            extra={**ex, "qlib_symbol": row["qlib_symbol"], "na_fields": list(_NA_FIELDS)},
+            extra={**ex, "qlib_symbol": row["qlib_symbol"], "na_fields": list(_NA_FIELDS),
+                   **_level_fields(chip.get(row["qlib_symbol"]), chip_missing)},
         ).to_dict())
     return out
 

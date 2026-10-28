@@ -749,3 +749,115 @@ def test_输入整路缺数时筛数要把缺的那路点出来(monkeypatch):
     monkeypatch.setattr(pref, "build_from_rows", fake_build)
     assert serving.latest_pref() == []
     assert serving.last_pref_stats()["data_missing"] == ["板块热度"]
+
+
+def test_名单每行带三档筹码价位(art_dir, monkeypatch):
+    """买入=近 60 日筹码主峰下沿、止盈=主峰上沿、止损=买入价−2×ATR（用户点名的口径）。
+
+    后端 `selection_service._http_run` 只认 extra 里的扁平键，所以这三档 + 一句口径必须
+    以平铺字段出现在 extra 里；少一个键，页面就是一个静默的空值。
+    """
+    from fastapi.testclient import TestClient
+
+    from stock_selector_qlib import api
+
+    monkeypatch.setenv("PREF_LIST", "off")
+    monkeypatch.setattr(artifacts, "MODEL_DIR", art_dir)
+    monkeypatch.setattr(serving, "latest_scores", lambda topk=30, refresh=False: [
+        {"code": "600000", "qlib_symbol": "SH600000", "date": "2026-10-16", "score_raw": 1.234,
+         "score": 0.99, "rank": 1, "price": 8.88, "universe": 300},
+    ])
+    monkeypatch.setattr(serving, "stock_names", lambda codes: {"600000": "浦发银行"})
+    monkeypatch.setattr(serving, "chip_levels", lambda symbols, date, window=serving.CHIP_WINDOW: {
+        "SH600000": {"buy_ref_price": 8.3, "sell_target_price": 9.1, "buy_invalid_price": 7.85,
+                     "chip_peak_low": 8.3, "chip_peak_high": 9.1, "atr14": 0.2253,
+                     "close": 8.88, "close_below_peak": False, "peak_gap_pct": 7.0,
+                     "peak_weight_pct": 41.2, "chip_window": 60}})
+
+    item = TestClient(api.app).post("/api/selector/run", json={"strategies": None}).json()["data"][0]
+    ex = item["extra"]
+    assert (ex["buy_ref_price"], ex["sell_target_price"], ex["buy_invalid_price"]) == (8.3, 9.1, 7.85)
+    assert "主峰" in ex["level_note"] and "8.3" in ex["level_note"]
+    # 算得出来的东西不能再挂在「本引擎不产」的声明里，否则页面会把它说成不给
+    assert "buy_ref_price" not in ex["na_fields"]
+    assert "buy_invalid_price" not in ex["na_fields"]
+    assert "risk_ex10_pp" in ex["na_fields"]           # 这两项确实还不产，声明照旧
+
+
+def test_主峰在现价上方时口径句要说明白挂不进(art_dir, monkeypatch):
+    """2026-10-28 实测：当日榜 30 只全部现价在主峰下方（002484 现价 34.40、买入参考 58.12）。
+
+    这种行只报三个数字会被读成「今天挂 58.12 就能买到」，而实际是等反弹进主峰才成交。
+    措辞由 `chips.levels_note` 单点生成，名单页/诊断页共用，这里钉住它真的走到了 extra。
+    """
+    from fastapi.testclient import TestClient
+
+    from stock_selector_qlib import api
+
+    monkeypatch.setenv("PREF_LIST", "off")
+    monkeypatch.setattr(artifacts, "MODEL_DIR", art_dir)
+    monkeypatch.setattr(serving, "latest_scores", lambda topk=30, refresh=False: [
+        {"code": "002484", "qlib_symbol": "SZ002484", "date": "2026-10-27", "score_raw": 1.234,
+         "score": 1.0, "rank": 1, "price": 34.40, "universe": 300},
+    ])
+    monkeypatch.setattr(serving, "stock_names", lambda codes: {"002484": "江海股份"})
+    monkeypatch.setattr(serving, "chip_levels", lambda symbols, date, window=serving.CHIP_WINDOW: {
+        "SZ002484": {"buy_ref_price": 58.12, "sell_target_price": 62.89,
+                     "buy_invalid_price": 51.98, "chip_peak_low": 58.12, "chip_peak_high": 62.89,
+                     "atr14": 3.0686, "close": 34.40, "close_below_peak": True,
+                     "peak_gap_pct": -40.81, "peak_weight_pct": 41.95, "chip_window": 60}})
+
+    ex = TestClient(api.app).post("/api/selector/run",
+                                  json={"strategies": None}).json()["data"][0]["extra"]
+    assert "现价在主峰下方 40.8%" in ex["level_note"]
+    assert len(ex["level_note"]) <= 160          # 后端列宽 VARCHAR(160)，超了会被截
+
+
+def test_历史不满六十日的那行只说算不出不编价(art_dir, monkeypatch):
+    """chip_levels 对这只票返回空（新上市/面板缺数）⇒ 三档价位是 None + 一句原因。
+
+    这里**不能**把键补成 0：0 元是一个真实的价位；也不能塞进 na_fields：那是「引擎压根不算」，
+    而事实是「算了但这只历史不够」——na_fields 当初就是为区分这两种空白而存在的。
+    """
+    from fastapi.testclient import TestClient
+
+    from stock_selector_qlib import api
+
+    monkeypatch.setenv("PREF_LIST", "off")
+    monkeypatch.setattr(artifacts, "MODEL_DIR", art_dir)
+    monkeypatch.setattr(serving, "latest_scores", lambda topk=30, refresh=False: [
+        {"code": "600000", "qlib_symbol": "SH600000", "date": "2026-10-16", "score_raw": 1.234,
+         "score": 0.99, "rank": 1, "price": 8.88, "universe": 300},
+    ])
+    monkeypatch.setattr(serving, "stock_names", lambda codes: {"600000": "浦发银行"})
+    monkeypatch.setattr(serving, "chip_levels", lambda symbols, date, window=serving.CHIP_WINDOW: {})
+
+    ex = TestClient(api.app).post("/api/selector/run", json={"strategies": None}).json()["data"][0]["extra"]
+    assert ex["buy_ref_price"] is None and ex["sell_target_price"] is None
+    assert ex["buy_invalid_price"] is None
+    assert "60" in ex["level_note"]                    # 说清为什么没有：近 60 交易日不够
+    assert ex["na_fields"] == list(api._NA_FIELDS)     # 声明表不变（不是「不产」，是这只判不出）
+
+
+def test_价位取数失败不能把整张名单带走(art_dir, monkeypatch):
+    """面板读不到是展示层的缺数：名单照常出，价位整块缺席并说明原因。"""
+    from fastapi.testclient import TestClient
+
+    from stock_selector_qlib import api
+
+    monkeypatch.setenv("PREF_LIST", "off")
+    monkeypatch.setattr(artifacts, "MODEL_DIR", art_dir)
+    monkeypatch.setattr(serving, "latest_scores", lambda topk=30, refresh=False: [
+        {"code": "600000", "qlib_symbol": "SH600000", "date": "2026-10-16", "score_raw": 1.234,
+         "score": 0.99, "rank": 1, "price": 8.88, "universe": 300},
+    ])
+    monkeypatch.setattr(serving, "stock_names", lambda codes: {"600000": "浦发银行"})
+
+    def boom(symbols, date, window=serving.CHIP_WINDOW):
+        raise RuntimeError("面板没起来")
+
+    monkeypatch.setattr(serving, "chip_levels", boom)
+    body = TestClient(api.app).post("/api/selector/run", json={"strategies": None}).json()
+    ex = body["data"][0]["extra"]
+    assert body["code"] == 0 and ex["buy_ref_price"] is None
+    assert ex["level_note"]                            # 缺数要当场说出来，不能留空白

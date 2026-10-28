@@ -590,6 +590,66 @@ def _closes(symbols: list[str], date: str) -> dict[str, float]:
             for inst, v in frame["$close"].items()}
 
 
+# 筹码成本分布的窗口：用户点名的「近 60 日筹码主峰」。价位口径见 stock_selector/features/chips.py
+CHIP_WINDOW = 60
+_PANEL_BAR_FIELDS = ("$high", "$low", "$close", "$amount")
+
+
+def _d_features(symbols: list[str], fields: list[str], beg: str, date: str) -> pd.DataFrame:
+    """面板读取的唯一接缝：qlib 的 `D` 要 init 之后才有 `features`，单测打桩就打这一层。"""
+    import qlib.data
+
+    return qlib.data.D.features(list(symbols), list(fields), start_time=beg, end_time=date)
+
+
+def panel_bars(symbols: list[str], date: str,
+               window: int = CHIP_WINDOW) -> dict[str, pd.DataFrame | None]:
+    """取「信号日及之前」window+1 根高/低/收/额，按票切好。
+
+    `end_time` 钉死在信号日：面板里已经写进明天的行时也不能多取一根，否则买入价就是用未来价
+    算的。多要的那一根给 ATR 的真实波幅当假想前收。缺数的行原样留着（NaN），由 chips 过滤。
+    """
+    cal = calendar()
+    i = cal.index(date) if date in cal else len(cal) - 1
+    beg = cal[max(0, i - window)]
+    frame = _d_features(list(symbols), list(_PANEL_BAR_FIELDS), beg, date)
+    if frame is None or frame.empty:
+        return {str(s): None for s in symbols}
+    wide = {field: frame[field].unstack("instrument").sort_index() for field in _PANEL_BAR_FIELDS}
+    out: dict[str, pd.DataFrame | None] = {}
+    for symbol in symbols:
+        inst = str(symbol)
+        cols = {}
+        for field in _PANEL_BAR_FIELDS:
+            block = wide[field]
+            cols[field.lstrip("$")] = block[inst] if inst in block.columns else pd.Series(
+                index=block.index, dtype=float)
+        df = pd.DataFrame(cols)
+        df["date"] = df.index.strftime("%Y-%m-%d")
+        df = df.tail(window + 1).reset_index(drop=True)
+        out[inst] = df if df["close"].notna().any() else None
+    return out
+
+
+def chip_levels(symbols: list[str], date: str,
+                window: int = CHIP_WINDOW) -> dict[str, dict]:
+    """逐票的三档价位（主峰下沿买 / 主峰上沿止盈 / 买入价−2ATR 止损）。
+
+    算不出来的票**直接从结果里缺席**（新上市、面板缺数、一字整段、止损算出非正数），
+    调用方按「没有价位」处理——不能给一个补出来的价。
+    """
+    from stock_selector.features import chips
+
+    out: dict[str, dict] = {}
+    for symbol, bars in panel_bars(list(symbols), date, window=window).items():
+        if bars is None:
+            continue
+        levels = chips.price_levels(bars, window=window)
+        if levels:
+            out[symbol] = levels
+    return out
+
+
 def _names_from_live(codes: list[str]) -> dict[str, str]:
     """腾讯现名快照（与 8002 那条链的剔 ST 判据同源）。取不到的代码不出现在结果里。"""
     from stock_selector.quote import tencent
