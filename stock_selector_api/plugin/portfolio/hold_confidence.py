@@ -82,6 +82,9 @@ def evaluate(action: str, row: dict, rules: dict) -> dict:
     c = payload.get("contract") or {}
     horizon = int(c.get("horizon_days") or 20)
     flat_th = float(c.get("flat_threshold_pct") or 3.0)
+    # 灾难尾巴那条尺子记在回放产物自己的 contract 里（`tail8_pct` 是历史字段名，后端/前端都读它，
+    # 改不动）：按 −8% 量的就写 8、按 −5% 量的就写 5，文案跟着数走，别照字段名念。
+    tail_th = float(c.get("tail_threshold_pct") or 8.0)
 
     if not (rules.get("sell_rules") or []):
         # 形态卖出规则被显式关掉了（active.json 给空列表）：「全部规则都不触发」这个状态压根不存在，
@@ -89,7 +92,7 @@ def evaluate(action: str, row: dict, rules: dict) -> dict:
         if action == "hold":
             return _no_pct("持有可信度：形态卖出规则已关闭、只剩成本灾难线，"
                            "「全部规则都不触发」这个状态无从定义")
-        return _rule_line(payload, rules, row, action, c, horizon, flat_th)
+        return _rule_line(payload, rules, row, action, c, horizon, flat_th, tail_th)
     if not _matches(payload, rules):
         return {"hold_confidence_pct": None,
                 "hold_confidence_text": "持有可信度：回放对应的是另一套卖出规则，暂不给数"}
@@ -97,7 +100,7 @@ def evaluate(action: str, row: dict, rules: dict) -> dict:
     if action in ("sell", "add"):
         # 判成 sell/add 时，「全部不触发」这个状态压根不成立，印它是自相矛盾；
         # 该印的是**响的那条规则**自己的事后表现
-        return _rule_line(payload, rules, row, action, c, horizon, flat_th)
+        return _rule_line(payload, rules, row, action, c, horizon, flat_th, tail_th)
 
     joint = payload.get("joint_hold") or {}
     pct = payload.get("hold_confidence_pct")
@@ -115,11 +118,12 @@ def evaluate(action: str, row: dict, rules: dict) -> dict:
         "hold_confidence_rule_set": payload.get("name") or "",
         "hold_confidence_at": payload.get("computed_at") or "",
     }
-    out["hold_confidence_text"] = _hold_text(out, joint, horizon, flat_th)
+    out["hold_confidence_text"] = _hold_text(out, joint, horizon, flat_th, tail_th)
     return out
 
 
-def _hold_text(info: dict, joint: dict, horizon: int, flat_th: float) -> str:
+def _hold_text(info: dict, joint: dict, horizon: int, flat_th: float,
+               tail_th: float) -> str:
     """一行话：绝对数 + 基准 + 区分度 + 样本量，四样缺一不可。"""
     base = joint.get("base_pct")
     lift = joint.get("lift")
@@ -133,13 +137,13 @@ def _hold_text(info: dict, joint: dict, horizon: int, flat_th: float) -> str:
     bits.append(f"N={int(info.get('hold_confidence_n') or 0):,}/{info.get('hold_confidence_days') or 0}日")
     tail8, tail8_lift = joint.get("tail8_pct"), joint.get("tail8_lift")
     if tail8 is not None:
-        bits.append(f"20日内跌超8% {tail8:.1f}%"
+        bits.append(f"20日内跌超{tail_th:g}% {tail8:.1f}%"
                     + (f"（lift {tail8_lift:.2f}）" if tail8_lift is not None else ""))
     return "｜".join(bits)
 
 
 def _rule_line(payload: dict, rules: dict, row: dict, action: str, c: dict,
-               horizon: int, flat_th: float) -> dict:
+               horizon: int, flat_th: float, tail_th: float) -> dict:
     """判成 sell/add 时印**那条响了的规则**自己的事后表现：兑现率/卖飞率/尾部/样本量。
 
     卖出规则的「兑现」= 触发后 20 日收盘真的跌过 −3%（就是 100 −「未跌超」占比），「卖飞」=
@@ -178,7 +182,7 @@ def _rule_line(payload: dict, rules: dict, row: dict, action: str, c: dict,
             bits.append(f"20日比同日「未触发」{exc:+.2f}pp")
     tail8, lift, base_tail = stats.get("tail8_pct"), stats.get("tail8_lift"), stats.get("base_tail8_pct")
     if tail8 is not None:
-        tail = f"跌超8% {tail8:.1f}%"
+        tail = f"跌超{tail_th:g}% {tail8:.1f}%"
         if lift is not None and base_tail is not None:
             tail += f"（基准 {base_tail:.1f}%，lift {lift:.2f}）"
         bits.append(tail)

@@ -159,6 +159,28 @@ def test_hold_gives_joint_state_number_with_base_and_lift(monkeypatch, tmp_path)
     assert "N=40,106" in text
 
 
+def test_tail_wording_uses_the_threshold_the_replay_actually_used(monkeypatch, tmp_path):
+    """「20日内跌超 N%」里的 N 必须来自回放产物自己声明的口径，不能在文案里写死 8。
+
+    灾难线 2026-10-28 从 8% 改成 5%，`tail8_pct` 这个字段名是历史遗留（后端/前端都读它），
+    真正的尺子记在 `contract.tail_threshold_pct`。文案跟着字段名走就会把 −5% 的数说成 −8%。
+    """
+    import json
+
+    p = _payload(contract=dict(_payload()["contract"], tail_threshold_pct=5.0))
+    f = tmp_path / "post.json"
+    f.write_text(json.dumps(p, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("RULESET_POSTERIOR_FILE", str(f))
+    assert "跌超5%" in hold_confidence.evaluate("hold", ROW, _RULES)["hold_confidence_text"]
+    assert "跌超5%" in hold_confidence.evaluate("sell", ROW, _RULES)["hold_confidence_text"]
+    # 老产物没写这一项：它确实是按 −8% 量的，退回首 8 才是真话
+    legacy = _payload(contract={k: v for k, v in _payload()["contract"].items()
+                                if k != "tail_threshold_pct"})
+    f.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+    hold_confidence._cache = None
+    assert "跌超8%" in hold_confidence.evaluate("hold", ROW, _RULES)["hold_confidence_text"]
+
+
 def test_sample_too_small_refuses_to_print_a_number(monkeypatch, tmp_path):
     import json
 

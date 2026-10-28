@@ -51,9 +51,13 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+# 插件目录当 import 根（和 8001/8002 起进程时一致），灾难线的尺子要从那里读
+if str(ROOT / "stock_selector_api" / "plugin") not in sys.path:
+    sys.path.insert(0, str(ROOT / "stock_selector_api" / "plugin"))
 
 from stock_selector.backtest import rule_expr, rule_gates  # noqa: E402
 from stock_selector.conviction import bucket  # noqa: E402
+from portfolio.rules import load_rules  # noqa: E402
 
 KLINE_DIR = ROOT / "data" / "stock_kline"
 ACTIVE_FILE = ROOT / "data" / "rules" / "active.json"
@@ -68,7 +72,10 @@ FWD_SHORT = 10
 FWD_LONG = 20
 FLAT_GAIN = -0.03             # 「未出现显著下跌」= 未来 20 根收盘最低点相对今天 > −3%
 FLY_GAIN = 0.03               # 卖飞 = 触发后 20 日收盘涨过 +3%
-TAIL8, TAIL12 = -0.08, -0.12  # 灾难口径：未来 20 根内最低价相对今天的回撤
+TAIL8, TAIL12 = -float(load_rules()["disaster_stop_pct"]) / 100.0, -0.12
+# 灾难口径：未来 20 根内最低价相对今天的回撤。第一条跟着线上 `disaster_stop_pct`（2026-10-28
+# 用户点名 −5%，之前这里写死 −0.08 跟 active.json 分叉过）；第二条固定深尾，为了和历史读数对照。
+DISASTER_TAG = f"≤−{abs(TAIL8) * 100:g}%"   # 打印用的口径标签；字段名仍叫 tail8，别照着名字读
 MIN_STATE_N = 200             # 用户定的置信下限：联合状态样本不足就不给数字
 MIN_STATE_DAYS = 30           # 交易日太少时，lift 是几天行情撑起来的，也不算数
 HIST_LO_PP, HIST_STEP = -30.0, 0.5   # 20 日收益的粗直方图，只为算中位数
@@ -532,11 +539,11 @@ def _line(name: str, r: dict, base: dict | None = None) -> str:
     tail = ""
     if "lift" in r:
         tail = (f"  基准{r['base_pct']:.2f}% lift {r['lift']:.3f} t={r['vs_base_t']} "
-                f"超额20 {r['exc20_pp']:+.2f}pp 尾8 lift {r['tail8_lift']:.2f}")
+                f"超额20 {r['exc20_pp']:+.2f}pp 尾部 lift {r['tail8_lift']:.2f}")
     med = r.get("median_ret_pct")
     return (f"  {name:24s} n={r['n']:>11,}/{r['days']:>5,}日  "
             f"未跌超3% {r['flat_pct']:6.2f}%  卖飞 {r['fly_pct']:5.2f}%  "
-            f"≤−8% {r['tail8_pct']:5.2f}%  转卖 {r['flip_sell_20_pct']:5.1f}%  "
+            f"{DISASTER_TAG} {r['tail8_pct']:5.2f}%  转卖 {r['flip_sell_20_pct']:5.1f}%  "
             f"20日中位 {med:+.2f}%" + tail)
 
 

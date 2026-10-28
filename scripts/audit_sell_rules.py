@@ -14,13 +14,14 @@
 口径：
 - 触发：与插件 `judge_holding` 同一条串，`close <= ma10 * 0.95`；
 - 收益：T+10 / T+20 交易日收盘收益（不含成本）；
-- 灾难：未来 20 根内（不含当天）最低价相对 today close 的回撤 ≤ −8%（对齐灾难线口径），
-  另给 ≤ −12% 的深尾；
+- 灾难：未来 20 根内（不含当天）最低价相对 today close 的回撤 ≤ 线上灾难线（读 `load_rules()`，
+  2026-10-28 起为 −5%；之前这里写死 −8%，跟 active.json 分叉过），另给 ≤ −12% 的深尾；
 - 兑现率：触发后 T+20 收盘 < 0 的比例；卖飞率：触发后 T+20 收盘 > +3% 的比例；
 - 时代：日期三分位（早/中/近）；抽样：代码序号对半切；两轴都要同号才敢当结论。
 
 局限（不是 bug，是量不到的东西）：
-- 灾难线 −8% 要成本价，全市场没有「假想成本价」，所以这里量的是**价格回撤**，不是浮亏；
+- 灾难线要成本价，全市场没有「假想成本价」，所以这里量的是**价格回撤**，不是浮亏；
+  阈值与线上 `disaster_stop_pct` 同步（见 TAIL_LINES），改尺子不用改这里；
 - 台账里 hold 有 46% 在 20 日内自己变成 sell（`flip_sell_20`），「没有警报」并不是一个稳定状态，
   这一点比任何单个概率都更接近「持有可信度」的真相。
 
@@ -44,8 +45,12 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+# 插件目录当 import 根（和 8001/8002 起进程时一致），灾难线要从那里读
+if str(ROOT / "stock_selector_api" / "plugin") not in sys.path:
+    sys.path.insert(0, str(ROOT / "stock_selector_api" / "plugin"))
 
 from stock_selector.conviction import bucket  # noqa: E402
+from portfolio.rules import load_rules  # noqa: E402
 
 KLINE_DIR = ROOT / "data" / "stock_kline"
 LOG_DIR = ROOT / "logs"
@@ -55,7 +60,13 @@ FWD_SHORT = 10
 FWD_LONG = 20
 SELL_RULE = "close <= ma10 * 0.95"      # 与 portfolio/rules.py DEFAULT_SELL_RULE 同形（price≡close）
 FLIP_GAIN = 0.03                         # 「卖飞」= 触发后 20 日反涨超过这个
-TAIL_LINES = (-0.08, -0.12)              # 灾难口径：未来 20 日内最深回撤阈值
+# 灾难口径（未来 20 日内最深回撤阈值）第一条读**线上生效的规则集**：2026-10-28 用户点名 −5%，
+# 这里再抄一份常量就还会分叉（之前正是脚本写 −0.08、active.json 写 8.0，改一处漏一处）。
+# 第二条是固定深尾，留着为了和历史读数对照。字段名仍叫 tail8（后端/前端/回放产物都读它），
+# 打印的百分比一律用 DISASTER_PCT，不写死。
+DISASTER_PCT = float(load_rules()["disaster_stop_pct"])
+TAIL_LINES = (-DISASTER_PCT / 100.0, -0.12)
+DISASTER_TAG = f"≤−{DISASTER_PCT:g}%"     # 打印用的口径标签，跟着上面的尺子走
 MIN_CELL = 3000
 
 logger = logging.getLogger("audit_sell_rules")
@@ -168,7 +179,7 @@ def cell(sub: pd.DataFrame) -> dict:
 def fmt(name: str, r: dict, base: dict) -> str:
     return (f"  {name:22s} n={r['n']:9,}  T+10 {r['fwd10']:+6.2f}%  超额10 {r['exc10']:+6.2f}pp  "
             f"超额20 {r['exc20']:+6.2f}pp  20日跌 {r['down20']:5.1f}%  卖飞 {r['flip20']:5.1f}%  "
-            f"≤−8% {r['tail8']:5.2f}% (lift {r['tail8'] / base['tail8']:4.2f})  "
+            f"{DISASTER_TAG} {r['tail8']:5.2f}% (lift {r['tail8'] / base['tail8']:4.2f})  "
             f"≤−12% {r['tail12']:5.2f}% (lift {r['tail12'] / base['tail12']:4.2f})")
 
 
@@ -208,7 +219,7 @@ def report(df: pd.DataFrame) -> None:
                 sub = df[(df["state"] == st) & (df[col] == i)]
                 if len(sub) >= MIN_CELL:
                     r = cell(sub)
-                    parts.append(f"{nm}:超额{r['exc20']:+.2f}pp/≤−8%{r['tail8']:.2f}%")
+                    parts.append(f"{nm}:超额{r['exc20']:+.2f}pp/{DISASTER_TAG}{r['tail8']:.2f}%")
             logger.info("  %-5s %-8s %s", st, col, "  ".join(parts))
 
     logger.info("—— sell 态按板块（基金波动几何不同，别和股票混）——")
@@ -226,8 +237,8 @@ def report(df: pd.DataFrame) -> None:
 
     hold, sell = df[df["state"] == "hold"], df[df["state"] == "sell"]
     logger.info("════ 结论读数 ════")
-    logger.info("  hold 相对全体：超额20 %+0.2fpp，灾难率(≤−8%%) %.2f%% vs 基准 %.2f%%（lift %.2f）",
-                cell(hold)["exc20"], cell(hold)["tail8"], base["tail8"],
+    logger.info("  hold 相对全体：超额20 %+0.2fpp，灾难率(%s) %.2f%% vs 基准 %.2f%%（lift %.2f）",
+                cell(hold)["exc20"], DISASTER_TAG, cell(hold)["tail8"], base["tail8"],
                 cell(hold)["tail8"] / base["tail8"])
     logger.info("  sell 相对 hold：超额20 %+0.2fpp，灾难率 %.2f%% vs %.2f%%（lift %.2f）",
                 cell(sell)["exc20"] - cell(hold)["exc20"], cell(sell)["tail8"],

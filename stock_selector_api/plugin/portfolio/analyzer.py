@@ -31,6 +31,7 @@ def analyze_holdings(holdings: list[dict], provider, quotes: dict | None = None)
         if row is None:
             base["action"] = "hold"
             base["action_reason"] = "行情缺失，维持原判不做交易建议"
+            base.update(_chip_block(provider, h["code"]))
             results.append(base)
             continue
         qty = int(h["quantity"])
@@ -49,10 +50,39 @@ def analyze_holdings(holdings: list[dict], provider, quotes: dict | None = None)
         base["holding_pnl"] = round((base["latest_price"] - cost) * qty, 2)
         base["pnl_pct"] = round(((base["latest_price"] - cost) / cost * 100), 2) if cost > 0 else 0.0
         base.update(hold_confidence.evaluate(base["action"], row, rules))
+        base.update(_chip_block(provider, h["code"]))
         base["suggestion"] = _conviction_line(base, cost, qty,
                                               form_sell_closed=form_sell_closed)
         results.append(base)
     return {"results": results, "summary": summarize(results)}
+
+
+def _chip_block(provider, code: str) -> dict:
+    """三档价位（买入=近 60 日筹码主峰下沿、止盈=主峰上沿、止损=买入−2×ATR），口径随行返回。
+
+    provider 不支持（老 FakeProvider、行情读取失败）时给 None + 一句原因：价位是展示块，
+    不能因为它把整单诊断带崩，也不能留空让使用者读成「这只没有止损」。
+    """
+    fn = getattr(provider, "chip_levels", None)
+    levels = None
+    if fn is not None:
+        try:
+            levels = fn(code)
+        except Exception:  # noqa: BLE001 - 展示层缺数不打断诊断
+            logger.exception("筹码价位计算失败：%s", code)
+            return {"buy_ref_price": None, "sell_target_price": None,
+                    "buy_invalid_price": None,
+                    "level_note": "筹码价位没算出来（行情读取失败）"}
+    if not levels:
+        return {"buy_ref_price": None, "sell_target_price": None, "buy_invalid_price": None,
+                "level_note": "近 60 交易日历史不足（新上市或行情缺数），算不出筹码主峰"}
+    from stock_selector.features import chips
+
+    note = chips.levels_note(levels)
+    return {"buy_ref_price": levels["buy_ref_price"],
+            "sell_target_price": levels["sell_target_price"],
+            "buy_invalid_price": levels["buy_invalid_price"],
+            "level_note": note}
 
 
 def _conviction_line(base: dict, cost: float, qty: int, *,

@@ -229,7 +229,7 @@ curl -s "http://localhost:8000/api/portfolio/runs?user_id=u_1001&page=1&size=20"
 
 #### 形态买卖规则的停用与恢复（2026-10-17）
 
-线上现在**只有成本灾难线（−8%）在判 sell**，形态类的卖出/加仓规则全部关着。理由：两条占位规则
+线上现在**只有成本灾难线（−5%，2026-10-28 用户点名）在判 sell**，形态类的卖出/加仓规则全部关着。理由：两条占位规则
 （`sell = price <= ma10*0.95`、`add = close >= ma5*1.03 and rsi14 <= 65`）零标定、常数抄自测试夹具，
 没有任何回放证据支撑，先停用再说。
 
@@ -259,7 +259,7 @@ curl -s http://localhost:8001/api/portfolio/analyze -H 'Content-Type: applicatio
   | python3 -c 'import json,sys; d=json.load(sys.stdin)["results"][0]; print(d["action"], d.get("sell_trigger_price"), d["suggestion"])'
 ```
 
-（把 `cost_price` 换成 600519 的现价附近，让它落在 hold；浮亏超过 8% 就会由灾难线判成 sell。）
+（把 `cost_price` 换成 600519 的现价附近，让它落在 hold；浮亏超过 5% 就会由灾难线判成 sell。）
 
 注意管理页在 `rule_set_id: null` 时显示「未应用任何规则集」，而线上其实在用这份手写文件——页面读数
 不等于运行时状态。台账 `scripts/build_judgement_ledger.py` 每晚 19:00 重建后，规则关着会让 hold 那一格

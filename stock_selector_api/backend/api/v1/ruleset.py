@@ -24,7 +24,7 @@ class RuleItemIn(BaseModel):
 class RuleSetIn(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     remark: str = Field(default="", max_length=200)
-    disaster_stop_pct: float = Field(default=8.0, ge=1.0, le=30.0)
+    disaster_stop_pct: float = Field(default=5.0, ge=1.0, le=30.0)
     sell_conditions: list[RuleItemIn] = Field(default_factory=list)
     add_conditions: list[RuleItemIn] = Field(default_factory=list)
 

@@ -20,7 +20,7 @@ class RuleSet(Base, IdMixin, TimestampMixin):
 
     name: Mapped[str] = mapped_column(String(64), nullable=False)
     remark: Mapped[str] = mapped_column(String(200), default="")
-    disaster_stop_pct: Mapped[float] = mapped_column(Float, default=8.0)
+    disaster_stop_pct: Mapped[float] = mapped_column(Float, default=5.0)
     sell_conditions: Mapped[str] = mapped_column(Text, default="[]")   # JSON: [{label, conditions:[...]}]
     add_conditions: Mapped[str] = mapped_column(Text, default="[]")
     sell_expr: Mapped[str] = mapped_column(Text, default="")

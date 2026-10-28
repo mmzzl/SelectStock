@@ -191,7 +191,8 @@ async def create_rule_set(body: dict, user_id: str) -> dict:
     data = {
         "name": str(body.get("name") or "").strip(),
         "remark": str(body.get("remark") or "")[:200],
-        "disaster_stop_pct": float(body.get("disaster_stop_pct") or 8.0),
+        # −5% 是用户 2026-10-28 点名的灾难线口径（与插件 portfolio/rules.py 常量一致）
+        "disaster_stop_pct": float(body.get("disaster_stop_pct") or 5.0),
         **compiled,
     }
     if not data["name"]:
@@ -410,12 +411,12 @@ def options() -> dict:
     return {
         "fields": re_mod.fields_catalog(),
         "ops": list(re_mod.OPS),
-        "disaster": {"min": 1.0, "max": 30.0, "default": 8.0},
+        "disaster": {"min": 1.0, "max": 30.0, "default": 5.0},
         "max_rules": MAX_RULES_PER_SIDE,
         "max_conditions": MAX_CONDITIONS_PER_RULE,
         "active_file": {"exists": path.is_file(), "path": str(path)},
         "replay_contract": {"horizon_days": 20, "flat_threshold_pct": 3.0,
-                            "fly_threshold_pct": 3.0, "tail_threshold_pct": 8.0,
+                            "fly_threshold_pct": 3.0, "tail_threshold_pct": 5.0,
                             "min_samples": 200, "min_days": 30},
     }
 

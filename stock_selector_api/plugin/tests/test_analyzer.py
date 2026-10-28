@@ -170,8 +170,12 @@ def test_closed_ruleset_via_active_file(tmp_path, monkeypatch):
 
 
 def test_realtime_price_below_trigger_says_so():
-    """判定拿日线指标行（所以仍是 hold），价格线拿实时价（已破线）。这时不能写「在下方」反话。"""
-    holdings = [{"code": "600009", "name": "丁", "quantity": 100, "cost_price": 10.8}]
+    """判定拿日线指标行（所以仍是 hold），价格线拿实时价（已破线）。这时不能写「在下方」反话。
+
+    成本写 10.6 而不是 10.8：实时价 10.2 对 10.8 是浮亏 −5.6%，2026-10-28 灾难线收到 −5% 之后
+    那条线会先响、判成 sell，这条用例要测的「均线卖点已被跌破」那句话就轮不到了。
+    """
+    holdings = [{"code": "600009", "name": "丁", "quantity": 100, "cost_price": 10.6}]
     out = analyze_holdings(holdings, FakeProvider({"600009": _hold_row()}),
                            quotes={"600009": {"price": 10.2}})
     r = out["results"][0]
@@ -194,3 +198,53 @@ def test_missing_row_still_holds_without_inventing_numbers():
     out = analyze_holdings(holdings, FakeProvider({}))
     r = out["results"][0]
     assert r["action"] == "hold" and r["suggestion"] == ""
+
+
+class ChipProvider(FakeProvider):
+    """带筹码主峰价位的行情提供器（真实实现是 portfolio.provider.KlineProvider）。"""
+
+    def __init__(self, rows: dict, levels: dict):
+        super().__init__(rows)
+        self.levels = levels
+
+    def chip_levels(self, code: str) -> dict | None:
+        return self.levels.get(code)
+
+
+CHIP = {"600001": {"buy_ref_price": 8.6, "sell_target_price": 9.9, "buy_invalid_price": 7.2,
+                   "chip_window": 60, "atr14": 0.7, "peak_weight_pct": 33.0,
+                   "close": 9.0, "close_below_peak": False, "peak_gap_pct": 4.65}}
+# 现价已经跌出主峰下方（2026-10-28 当日榜 30 只全是这种）
+CHIP_BELOW = {"600001": {**CHIP["600001"], "close": 5.0, "close_below_peak": True,
+                         "peak_gap_pct": -41.86}}
+
+
+def test_诊断行带买入价与第一止盈价():
+    """持仓诊断也要给出那三档价（用户：「选股和诊断股票的时候，显示买入价格，卖出价格」）。"""
+    out = analyze_holdings(HOLDINGS, ChipProvider(ROWS, CHIP))
+    r = {x["code"]: x for x in out["results"]}["600001"]
+    assert r["buy_ref_price"] == 8.6
+    assert r["sell_target_price"] == 9.9      # 卖出价：近 60 日筹码主峰上沿
+    assert r["buy_invalid_price"] == 7.2
+    assert "筹码主峰" in r["level_note"] and "8.60" in r["level_note"]
+
+
+def test_诊断行的价位口径也带上主峰在现价上方那句():
+    """和名单页同一句措辞（`chips.levels_note`）：只给三个数字会被读成今天挂得进去。"""
+    r = {x["code"]: x for x in analyze_holdings(HOLDINGS, ChipProvider(ROWS, CHIP_BELOW))["results"]}["600001"]
+    assert "现价在主峰下方 41.9%" in r["level_note"]
+    assert len(r["level_note"]) <= 160
+
+
+def test_算不出主峰时价位留空且说明原因():
+    out = analyze_holdings(HOLDINGS, ChipProvider(ROWS, {}))
+    r = {x["code"]: x for x in out["results"]}["600001"]
+    assert r["buy_ref_price"] is None and r["sell_target_price"] is None
+    assert "60" in r["level_note"]           # 说清是「历史不够」，不是「没有这回事」
+
+
+def test_行情提供器不支持价位时诊断照常出():
+    """FakeProvider / 老库缺列时不能整单失败：价位是展示块，缺了就留空。"""
+    r = {x["code"]: x for x in analyze_holdings(HOLDINGS, FakeProvider(ROWS))["results"]}["600001"]
+    assert r["buy_ref_price"] is None and r["sell_target_price"] is None
+    assert r["level_note"]

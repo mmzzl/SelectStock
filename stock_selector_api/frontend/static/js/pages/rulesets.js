@@ -434,10 +434,12 @@
       '<b style="font-size:18px">' + esc(c[1]) + '</b></div>').join('') + '</div>';
   }
 
-  function ruleStats(list, kind) {
+  function ruleStats(list, kind, tailPct) {
     if (!list || !list.length) return '';
     const title = kind === 'sell' ? '卖出规则逐条回放' : '加仓规则逐条回放';
-    const head = ['规则', '触发样本', '交易日', '未跌超3%', '涨超3%', '跌超8%', '中位收益', '20日超额', '判定'];
+    // 尾巴那列的尺子跟着回放产物自己声明的口径走（2026-10-28 起 −5%，之前写死 8）
+    const head = ['规则', '触发样本', '交易日', '未跌超3%', '涨超3%',
+      '跌超' + (tailPct || 8) + '%', '中位收益', '20日超额', '判定'];
     const body = list.map((r) => {
       const verdict = !r.enough ? '<span class="vd no">样本不足</span>'
         : (isFlat(r) ? '<span class="vd no">无区分度</span>' : '<span class="vd ok">有区分度</span>');
@@ -470,13 +472,15 @@
         '</div>' + exprBlock(row);
     }
     const c = (opts && opts.replay_contract) || {};
+    // 尾巴那列的尺子跟着回放产物自己声明的口径走（2026-10-28 起 −5%，之前写死 8）
+    const tail = (p.contract && p.contract.tail_threshold_pct) || c.tail_threshold_pct || 8;
     return '<div class="hint">口径：观测窗 T+' + (c.horizon_days || 20) + ' 个交易日、日等权、' +
       '不含成本；样本门槛 N≥' + (c.min_samples || 200) + '、覆盖≥' + (c.min_days || 30) + ' 个交易日。' +
       esc(p.hold_confidence_note || '') + '</div>' + statCards(p) +
       '<div class="verdict"><b>持有可信度是什么</b><span class="hint">' +
       '历史上「全部卖出规则同时都不触发」的那些时点里，后 20 日没有跌破 −3% 的占比。' +
       '这是状态频率，不是个股预测；lift≈1 就等于「和随机挑一只没差别」。</span></div>' +
-      ruleStats(p.sell_rules, 'sell') + ruleStats(p.add_rules, 'add') + exprBlock(row);
+      ruleStats(p.sell_rules, 'sell', tail) + ruleStats(p.add_rules, 'add', tail) + exprBlock(row);
   }
 
   async function openDetail(row) {

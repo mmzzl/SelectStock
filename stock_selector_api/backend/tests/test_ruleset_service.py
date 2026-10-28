@@ -129,7 +129,7 @@ async def test_apply_writes_active_file_and_dispatches_replay(sent):
     assert payload["sell"] == "rsi14 > 90 or close <= ma10 * 0.95"
     # 插件按规则逐条判：label 要跟着走，否则告警文案只剩表达式
     assert [r["label"] for r in payload["sell_rules"]] == ["RSI 超买", "跌破 10 日线 5%"]
-    assert payload["disaster_stop_pct"] == 8.0
+    assert payload["disaster_stop_pct"] == 8.0      # _body() 显式填了 8.0，照 body 落库
     assert (await rule_sets_repo.get(row["id"]))["replay_status"] == "queued"
 
 
@@ -294,6 +294,24 @@ async def test_options_exposes_field_catalog():
     assert set(opt["ops"]) == {"<", "<=", ">", ">="}
     assert opt["replay_contract"]["min_samples"] == 200
     assert opt["active_file"]["path"] == svc.settings.active_rules_file
+
+
+async def test_disaster_default_is_the_minus_five_ruler(sent):
+    """没填灾难线就落 −5%：2026-10-28 用户点名全项目统一这把尺子，后端四处默认值原来是 8.0。
+
+    表单默认值（options）和新建落库（create→active.json）要一起走：只改一边，
+    管理页新建一条不填灾难线的规则集、点「应用」就会把线上的 5% 顶回 8%。
+    """
+    body = _body()
+    body.pop("disaster_stop_pct")
+    row = await svc.create_rule_set(body, "u1")
+    assert row["disaster_stop_pct"] == 5.0
+    await svc.apply_rule_set(row["id"], "u1")
+    payload = json.loads(svc.active_path().read_text(encoding="utf-8"))
+    assert payload["disaster_stop_pct"] == 5.0
+    opt = svc.options()
+    assert opt["disaster"]["default"] == 5.0
+    assert opt["replay_contract"]["tail_threshold_pct"] == 5.0
 
 
 async def test_snapshot_by_id_and_active(sent):
