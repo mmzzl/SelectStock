@@ -4604,3 +4604,48 @@ bare curl_cffi 7/15 对带 Cookie 14/15（refresh_em_cookie.py 头部 2026-10-20
 一发先探，开窗即串行全量 ≈ 6,904 支 × 0.45s ≈ 1.5–2h，日志 `logs/backfill_5m_amount.log`）；
 读数前提照 §38 那句：**amount 接上之前，分钟线批次预注册不动工**。
 
+## §39 线上换线 batchP_h10 → batchP_h5（2026-10-28 22:4x–23:0x，用户点名）
+
+### 39.1 需求原话（逐字存档）
+
+- 「10日持仓改成5日持仓收益吧，10日可能别人都完成好多次换手了」
+
+### 39.2 一致项与唯一旋钮
+
+训练命令照抄 `run_batchP_h10.json` 的线上款（`--pool-file model_live2026jun/pool.txt --universe 300
+--seed 7 --fixed-trees 141 --feature-set base`，训练 2016-01-01→2026-06-30、验证 07-01→07-31、
+测试 07-01→10-16），**唯一改动 `--label-horizon 10→5`**（`--label-entry next` 不变），
+`--skip-selection` 保证不碰任何名单产物。产物 `data/qlib/model_batchP_h5/` +
+`run_batchP_h5.json` + `pred/ic_daily_batchP_h5.*`，线上四文件仍由 `data/qlib/model/` 承担。
+
+### 39.3 两把尺的读数与裁决
+
+| 尺 | h10（原线上） | h5 | 判 |
+|---|---|---|---|
+| ic_valid rank_ic / t / 正日 | 0.1266 / 3.78 / 82.6% | 0.0353 / 0.78 / 56.5% | **不过** |
+| ic_test rank_ic / t / 正日 | 0.0861 / 4.51 / 70.1% | 0.0615 / 3.15 / 62.5% | 差一档 |
+| **头 30 已实现收益（T+1 收盘买→T+5 收盘卖，两臂同池同窗同投入，实现值不用各自标签）** | −1.298%/笔 | −0.809%/笔 | **差 +0.489pp，t(÷√5)=+7.33 → 过** |
+| 头 30 同窗 T+1→T+10 | −1.825%/笔 | −1.172%/笔 | 差 +0.653pp，t(÷√10)=11.64 |
+
+- 配对口径：300 池、72 个信号日（07-01→10-16）、每日各臂分数前 30、逐日差配对 ÷√H（§11）；
+  仪器 `scripts/qlib_h5_h10_pair.py`。整池单调性（rank_ic）与头部质量方向相反的这组读数
+  是本案的关键：App 名单只吃头部 30，不消费整池排序。
+- 裁决（写于看数之前的一条可拒绝门槛「rank_ic 量级保持 + t≥3 + 正日≥65%」之后）：
+  h5 的**整池单调性弱了一格**（ic_valid 明显差、正日不达标），但**按用户持有口径的头部
+  已实现收益在 H=5/H=10 两个位点都显著更好**，且 H=10 位点同号（长短持仓下 h5 都不输）。
+  用户点名拍板换线；整池单调性弱化如实记档，不当成了没发生。
+
+### 39.4 执行记录
+
+| 时刻 | 动作 | 回执 |
+|---|---|---|
+| 22:44 | `qlib_run.py … --label-horizon 5 --skip-selection --export-model model_batchP_h5` | EXIT=0，`exported_at 22:51:25` |
+| 23:0x | `cp model_batchP_h5/{model.txt,norm.npz,pool.txt,meta.json} data/qlib/model/` | md5 源=目的一致 |
+| 23:0x | `POST /api/admin/refresh` | `run_id=batchP_h5`，日历末 10-28 |
+| 23:0x | `/selector/rank?codes=002636` | ready=true，**新榜第 53/1273**（h10 下为 43） |
+
+- App 的 signal 文案由 meta 自动变「预期5日收益排名」；「预期10日超额」列是风险模型字段，不随本节变。
+- 硬回滚（一行）：`cp data/qlib/model_batchP_h10/{model.txt,norm.npz,pool.txt,meta.json} data/qlib/model/ && curl -X POST http://172.17.0.1:8003/api/admin/refresh`
+- W3 影子账不受影响：其「online」对照臂显式指向 `model_batchP_h10` 目录，换线后自动变成离线对照组。
+- 观察窗约定：以 T+5 已实现头部收益审视 20 个交易日，明显恶化 ⇒ 按上面一行回滚，不再调参救。
+
