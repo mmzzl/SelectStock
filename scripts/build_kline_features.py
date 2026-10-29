@@ -38,7 +38,9 @@ LOG_DIR = ROOT / "logs"
 logger = logging.getLogger("build_kline_features")
 
 KLINE_COLLECTION = "stock_kline"
-KLINE_FILTER = {"frequency": 9, "adjust": "qfq"}
+# 不按 adjust 过滤：那个标签历史上是错的（标 qfq、实为裸价，§48.1），而爬虫改标 raw 后
+# 继续按标签过滤会静默漏掉新行。价格口径由 stock_adj_factor 的因子台阶决定。
+KLINE_FILTER = {"frequency": 9}
 
 # 场内基金：15/16/18 是深市，50/51/52/53/55/56/58 是沪市（ETF、LOF、REITs、债券 ETF）
 FUND_PREFIXES = ("15", "16", "18", "50", "51", "52", "53", "55", "56", "58")

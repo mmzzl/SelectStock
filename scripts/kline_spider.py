@@ -85,7 +85,7 @@ def _parse_api_response(code: str, bars: List, source: str = "tencent") -> List[
             # newfqkline 的第 9 列有成交额，但只到万元两位小数，见 backfill_kline_amount.py）。
             "amount": None,
             "frequency": 9,
-            "adjust": "qfq",
+            "adjust": "raw",
             "source": source,
             "vol_unit": VOLUME_UNIT,
             "crawl_time": datetime.now().isoformat(),
@@ -96,7 +96,7 @@ def _parse_api_response(code: str, bars: List, source: str = "tencent") -> List[
 def _tencent_kline(code: str, count: int = TENCENT_MAX, retries: int = MAX_RETRIES) -> Optional[List[Dict]]:
     market = "bj" if code.startswith("8") else ("sh" if code.startswith(("6", "5")) else "sz")
     url = "https://ifzq.gtimg.cn/appstock/app/fqkline/get"
-    params = {"param": f"{market}{code},day,,,{count},qfq"}
+    params = {"param": f"{market}{code},day,,,{count}"}
     last_exc = None
     for attempt in range(1, retries + 1):
         try:
@@ -106,7 +106,8 @@ def _tencent_kline(code: str, count: int = TENCENT_MAX, retries: int = MAX_RETRI
             if not (d.get("data")):
                 return []
             data = list(d["data"].values())[0]
-            bars = data.get("qfqday") or data.get("day")
+            # 只认裸价那一组：静默回落 qfqday 会让同一天的两根 K 线来自两个复权基准（§48.1）
+            bars = data.get("day")
             if not bars or not isinstance(bars, list):
                 return []
             records = _parse_api_response(code, bars, source="tencent")
@@ -155,7 +156,7 @@ def _sina_kline(code: str, count: int = 200) -> Optional[List[Dict]]:
                 "volume": v,
                 "amount": None,      # sina 日线接口无成交额，同 _parse_api_response
                 "frequency": 9,
-                "adjust": "qfq",
+                "adjust": "raw",
                 "source": "sina",
                 "vol_unit": VOLUME_UNIT,
                 "crawl_time": datetime.now().isoformat(),

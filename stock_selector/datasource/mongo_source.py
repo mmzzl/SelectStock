@@ -1,6 +1,6 @@
 """MongoDB 日线数据源：直连 stock_kline 集合取最新行情。
 
-与 scripts/build_kline_features.py 读同一份数据（frequency=9 日线、adjust=qfq），
+与 scripts/build_kline_features.py 读同一份数据（frequency=9 日线，价是未复权裸价），
 索引 code_1_frequency_1_date_-1 支撑下单只查询约 10ms，全市场 5000+ 只约 1 分钟。
 
 仅提供基础 OHLCV 列（不含 talib 指标列）；指标/规则/模型类策略请用 parquet 源。
@@ -26,7 +26,6 @@ class MongoSource(BaseDataSource):
     config:
       host / port / database: 缺省读 stock_selector/config/config.yaml 的 mongodb 节
       frequency: 行情周期，默认 9（日线）
-      adjust: 复权方式，默认 qfq
       rows: 每只股票取最近 N 个交易日（均线/箱体类策略需要预热），默认 120
       codes_collection: 股票列表与名称来源集合，默认 bk_stocks
     """
@@ -38,7 +37,6 @@ class MongoSource(BaseDataSource):
         self.port = int(self.config.get("port") or mongo.get("port", 27017))
         self.database = self.config.get("database") or mongo.get("database", "eastmoney_news")
         self.frequency = int(self.config.get("frequency", 9))
-        self.adjust = self.config.get("adjust", "qfq")
         self.rows = int(self.config.get("rows", 120))
         self.codes_collection = self.config.get("codes_collection", "bk_stocks")
         self._client = None
@@ -83,7 +81,7 @@ class MongoSource(BaseDataSource):
         return [{"code": code, "name": name} for code, name in sorted(seen.items())]
 
     def get_kline(self, code: str):
-        query = {"code": code, "frequency": self.frequency, "adjust": self.adjust}
+        query = {"code": code, "frequency": self.frequency}
         docs = list(
             self._db()["stock_kline"].find(query, PROJECTION).sort("date", -1).limit(self.rows)
         )

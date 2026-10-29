@@ -46,10 +46,11 @@ KLINE_DIR = ROOT / "data" / "stock_kline"
 OUT_DIR = ROOT / "data" / "stock_kline_holdout"
 POOL_FILE = ROOT / "data" / "actions" / "decision_samples.parquet"
 
-# 互补源：frequency=0 是日线（qfq），恰好覆盖 frequency=9 缺的那一段；两者都是「一日一行」
-SOURCE_FILTER = {"frequency": 0, "adjust": "qfq"}
+# 互补源：frequency=0 是日线，恰好覆盖 frequency=9 缺的那一段；两者都是「一日一行」、同为裸价
+# （库里的 adjust 标签过去写的是 qfq、实测价是裸价，见 §48.1，所以这里不按它过滤）
+SOURCE_FILTER = {"frequency": 0}
 RAW_COLUMNS = ["open", "high", "low", "close", "volume", "amount"]
-# 接缝跳变警戒：单日涨跌超过这个数就说明两个复权源对不上，得停下来人工看
+# 接缝跳变警戒：单日涨跌超过这个数就说明两批的来源对不上，得停下来人工看
 SEAM_JUMP_WARN = 0.11
 OVERLAP_CLOSE_TOL = 0.005       # 重叠日 close 相对差超过 0.5% 视为口径飘
 

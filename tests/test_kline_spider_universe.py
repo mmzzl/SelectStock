@@ -97,3 +97,65 @@ def test_both_sources_leave_amount_unknown(monkeypatch):
 
     bar = mod._parse_api_response("600519", [["2026-09-30", "10", "10.5", "11", "9", "28218"]])[0]
     assert bar["amount"] is None
+
+
+def test_tencent_source_asks_for_bare_prices_and_labels_raw(monkeypatch):
+    """库里 1,227 万行日线标着 `adjust:"qfq"`，实测价却是裸价（§48.1）——爬虫得老实标。
+
+    判据不是猜的：把 2025 年以来 2,405 个除权日（东财分红送配事件按交易所公式推的台阶）对上库里那天的价，
+    残差中位 +0.17%~+0.25%，而当天派息/送转的隐含跌幅中位是 0.87%~1.08%；真前复价的话残差会等于那个隐含
+    跌幅（假跌被复权吃掉、残差归零的是「复权后涨幅」而不是「裸价跌幅」）。所以库里存的就是裸价。
+    主源只准请求 `day`，并且只认 `day`——静默回落 `qfqday` 会让同一天的两根 K 线来自两个基准。
+    """
+    mod = _load_script()
+    sent = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": {"sh600519": {
+                "qfqday": [["2026-09-30", "8.0", "8.4", "8.6", "7.9", "30000"]],
+                "day": [["2026-09-30", "10.0", "10.5", "11.0", "9.0", "30000"]]}}}
+
+    def _get(url, params=None, timeout=None, **kw):
+        sent["param"] = params["param"]
+        return _Resp()
+
+    monkeypatch.setattr(mod.requests, "get", _get)
+    rec = mod._tencent_kline("600519")[0]
+    assert "qfq" not in sent["param"]              # 请求参数就要裸价
+    assert rec["close"] == 10.5                     # 取 day，不是 qfqday
+    assert rec["adjust"] == "raw"
+
+
+def test_tencent_source_without_bare_series_falls_back_to_sina(monkeypatch):
+    """只给 qfqday 的响应＝口径不对，宁可用备源，也不能悄悄写进复权价。"""
+    mod = _load_script()
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": {"sh600519": {"qfqday": [["2026-09-30", "8.0", "8.4", "8.6", "7.9", "3"]]}}}
+
+    monkeypatch.setattr(mod.requests, "get", lambda url, params=None, timeout=None, **kw: _Resp())
+    assert mod._tencent_kline("600519") in (None, [])
+
+
+def test_sina_source_labels_raw(monkeypatch):
+    """sina 的日线接口从来不复权，标 qfq 是跟着主源一起错的。"""
+    mod = _load_script()
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [{"day": "2026-09-30", "open": "10", "high": "11", "low": "9",
+                     "close": "10.5", "volume": "2501689"}]
+
+    monkeypatch.setattr(mod.requests, "get", lambda url, params=None, timeout=None, **kw: _Resp())
+    assert mod._sina_kline("600519")[0]["adjust"] == "raw"
