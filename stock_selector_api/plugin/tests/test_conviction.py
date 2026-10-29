@@ -52,10 +52,10 @@ def _reset(monkeypatch, tmp_path):
     """默认没有模型文件：每个用例自己决定要不要注入。"""
     monkeypatch.setenv("CONVICTION_MODEL_FILE", str(tmp_path / "missing.lgb.txt"))
     monkeypatch.setenv("CONVICTION_META_FILE", str(tmp_path / "missing.json"))
-    conviction._cache, conviction._cache_key = None, ()
+    conviction._cache, conviction._cache_key, conviction._arm_paths = None, (), ()
     conviction._package = _ORIG_PACKAGE
     yield
-    conviction._cache, conviction._cache_key = None, ()
+    conviction._cache, conviction._cache_key, conviction._arm_paths = None, (), ()
     conviction._package = _ORIG_PACKAGE
 
 

@@ -52,6 +52,7 @@ KLINE_DIR = ROOT / "data" / "stock_kline"
 MODEL_FILE = ROOT / "data" / "conviction" / "conviction_model.lgb.txt"
 DOWNSIDE_MODEL_FILE = ROOT / "data" / "conviction" / "downside_model.lgb.txt"
 META_FILE = ROOT / "data" / "conviction" / "conviction_model.json"
+CARRIED_ARMS = ("barrier",)          # 本脚本不训、但每晚写 meta 时要原样保留的臂（§50）
 LOG_DIR = ROOT / "logs"
 
 # 读样本表只要这些列：全量 10.66M 行，多读一列就把可用内存吃掉一截。
@@ -461,8 +462,36 @@ def main() -> None:
                 arm_d["iters"], meta["downside"]["base_rate_pct"],
                 arm_d["pooled"].get("auc", float("nan")))
 
-    Path(args.out_meta).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info("已写 %s", args.out_meta)
+    out_meta = Path(args.out_meta)
+    carried = carry_over_arms(meta, load_previous_meta(out_meta))
+    if carried:
+        logger.info("已把旧 meta 的 %s 臂原样带进新 meta（本脚本不训这臂）", "/".join(carried))
+    out_meta.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info("已写 %s", out_meta)
+
+
+def carry_over_arms(meta: dict, previous: dict | None) -> tuple[str, ...]:
+    """把「这次没训但线上要读」的臂从旧 meta 原样带过来，返回带了哪几个。
+
+    为什么必须有：定时任务每晚只重训上涨/下行两臂，而成本锚臂（§50）写的是同一个
+    conviction_model.json。插件的判据是 `meta["barrier"]` + 同目录模型文件——块一丢就静默
+    回退到「当日收盘 −10%」，也就是用户投诉的那个读数。缺数不能无声。
+    """
+    carried = []
+    for key in CARRIED_ARMS:
+        block = (previous or {}).get(key)
+        if block is not None and key not in meta:
+            meta[key] = block
+            carried.append(key)
+    return tuple(carried)
+
+
+def load_previous_meta(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:                      # 首次运行/半截文件：照常写新 meta，不连带挡住
+        logger.warning("旧 meta %s 读不到（%s），本次不携带其他臂", path.name, exc)
+        return {}
 
 
 def run_arm(x, label, day, seq, args, lgb, cutoff0, calib_from, tag: str) -> dict:

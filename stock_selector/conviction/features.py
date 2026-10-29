@@ -19,6 +19,7 @@ from stock_selector.conviction.bucket import classify_board
 
 NUMERIC_FEATURES = ["bias20", "pos60", "vol_ratio", "vol_z", "rsi14", "adx14", "atr_n", "lu"]
 FEATURES = [*NUMERIC_FEATURES, "board"]
+FEATURES_WITH_BARRIER = [*FEATURES, "barrier"]
 BOARD_COL = len(NUMERIC_FEATURES)          # row_to_vector 返回向量里 board 的下标
 REQUIRED_FEATURES = ("bias20", "pos60", "vol_ratio")
 
@@ -69,4 +70,16 @@ def row_to_vector(row: dict) -> tuple[list[float], bool]:
     vec = [(v if v is not None else float("nan")) for v in values]
     b = board_code(row)
     vec.append(float(b) if b is not None else float("nan"))
+    return vec, ok
+
+
+def row_to_vector_with_barrier(row: dict, barrier: float) -> tuple[list[float], bool]:
+    """成本锚臂（§50）的装配：`FEATURES` 之后**再挂一列 barrier**，列序即 FEATURES_WITH_BARRIER。
+
+    `barrier` = 「还要跌多少才碰到那条线」，相对现价（`1 − 线价/现价`）。训练时同一行样本复制
+    K 份、每份配一个网格上的 barrier，服务时喂成本换算出来的那个 x——两边的锚都是当日收盘，
+    所以这两侧的 (特征, barrier) 是同构的。这一列必须排在最后，否则 barrier 臂按错位打分（不报错）。
+    """
+    vec, ok = row_to_vector(row)
+    vec.append(float(barrier))
     return vec, ok

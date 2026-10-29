@@ -108,3 +108,30 @@ def test_upside_arm_unchanged_by_new_flag(tmp_path):
     df = mod.load_samples(path, set(), 10)                 # 默认 resolved_only=True
     assert len(df) == 4
     assert df["label"].tolist() == [1, 0, 0, 1]            # 中性行（label=-1）被剔
+
+
+# ---------------------------------------------------------------------------
+# 每晚重训写 meta 时不能把「这次没训的臂」抹掉（§50 成本锚臂由 train_barrier_model.py 训）
+# ---------------------------------------------------------------------------
+def test_carry_over_keeps_barrier_block():
+    """本脚本只重写上涨/下行两臂；barrier 块必须原样带进新 meta。"""
+    fresh = {"version": 2, "features": ["a"], "downside": {"version": 1}}
+    prev = {"barrier": {"model_file": "barrier_model.lgb.txt", "drop": 0.10}}
+    carried = mod.carry_over_arms(fresh, prev)
+    assert carried == ("barrier",)
+    assert fresh["barrier"] == prev["barrier"]
+
+
+def test_carry_over_never_clobbers_this_runs_block():
+    """同名块以本次为准（万一以后本脚本也训这臂，旧块不能盖掉新读数）。"""
+    fresh = {"barrier": {"model_file": "new.lgb.txt"}}
+    prev = {"barrier": {"model_file": "old.lgb.txt"}}
+    assert mod.carry_over_arms(fresh, prev) == ()
+    assert fresh["barrier"]["model_file"] == "new.lgb.txt"
+
+
+def test_carry_over_tolerates_missing_previous_meta():
+    """首次运行/旧文件损坏：不能因为拿不到旧 meta 就不写新 meta。"""
+    fresh = {"downside": {}}
+    assert mod.carry_over_arms(fresh, {}) == ()
+    assert mod.carry_over_arms(fresh, None) == ()
