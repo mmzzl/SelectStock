@@ -682,7 +682,7 @@ def test_板切片榜的契约与名次口径(monkeypatch, art_dir):
     assert item["name"] == "金安国纪" and "板后低吸" in item["signal"]
     assert "板内第 5 / 28 只当日板票（全榜第 104）" in item["reason"]
     ex = item["extra"]
-    assert (ex["buy_ref_price"], ex["buy_invalid_price"]) == (9.5, 9.05)
+    assert (ex["buy_ref_price"], ex["buy_invalid_price"]) == (9.5, None)
     assert ex["sell_target_price"] is None and "板后低吸" in ex["level_note"]
 
 
@@ -895,9 +895,10 @@ def test_价位取数失败不能把整张名单带走(art_dir, monkeypatch):
 
 
 def test_board_rows_swap_chip_levels_for_dip_rule(monkeypatch, art_dir):
-    """板票行（今日涨停）的价位块换成板后低吸规则价：买=今收×0.95、失效=×0.905、卖出无目标。
+    """板票行（今日涨停）的价位块换成板后低吸规则价：买=今收×0.95、不设失效线、卖出无目标。
 
-    用户 2026-10-28 拍板的交易语义（明天跌了买、涨了卖）；三个键复用 App 已消费的扁平键，
+    用户 2026-10-28 拍板的交易语义（明天跌了买、涨了卖），2026-10-29 点名取消「跌停一字买不进」
+    那条失效线；三个键复用 App 已消费的扁平键，
     板票行的筹码块不再出现——两套规则价不能同框打架；准板（9.52%<主板10%）仍走筹码块。
     """
     from fastapi.testclient import TestClient
@@ -924,7 +925,7 @@ def test_board_rows_swap_chip_levels_for_dip_rule(monkeypatch, art_dir):
     chip_row = next(r for r in data if r["code"] == "600252")["extra"]
     dip_row = next(r for r in data if r["code"] == "002636")["extra"]
     assert chip_row["buy_ref_price"] == 4.2 and "主峰" in chip_row["level_note"]   # 准板走筹码块
-    assert (dip_row["buy_ref_price"], dip_row["buy_invalid_price"]) == (9.5, 9.05)
+    assert (dip_row["buy_ref_price"], dip_row["buy_invalid_price"]) == (9.5, None)
     assert dip_row["sell_target_price"] is None            # 涨了就卖，无固定目标价
     assert "板后低吸" in dip_row["level_note"] and "涨停" in dip_row["level_note"]
     assert "板后低吸规则价" in next(r for r in data if r["code"] == "002636")["reason"]

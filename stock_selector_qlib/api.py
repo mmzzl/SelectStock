@@ -29,6 +29,7 @@ logger = logging.getLogger("qlib_plugin")
 
 STRATEGY = "qlib_alpha158"
 STRATEGY_BOARD = "qlib_boards"          # 板后低吸榜：今日板票 × 模型分板内名次（2026-10-29）
+STRATEGY_DIP = "qlib_dip"               # 低开买入榜：今日上涨票 × 事件臂（2026-10-29 用户点名口径）
 
 app = FastAPI(title="qlib 插件化量化选股系统", version="0.1.0")
 
@@ -87,33 +88,125 @@ def _label_horizon(label: str | None) -> int | None:
     return int(m.group(1)) if m else None
 
 
-_STRATEGY_DETAIL = {
+_STRATEGY_BASE = {
     "name": STRATEGY,
-    "description": "qlib Alpha158 因子 + LightGBM：预测未来 N 日横截面收益，按分数排名出名单（N 随线上模型 label，见 params.label_horizon）",
     "as_of": True,
     # 与 8002 不同：qlib 读自己的 bin 面板，不吃后端送来的日线，这两项只是元信息
     "required_columns": ["date", "open", "high", "low", "close", "volume"],
     "required_rows": serving.WARMUP_DAYS,
-    "params": {"universe": 300, "warmup_days": serving.WARMUP_DAYS, "label": "由线上模型 meta 提供"},
-    # 本引擎不产这几项，逐条随名单一起声明（口径见 _NA_FIELDS）
     "na_fields": list(_NA_FIELDS),
 }
+
+_CROSS_SECTION_DESC = ("qlib Alpha158 因子 + LightGBM：预测未来 N 日横截面收益，按分数排名出名单"
+                       "（N 随线上模型 label，见 params.label_horizon）")
+
+
+def arm_wording(art) -> dict:
+    """这条臂自己的说法：人口闸门、买法、卖法、榜名。
+
+    三处文案（主榜详情、事件榜详情、行内价位块）必须**同源**——分叉过一次就是 §45.7 那个
+    「换臂没人记得改」的 bug：batchG_evt 训在涨 ≥+0.1%、batchH_r1 训在涨 ≥+5%，卖法一条是
+    「当天收盘无条件出」、一条是「拿着等涨、跌 5% 止损、上限 10 个交易日」。
+    """
+    meta = getattr(art, "meta", None) or {}
+    rule = meta.get("rule_spec")
+    spec = rule or meta.get("event_spec") or {}
+    min_chg = float(spec.get("min_chg", serving.DIP_MIN_CHG))
+    kind = "rule" if rule else ("event" if meta.get("event_spec") else "")
+    out = {
+        "kind": kind,
+        "label": {"rule": "低吸持有", "event": "低开买入"}.get(kind, ""),
+        "min_chg": min_chg,
+        "population": f"当日收盘涨幅 ≥+{min_chg * 100:.1f}%（与本臂训练人群同一条）",
+        "entry_rule": "明开 ≤ 今收 才买（低开即触发），按开盘价成交、开盘高于今收不追",
+        "invalid_rule": "不设失效线：开盘跌到任何位置都按规则价挂单（涨跌停不挡单）",
+    }
+    if rule:
+        stop = float(spec.get("stop_pct", -0.05)) * 100
+        hold = int(spec.get("max_hold", 10))
+        out["exit_rule"] = (f"哪天收盘价高过买入价就哪天卖；一直不涨则跌 {abs(stop):.0f}% 止损；"
+                            f"最多持 {hold} 个交易日")
+    else:
+        out["exit_rule"] = "涨了就卖、收盘无条件出"
+    return out
+
+
+def main_detail(art) -> dict:
+    """主榜的说明跟着**线上模型自己是不是臂**。
+
+    §46 之前线上是 batchW_c3（全市场横截面），主榜说的是「谁最强」；换成低吸臂之后
+    `day_ranking` 在打分前就按闸门筛窄了人群，主榜回答的题变成了「今天这批上涨票里买哪只」，
+    继续挂那句「预测未来 N 日横截面收益」就是假话。
+    """
+    base = {**_STRATEGY_BASE,
+            "params": {"universe": {"source": serving.POOL_SOURCE,
+                                    "pool_size": len(serving.score_pool(art))},
+                       "warmup_days": serving.WARMUP_DAYS,
+                       "label": art.meta.get("label"),
+                       "label_horizon": _label_horizon(art.meta.get("label")),
+                       "model": art.run_id}}
+    w = arm_wording(art)
+    if not w["kind"]:
+        return {**base, "description": _CROSS_SECTION_DESC}
+    return {**base, "label": f"{w['label']}臂",
+            "description": (f"主榜＝{w['label']}臂（模型 {art.run_id} 只在「今天涨 → 明天低开买这一笔"
+                            "赚不赚钱」的训练行上拟合）：行=" + w["population"] + "且过两条护栏的票，"
+                            "名次=模型分在这批上涨票里的位次。回答的是「明天早上低开时买哪只、这笔该怎么拿」，"
+                            "不是全市场谁最强——所以跌票一律不上这条榜。行内价位块=低吸规则价："
+                            f"{w['entry_rule']}；不设失效线；{w['exit_rule']}。"),
+            "params": {**base["params"], "population": w["population"],
+                       "entry_rule": w["entry_rule"], "exit_rule": w["exit_rule"],
+                       "invalid_rule": w["invalid_rule"]}}
 
 _BOARD_DETAIL = {
     "name": STRATEGY_BOARD,
     "label": "板后低吸",
     "description": ("今日涨停票的模型分切片：行=当日涨停且过两条护栏的票，名次=模型分在板内的名次"
                     "（同一份线上模型自己的分数，换个人群切，不是人工塞票）。行内价位块=板后低吸规则价："
-                    "明早开盘≤今收×0.95（低开5%起）挂开盘价买、≤×0.905（≈跌停一字）放弃、"
-                    "买入后涨了就卖、收盘无条件出。"),
+                    "明早开盘≤今收×0.95（低开5%起）挂开盘价买、"
+                    "买入后涨了就卖、收盘无条件出；不设失效线（跌停一字开盘也照样挂单买）。"),
     "as_of": True,
     "required_columns": ["date", "open", "high", "low", "close", "volume"],
     "required_rows": serving.WARMUP_DAYS,
     "params": {"population": "当日涨停（base_columns.is_limit_up，主板10%口径）",
-               "invalid_rule": "开盘≤今收×0.905 放弃（跌停一字买不进）",
+               "invalid_rule": "不设失效线：开盘跌到任何位置都按规则价挂单（涨跌停不挡单）",
                "label": "由线上模型 meta 提供"},
     "na_fields": list(_NA_FIELDS),
 }
+
+
+_DIP_BASE = {
+    "name": STRATEGY_DIP,
+    "label": "低开买入",
+    "as_of": True,
+    "required_columns": ["date", "open", "high", "low", "close", "volume"],
+    "required_rows": serving.WARMUP_DAYS,
+    "na_fields": list(_NA_FIELDS),
+}
+
+
+def dip_detail(art) -> dict:
+    """低开买入榜的口径说明**跟着模型 meta 走**（判据都在 `arm_wording`，与主榜同源）。
+
+    两条臂共用一个入口、卖法却不一样：
+    - §44 事件臂（`event_spec`）：明开买、**当天收盘无条件出**；
+    - §45 低吸持有臂（`rule_spec`）：明开买开盘价、**哪天收盘高过买入价哪天卖**，
+      跌 `stop_pct` 止损、最多持 `max_hold` 个交易日（用户 2026-10-29 点名的原话）。
+    人口闸门同理：`min_chg` 是各自训练时用的那条（+0.1% / +5%），写死一条就会在换臂时骗人。
+    """
+    w = arm_wording(art)
+    description = (f"{w['label']}臂榜：行=今日上涨（收盘相对昨收 ≥+{w['min_chg'] * 100:.1f}%）"
+                   "且过两条护栏的票，名次=模型（只在「今天涨 → 明天低开买这一笔赚不赚钱」的训练行上拟合）的分。"
+                   "回答的是「明天早上低开时买哪只、这笔该怎么拿」，不是全市场谁最强——"
+                   "所以它只在上涨票里排，跌票一律不上这条榜。行内价位块=低吸规则价："
+                   f"明早开盘≤今收挂开盘价买、开盘高于今收不追；不设失效线；{w['exit_rule']}。")
+    return {**_DIP_BASE, "label": w["label"], "description": description,
+            "params": {"population": w["population"],
+                       "entry_rule": w["entry_rule"],
+                       "exit_rule": w["exit_rule"],
+                       "invalid_rule": w["invalid_rule"],
+                       "model": getattr(art, "run_id", ""),
+                       "label": (getattr(art, "meta", None) or {}).get("label", "")}}
 
 
 @app.get("/api/strategy/list")
@@ -121,24 +214,26 @@ def strategy_list():
     return {"code": 0, "data": _strategies()}
 
 
+
 @app.get("/api/strategy/detail")
 def strategy_detail():
-    # universe 不写死：放开全市场之后它是每天变的，报成 300 会把口径说错
-    art = artifacts.load()
-    h = _label_horizon(art.meta.get("label"))
-    _STRATEGY_DETAIL["params"]["universe"] = {
-        "source": serving.POOL_SOURCE,
-        "pool_size": len(serving.score_pool(art)),
-    }
-    _STRATEGY_DETAIL["params"]["label"] = art.meta.get("label")
-    _STRATEGY_DETAIL["params"]["label_horizon"] = h
-    _STRATEGY_DETAIL["params"]["model"] = art.run_id
-    return {"code": 0, "data": [_STRATEGY_DETAIL, _BOARD_DETAIL] + _pref_details()}
+    # 每次都按**当前线上模型**现搭（旧代码改的是模块级字典：换臂后那份写死的说明
+    # 会一直挂在详情里，而且多个请求共享同一份可变小抄）
+    data = [main_detail(artifacts.load()), _BOARD_DETAIL]
+    dip_art, _ = serving.dip_artifact()
+    if dip_art is not None:
+        data.append(dip_detail(dip_art))
+    return {"code": 0, "data": data + _pref_details()}
 
 
 def _strategies() -> list[str]:
-    """本插件能出票的策略名。热门偏好榜默认下线，只有 `PREF_LIST=on` 才出现。"""
-    return [STRATEGY, STRATEGY_BOARD] + ([pref.STRATEGY] if serving.pref_enabled() else [])
+    """本插件能出票的策略名。热门偏好榜默认下线，只有 `PREF_LIST=on` 才出现；
+    低开买入榜只在事件模型（`QLIB_DIP_MODEL_DIR`）在场时出现——没有事件模型就不出这条榜，
+    绝不用全市场那臂冒充它。"""
+    out = [STRATEGY, STRATEGY_BOARD]
+    if serving.dip_artifact()[0] is not None:
+        out.append(STRATEGY_DIP)
+    return out + ([pref.STRATEGY] if serving.pref_enabled() else [])
 
 
 def _pref_details() -> list[dict]:
@@ -205,6 +300,16 @@ def selector_run(req: RunRequest):
             logger.exception("板后低吸榜失败")
             raise HTTPException(status_code=502, detail=f"板后低吸榜打分失败：{exc}") from exc
         out += _model_rows(art, brows, board_slice=True)
+    if STRATEGY_DIP in want:
+        dip_art, dip_source = serving.dip_artifact()
+        if dip_art is not None:
+            try:
+                drows = serving.dip_scores(topk=req.topk or serving.DEFAULT_TOPK)
+            except Exception as exc:  # noqa: BLE001 - 事件榜失败不能拖垮主榜
+                logger.exception("低开买入榜失败")
+                raise HTTPException(status_code=502,
+                                    detail=f"低开买入榜打分失败：{exc}") from exc
+            out += _model_rows(dip_art, drows, dip_slice=True)
     if pref.STRATEGY in want:
         try:
             prows = serving.latest_pref(topk=req.topk)
@@ -226,26 +331,72 @@ def _dip_levels(row: dict, pct: float | None) -> dict | None:
     """板票行把筹码价位块换成「板后低吸」规则价（2026-10-28 用户拍板的交易语义）。
 
     买线=今收×0.95：明早开盘 ≤ 买线（低开 5% 起）→ 挂开盘价买，开盘高于它不追；
-    失效线=今收×0.905：开盘 ≤ 失效线（≈跌停一字）→ 放弃，单子打不进；
-    卖出无目标价：涨了就卖，收盘无条件出。三个键复用 App 已消费的扁平键，
-    板票行用本块**替换**筹码块（板票的交易语义是低吸，不是筹码主峰回踩）。
+    卖出无目标价：涨了就卖，收盘无条件出。**没有失效线**——2026-10-29 用户拍板
+    「跌停买不进这条不适应」，开盘 ≤ 今收×0.905（跌停一字）照旧挂单，回测也按能成交算。
+    三个键复用 App 已消费的扁平键，板票行用本块**替换**筹码块（板票的交易语义是低吸，
+    不是筹码主峰回踩）。
     """
     price = row.get("price")
     if not price or pct is None or not is_limit_up(row["code"], pct * 100):
         return None
-    buy, invalid = round(price * 0.95, 2), round(price * 0.905, 2)
+    buy = round(price * 0.95, 2)
     return {
         "buy_ref_price": buy,
         "sell_target_price": None,
-        "buy_invalid_price": invalid,
+        "buy_invalid_price": None,
         "level_note": (f"今日涨停（{pct * 100:.1f}%）→ 板后低吸规则价（非模型预测）："
                        f"明早开盘≤{buy}（低开5%起）挂开盘价买、开盘高于它不追；"
-                       f"开盘≤{invalid}（≈跌停一字）放弃；买入后涨了就卖，收盘无条件出。"
-                       f"历史回放：低开5%~9.4%生效带净+1.57pp/笔 t9.31，触发~118次/年"),
+                       f"不设失效线（跌停一字也照样挂单买）；买入后涨了就卖，收盘无条件出。"
+                       f"历史回放：同带不设下界 毛+1.53%/笔（300 票池 2024→2026-10 共 24 笔，样本薄）"),
     }
 
 
-def _model_rows(art, rows: list[dict], board_slice: bool = False) -> list[dict]:
+def _dip_entry_levels(row: dict, art=None) -> dict:
+    """低开买入榜的价位块：买线就是**今收**（明早开盘 ≤ 今收即触发），不是 ×0.95。
+
+    与板后低吸那条（`_dip_levels`，买线=今收×0.95）差别的来源是口径：这一臂的低点判据是
+    `gap < 0`（低开即事件），买线跟着放在今收上，两个数说的是同一件事。
+    同样**不设失效线**（2026-10-29 用户拍板取消涨跌停挡单）。
+    卖出侧跟着臂走（与 `dip_detail` 同一套判据）：事件臂当天收盘无条件出，
+    低吸持有臂「哪天收盘高过买入价哪天卖、跌 5% 止损、上限 10 个交易日」。
+    """
+    price, pct = row.get("price"), row.get("chg")
+    if not price or pct is None:
+        return {"buy_ref_price": None, "sell_target_price": None, "buy_invalid_price": None,
+                "level_note": "收盘价或当日涨幅缺数，价位判不出（不是「没有价」）"}
+    buy = round(float(price), 2)
+    if serving.arm_kind(art) == "rule":
+        spec = serving.arm_spec(art)
+        stop = float(spec.get("stop_pct", -0.05)) * 100
+        hold = int(spec.get("max_hold", 10))
+        exit_rule = (f"买入后哪天收盘价高过 {buy} 就哪天卖；一直不涨则跌 {abs(stop):.0f}% 止损；"
+                     f"最多持 {hold} 个交易日")
+        history = ("历史回放（本臂样本外 2024-01→2026-10-16，13,566 笔事件/665 日）："
+                   "规则本身扣费 +0.053%/笔、胜率 64.9%；模型同日头 5 扣费 +0.335%/笔、"
+                   "配对 +0.176pp、t +3.04")
+    else:
+        exit_rule = "买入后涨了就卖，收盘无条件出"
+        history = ("历史回放（事件臂样本外 2024-01→2026-10-16，14.3 万笔事件/671 日）："
+                   "同日头 5 毛 +0.852%、扣费 +0.652%/笔，同日配对 +0.657pp、t +7.68")
+    return {
+        "buy_ref_price": buy,
+        "sell_target_price": None,
+        "buy_invalid_price": None,
+        "level_note": (f"今日涨 {pct * 100:+.1f}% → 低开买入规则价（非模型预测）："
+                       f"明早开盘≤{buy}（低开即触发）挂开盘价买、开盘高于今收不追；"
+                       f"不设失效线（跌停一字也照样挂单买）；{exit_rule}。{history}"),
+    }
+
+
+def arm_signal(art) -> str:
+    """臂榜的 signal：两条臂卖法不同，话也不能说成同一句。"""
+    if serving.arm_kind(art) == "rule":
+        return "低吸持有：明天低开买入、哪天收盘高过买价哪天卖的期望收益排名"
+    return "明天低开买入的期望收益排名"
+
+
+def _model_rows(art, rows: list[dict], board_slice: bool = False,
+                dip_slice: bool = False) -> list[dict]:
     label_map = _names_for(rows)
     chip, chip_missing = _chip_levels(rows)
     try:
@@ -254,18 +405,30 @@ def _model_rows(art, rows: list[dict], board_slice: bool = False) -> list[dict]:
         logger.warning("pct_of_day 失败，板票行退回筹码价位块", exc_info=True)
         pcts = {}
     h = _label_horizon(art.meta.get("label"))
+    # 线上模型一旦是臂（§46 主榜也换），day_ranking 已经在打分前按人群闸筛过窄，
+    # 主榜说的主语就从「全市场谁最强」换成「今天这批上涨票里买哪只」——文案必须跟着换。
+    gate = bool(serving.arm_spec(art))
+    arm_main = gate and not board_slice and not dip_slice
     signal = f"预期{h}日收益排名" if h else "预期收益排名"
     if board_slice:
         signal = f"板后低吸·{signal}"
+    if dip_slice or arm_main:
+        signal = arm_signal(art)
     out = []
     for row in rows:
         raw_rank = int(row.get("raw_rank") or row["rank"])
         if board_slice:
-            rank_text = f"板内第 {row['rank']} / {row['universe']} 只当日板票（全榜第 {raw_rank}）"
+            # 「全榜」只在主榜没有人群闸门时才成立；闸一开，榜本身就是上涨票榜
+            board_note = "上涨票榜" if gate else "全榜"
+            rank_text = f"板内第 {row['rank']} / {row['universe']} 只当日板票（{board_note}第 {raw_rank}）"
+        elif dip_slice:
+            rank_text = f"低开榜第 {row['rank']} / {row['universe']} 只今日上涨票"
+        elif arm_main:
+            rank_text = f"今日上涨票第 {row['rank']} / {row['universe']} 只"
         else:
             rank_text = (f"护栏后第 {row['rank']}" if raw_rank == row["rank"]
                          else f"原始第 {raw_rank}、护栏后第 {row['rank']}")
-        pool_note = "" if board_slice else f"（护栏后票池 {row['universe']} 只）"
+        pool_note = "" if board_slice or dip_slice or arm_main else f"（护栏后票池 {row['universe']} 只）"
         reason = (f"Alpha158+LightGBM 原始分 {row['score_raw']:.4f}，"
                   f"{rank_text}{pool_note}；"
                   f"模型 {art.run_id}（训练止于 {art.meta.get('train_end')}，名单日为样本外）")
@@ -276,12 +439,17 @@ def _model_rows(art, rows: list[dict], board_slice: bool = False) -> list[dict]:
         dip = _dip_levels(row, pcts.get(row["qlib_symbol"]))
         if dip:
             reason += f"；价位块为板后低吸规则价（今日涨停 {pcts.get(row['qlib_symbol']) * 100:.1f}%）"
+        if dip_slice or arm_main:
+            levels = _dip_entry_levels(row, art)
+            reason += "；价位块为低开买入规则价（明开≤今收才买）"
+        else:
+            levels = dip or _level_fields(chip.get(row["qlib_symbol"]), chip_missing)
         out.append(SelectResult(
             code=row["code"],
             name=label_map.get(row["code"], ""),
             signal=signal,
             reason=reason,
-            strategy=STRATEGY_BOARD if board_slice else STRATEGY,
+            strategy=STRATEGY_DIP if dip_slice else (STRATEGY_BOARD if board_slice else STRATEGY),
             asof=row["date"],
             price=row["price"],
             score=round(row["score"], 6),
@@ -295,7 +463,7 @@ def _model_rows(art, rows: list[dict], board_slice: bool = False) -> list[dict]:
                 "universe": row["universe"],
                 "feature_count": art.meta.get("feature_count"),
                 "na_fields": list(_NA_FIELDS),
-                **(dip or _level_fields(chip.get(row["qlib_symbol"]), chip_missing)),
+                **levels,
             },
         ).to_dict())
     return out

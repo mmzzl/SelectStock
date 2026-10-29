@@ -15,9 +15,11 @@
    （剔场内基金/指数/B股/北交所）。用训练段是因为「谁有流动性」这件事本身是历史事实，
    拿测试段的排名当票池就是把未来信息塞进组合，和用今天的沪深300成分股回测2016年一样假。
    代价也要说：票池冻结到 2021 年底，2022 年后新崛起的票永远进不来。
-4. **成本与不可成交**：买入 0.0005、卖出 0.0015（含千1印花税）、最低 5 元；
-   `limit_threshold=0.095` 让涨跌停当日买不进/卖不掉。这条对 30x/68x（20% 涨跌幅）偏严，
-   也就是宁可少赚也不给自己造假成交。
+4. **成本与不可成交**：买入 0.0005、卖出 0.0015（含千1印花税）、最低 5 元。
+   2026-10-29 用户拍板**取消涨跌停挡单**（「跌停买不进、开盘涨停，回测和选股这条不适应」），
+   撮合参数只有一份（`stock_selector_qlib.backtest.EXCHANGE_KWARGS`），并由
+   `no_limit_blocking()` 把 qlib 的 `C.limit_threshold` 设成 None——代价：**一字板也算成交，
+   净值偏乐观**，历史读数（2026-10-29 之前）都是带 0.095 挡单跑的，不可直接相比。
 5. **滚动重训必须冻结票池**（`--pool-file`）：票池按训练段流动性重挑一次，`train_end` 一挪就换血
    （批次 I 实测 59/300），于是「第 8 名」「跌出前 100 才卖」在不同臂之间比的不是同一批票。
    冻结池之后，滚动只推进训练窗，横截面的定义不变，两臂的逐日 IC 才能按日配对。
@@ -56,6 +58,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from stock_selector_qlib.backtest import EXCHANGE_KWARGS, no_limit_blocking  # noqa: E402
+
 QLIB_DIR = Path("/data/work/qlib_data/cn")
 CSV_DIR = Path("/data/work/qlib_data/csv")
 REPORT_DIR = Path("/data/work/SelectStock/data/qlib")
@@ -75,20 +80,20 @@ LABEL_OPEN_FMT = "Ref($close, -{h}) / Ref($open, -1) - 1"
 LABEL_DIR_FMT = "Sign(" + LABEL_OPEN_FMT + ")"
 # 批次 F2（2026-10-29 凌晨）：把用户的**条件交易**写进标签。batchF1 实测 lu 特征 gain=0——
 # 无条件「明收/明开」里板后次日没有优待，树学到的方向是躲开板票（§41.3）。他真正做的交易是：
-# 今天板 + 明天低开 5%~9.5% 才买（9.5% 以深≈跌停一字买不进）、当天收盘卖。标签=触发日内收益，
+# 今天板 + 明天低开 5% 起才买、当天收盘卖。标签=触发日内收益，
 # 非触发日 0（不交易=不赚不亏）。触发带与 api._dip_levels 的规则价同源，改一处必须同步另一处。
 _LABEL_RET = "Div(Sub(Ref($close, -1), Ref($open, -1)), Ref($open, -1))"
 _LABEL_GAP = "Div(Ref($open, -1), $close)"
-LABEL_DIP_FMT = f"If(And(Gt({_LABEL_GAP}, 0.905), Lt({_LABEL_GAP}, 0.95)), {_LABEL_RET}, 0)"
 LABEL_ENTRIES = ("next", "close", "open", "dir", "dip")
 # 批次 F2 判决（2026-10-29 00:1x，§41.4）：31 棵树 lu_ 列 gain 仍为 0、ic_valid t −1.91——
 # 触发带不带板门，非板票明天也会低开，正样本被稀释。F3 把「今天板」门也写进标签：
-# 今天板（今收/昨收−1 ≥ 0.0975）∩ 明开/今收 ∈ (0.905, 0.95) ⇒ 标签=明开→明收收益；
+# 今天板（今收/昨收−1 ≥ 0.0975）∩ 明开/今收 < 0.95 ⇒ 标签=明开→明收收益；
 # 其余一律 0。⇒ 模型要压低 l2 就必须学会给「今天板」的行打高分，板票浮到前排是目标函数
 # 的直接后果，不是塞票。改一处必须同步 api._dip_levels 的规则价。
+# 下界 0.905（≈跌停一字买不进）在 2026-10-29 随「跌停放弃」一起取消——他点名这条不适应，
+# 回测也不再挡涨跌停，标签再留下界就是拿一条已经不执行的规则教模型。
 _LABEL_BOARD = "Gt(Div(Sub($close, Ref($close,1)), Ref($close,1)), 0.0975)"
-LABEL_DIP_FMT = (f"If(And({_LABEL_BOARD}, And(Gt({_LABEL_GAP}, 0.905), Lt({_LABEL_GAP}, 0.95))), "
-                 f"{_LABEL_RET}, 0)")
+LABEL_DIP_FMT = f"If(And({_LABEL_BOARD}, Lt({_LABEL_GAP}, 0.95)), {_LABEL_RET}, 0)"
 
 
 def label_formula(horizon: int = 5, entry: str = "next") -> str:
@@ -97,6 +102,9 @@ def label_formula(horizon: int = 5, entry: str = "next") -> str:
     entry="next"：T+1→T+H（历史批次 M/P/Q/R/S/T 全部是这个，别动默认值）。
     entry="close"：T→T+H，即「信号日尾盘买、H 天后卖」——含 T→T+1 这段历史口径的死区。
     entry="open"：T+1 开盘→T+H 收盘，即 §35.5 红线之后真正做得到的那条腿（E1/E2 口径）。
+    entry="dip"：板后低吸的条件交易（批次 F2/F3）——今天板 ∩ 明开/今收 < 0.95 才触发，
+    标签=明开→明收收益，其余 0。**没有下界**：2026-10-29 用户拍板取消「跌停一字买不进」，
+    回测撮合也不再挡涨跌停。
     """
     if horizon < 1:
         raise ValueError(f"标签周期至少 1 天，收到 {horizon}")
@@ -368,20 +376,12 @@ def run_backtest(qlib, signal: pd.Series, beg: str, end: str, topk: int, n_drop:
     end = days[-2]
 
     strategy = TopkDropoutStrategy(topk=topk, n_drop=n_drop, signal=signal, only_tradable=False)
-    exchange_kwargs = {
-        "freq": "day",
-        "open_cost": 0.0005,
-        "close_cost": 0.0015,
-        "min_cost": 5.0,
-        # 9.5% 当作涨跌停：主板 10% 的票一字板买不进/卖不掉；30x/68x 的 20% 票也被一并挡住，
-        # 宁可少成交也不给自己造假成交
-        "limit_threshold": 0.095,
-        "deal_price": "close",
-    }
+    # 撮合参数与线上回测（stock_selector_qlib.backtest）同一份出处，免得两处各自漂移；
+    # 2026-10-29 起不含涨跌停挡单，读数偏乐观的口径见 backtest.LIMIT_NOTE
     capital = 1e8
     report, _positions = backtest_daily(start_time=beg, end_time=end, strategy=strategy,
                                         account=capital, benchmark=benchmark,
-                                        exchange_kwargs=exchange_kwargs)
+                                        exchange_kwargs=EXCHANGE_KWARGS)
     if report is None or report.empty:
         return {"empty_report": True}
     # 净值必须走 report['account']（现金+持仓市值，手续费已扣）。
@@ -481,7 +481,8 @@ def main() -> int:
     ap.add_argument("--label-entry", choices=list(LABEL_ENTRIES), default="next",
                     help="入场口径：next=T+1 收盘买（历史批次全部如此，T→T+1 那段不在标签里）；"
                          "close=信号日收盘就买（批次 U 用，对应 App 给的基准价与用户实际的尾盘买入）；"
-                         "dip=条件交易（批次 F2 用：明开低开 5%~9.5% 才买、当天收盘卖，非触发日 0）")
+                         "dip=条件交易（批次 F2 用：明开低开 5% 起才买、当天收盘卖，非触发日 0；"
+                         "不设下界——2026-10-29 取消跌停放弃/涨跌停挡单）")
     ap.add_argument("--feature-set", choices=["base", "trend", "style", "full", "trendlu"], default="trend",
                     help="特征集：base=Alpha158 原味；trend=+批次N趋势列（历史可比口径）；"
                          "style=+批次O风格残余列；full=两者；trendlu=+批次F板后列（batchF）。"
@@ -525,7 +526,6 @@ def main() -> int:
     run_id = args.run_id or pd.Timestamp.now().strftime("%Y%m%d-%H%M%S")
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from stock_selector_qlib import artifacts
 
     export_dest: Path | None = None
@@ -548,6 +548,7 @@ def main() -> int:
 
     qlib.init(provider_uri=args.qlib_dir, region=REG_CN, kernels=1, expression_cache=None,
               dataset_cache=None, uri=str(REPORT_DIR / "mlruns"))
+    no_limit_blocking()  # qlib.init 按 region 把 C.limit_threshold 设回 0.095，挡单要在这之后关
     calendar = [str(d)[:10] for d in qlib.data.D.calendar()]
     print(f"qlib 日历 {len(calendar)} 天：{calendar[0]} → {calendar[-1]}")
 

@@ -4,7 +4,7 @@ import re
 import pytest
 
 from stock_selector_qlib.alpha import TREND_NAMES
-from stock_selector_qlib.alpha_style import STYLE_FACTORS, STYLE_NAMES, Alpha158Full, Alpha158Style
+from stock_selector_qlib.alpha_style import LU_NAMES, STYLE_FACTORS, STYLE_NAMES, Alpha158Full, Alpha158Style
 
 
 @pytest.fixture(scope="module")
@@ -28,9 +28,10 @@ def test_style_config_extends_alpha158(configs):
 
 def test_full_config_is_superset(configs):
     _, f_names = configs
-    assert len(f_names) == 175
-    assert set(STYLE_NAMES) | set(TREND_NAMES) <= set(f_names)
-    assert f_names[-len(STYLE_NAMES):] == STYLE_NAMES
+    # 列数不写死数字：158 + 风格 so_ + 趋势 + 板后 lu_，加一族就改一处常量即可
+    assert len(f_names) == 158 + len(STYLE_NAMES) + len(TREND_NAMES) + len(LU_NAMES)
+    assert set(STYLE_NAMES) | set(TREND_NAMES) | set(LU_NAMES) <= set(f_names)
+    assert f_names[-len(LU_NAMES):] == LU_NAMES
 
 
 def test_style_names_unique_and_carry_prefix():

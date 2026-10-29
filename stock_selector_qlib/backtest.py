@@ -11,8 +11,8 @@
   · `dropout` = qlib 的 TopkDropout，每天**强制**换掉 `n_drop` 只最低分（日双边换手 ~33%）；
   · `band` = 「进榜严、出榜松」：持仓只要还在前 `exit_rank` 名就一直拿，跌出去才卖，
     空位从**前 `entry_rank` 名**里按分高低补满（`topk` 只，买入时等权，之后不每日再平衡）。
-  两臂共用同一个 Exchange、同一套挡单/成本/`risk_degree`、同样先卖后买，
-  所以数字上的差别只来自纪律本身。
+  两臂共用同一个 Exchange、同一套成本/`risk_degree`、同样先卖后买（涨跌停不挡单，见
+  `LIMIT_NOTE`），所以数字上的差别只来自纪律本身。
 - `position_cap_pct / target_amount / max_hold_days / 规则串` 这些自研内核的参数两个纪律都不看，
   带这些参数提交时 core/backtest_params.py 直接报错，不做静默忽略。
 - `stop_loss_pct / take_profit_pct` 只在 `band` 下按「相对买入价」生效（默认 0=关闭），
@@ -44,10 +44,27 @@ EXCHANGE_KWARGS = {
     "open_cost": 0.0005,
     "close_cost": 0.0015,
     "min_cost": 5.0,
-    # 9.5% 当涨跌停：主板一字板买不进/卖不掉；30x/68x 的 20% 票也被一并挡掉，偏严不造假成交
-    "limit_threshold": 0.095,
+    # 2026-10-29 用户拍板取消涨跌停挡单（「跌停买不进、开盘涨停，回测和选股这条不适应」）：
+    # 一字涨停算买得进、一字跌停算卖得掉。关掉它靠 `no_limit_blocking()`——只把这一行
+    # 删掉是空操作，qlib 会回填 C.limit_threshold（见那个函数的说明）。
     "deal_price": "close",
 }
+
+LIMIT_NOTE = ("涨跌停**不挡单**（2026-10-29 用户拍板取消）：一字涨停按买得进、一字跌停按卖得掉撮合，"
+              "所以净值含真实成交不到的笔，偏乐观")
+
+
+def no_limit_blocking() -> None:
+    """把 qlib 撮合的涨跌停挡单真的关掉。
+
+    坑在 `qlib/backtest/exchange.py:139-140`：Exchange 看到 `limit_threshold is None`
+    会回填成 `C.limit_threshold`，而 region cn 在 `qlib/config.py:298` 把它设成 0.095
+    ——传 None 等于没传。只有把 C 本身设成 None，`_get_limit_type` 才走 LT_NONE，
+    `limit_buy/limit_sell` 才只剩停牌。必须在 `serving.init_qlib()`（或 `qlib.init`）之后调。
+    """
+    from qlib.config import C
+
+    C.limit_threshold = None
 
 HOLD_RULES = ("dropout", "band")
 BAND_DEFAULTS = {"hold_rule": "dropout", "entry_rank": 50, "exit_rank": 100}
@@ -68,6 +85,7 @@ def run_qlib_backtest(args, progress_cb=None, signal: pd.Series | None = None):
     task_id = uuid.uuid4().hex
     art = artifacts.load()
     serving.init_qlib()
+    no_limit_blocking()  # 必须在 init 之后：qlib.init 按 region 把 C.limit_threshold 设回 0.095
     _tick(progress_cb, 2, "加载因子面板")
 
     days = serving.calendar()
@@ -125,8 +143,8 @@ def run_qlib_backtest(args, progress_cb=None, signal: pd.Series | None = None):
             "open_cost": EXCHANGE_KWARGS["open_cost"],
             "close_cost": EXCHANGE_KWARGS["close_cost"],
             "min_cost": EXCHANGE_KWARGS["min_cost"],
-            "limit_threshold": EXCHANGE_KWARGS["limit_threshold"],
-            "limit_note": "所有板块按 ±9.5% 挡单：创业板/科创板 20% 的票也被一并挡掉，偏严",
+            "limit_threshold": EXCHANGE_KWARGS.get("limit_threshold"),
+            "limit_note": LIMIT_NOTE,
             "only_tradable": False,
             "signal_lag": "T 日收盘成交、读 T−1 日分数（qlib 日历 shift=1）",
             "trade_source": "日频持仓变动反推，同日同票合并一笔；卖出成本为加权均价（自研内核是 FIFO）",
@@ -295,7 +313,8 @@ def stop_take_exits(held, entry_px: dict, prices: dict,
 
 class BandHoldStrategy(BaseSignalStrategy):
     """按 `band_plan` 的名单买卖，撮合与 `TopkDropoutStrategy` 逐行同构：同一个 Exchange、
-    同样先卖后买、卖出所得现金按 `risk_degree` 等分给买入名单、涨跌停/停牌一律挡单。
+    同样先卖后买、卖出所得现金按 `risk_degree` 等分给买入名单、只有停牌才挡单
+    （涨跌停自 2026-10-29 用户拍板不挡，见 `LIMIT_NOTE`）。
 
     没走 qlib 的 `WeightStrategyBase`：它按目标权重每天把每只票**再平衡回等权**，
     那笔减仓换手不属于「还在推荐就拿着」这个纪律。
@@ -375,7 +394,7 @@ class BandHoldStrategy(BaseSignalStrategy):
         cash = current.get_cash()
         orders = []
         for code in sells:
-            # direction=None = 涨跌停/停牌都挡：卖不掉就继续拿着，不编造成交
+            # direction=None = 停牌才挡（涨跌停自 2026-10-29 不挡）：停牌卖不掉就继续拿着，不编造成交
             if not self.trade_exchange.is_stock_tradable(code, start_time=trade_start_time,
                                                          end_time=trade_end_time):
                 continue

@@ -372,10 +372,15 @@ def _cached_rows(key: tuple) -> list[dict] | None:
 
 
 def day_ranking(refresh: bool = False, wait: bool = True) -> list[dict]:
-    """最近一个交易日**整个票池**的分数与名次（不含价格）。同一天内命中缓存。
+    """最近一个交易日的分数与名次（不含价格）。同一天内命中缓存。
 
     名次是分数降序的位次，所以「今日名单」= 前 topk 条、「某只票排第几」= 在这张表里查一行，
     两者共用同一次打分。以前缓存键里带着 topk，名单和查名次会各算一遍全池因子。
+
+    **出榜人口跟着线上模型自己的口径走**（`population_gate`）：模型 meta 带 `rule_spec`/
+    `event_spec`（低吸臂）时，先按「当日涨幅 ≥ 闸门」把打分名单筛窄再打分，之后的名次、
+    分位、板榜切片、持仓页查名次全在同一张筛过的人群里说——这条表就是唯一的人口口径。
+    老臂（没有 spec）一个字都不变：整个票池排序。
 
     `wait=False`：缓存没命中就抛 `RankingNotReady`，不在这条调用里算几百秒（同步接口用）；
     `wait=True`（默认，给 17:30 那条后台作业用）：在 `_score_lock` 上排队，让同一时刻只有
@@ -398,7 +403,21 @@ def day_ranking(refresh: bool = False, wait: bool = True) -> list[dict]:
             if rows is not None:
                 return rows
         started = time.time()
-        pred, score_stats = score_frame(art, end=date)
+        pool = score_pool(art)
+        line = population_gate(art)
+        chg: dict[str, float] = {}
+        if line is not None:
+            # 筛在打分之前：臂只学过「今天涨过线」的那批票，把跌票喂给它就是在给它没学过的样本要答案
+            n_pool = len(pool)
+            pct = pct_of_day(pool, date)
+            chg = {s: float(v) for s, v in pct.items() if v is not None and float(v) >= line}
+            pool = [s for s in pool if s in chg]
+            if not pool:
+                logger.warning("qlib 主榜 %s：今天没有符合人群的票（模型 %s 的口径=当日涨幅 ≥+%.1f%%，"
+                               "名单 %d 只一只没过线），出空榜——这是口径的正常结果，不是缺数",
+                               date, art.run_id, line * 100, n_pool)
+                return []
+        pred, score_stats = score_frame(art, end=date, pool=pool)
         day = pd.Timestamp(date)
         if not (pred.index.get_level_values("datetime") == day).any():
             raise RuntimeError(f"{date} 票池里没有可打分的股票（日线断档或票池过期）")
@@ -423,18 +442,23 @@ def day_ranking(refresh: bool = False, wait: bool = True) -> list[dict]:
             # 护栏前的名次：被挡下的原始第一不会出现在 rows 里，但留下的票能说清自己原来第几
             "raw_rank": raw_order[inst],
             "universe": total,
+            # 臂的人口涨幅随行带上：reason 与低吸价位块都要用它，不能到了 api 再猜
+            "chg": chg.get(inst),
         } for position, (inst, raw) in enumerate(tail.items())]
         with _cache_lock:
             _cache["key"] = key
             _cache["rows"] = rows
             _cache["guard"] = {str(sym)[2:]: note for sym, note in guard["guard_notes"].items()}
             _cache["stats"] = {**score_stats, **guard_stats, "scored_names": scored,
-                               "universe": total, "seconds": round(time.time() - started, 1)}
+                               "universe": total, "seconds": round(time.time() - started, 1),
+                               "gate": line, "population": len(pool)}
+        gate_note = ("" if line is None else
+                     f"；人群闸门 涨幅≥+{line * 100:.1f}%（{art.run_id} 自带口径）")
         logger.info("qlib 打分 %s：%d/%d 只进榜（因子不足 %d 行、整批无数据 %d 只；护栏挡下 %d 只："
-                    "薄流动 %d、拉升后阴跌 %d），耗时 %.1f 秒",
+                    "薄流动 %d、拉升后阴跌 %d），耗时 %.1f 秒%s",
                     date, total, score_stats["pool"], score_stats["thin_rows"], score_stats["no_row"],
                     guard_stats["guard_dropped"], guard_stats["guard_thin"],
-                    guard_stats["guard_yao"], time.time() - started)
+                    guard_stats["guard_yao"], time.time() - started, gate_note)
         # 分数照样返回（半市场的名单也比没有强），但「只剩半个市场」这件事必须自己说出口
         alert_ranking_coverage(ranking_coverage_problem(date, scored, score_stats["pool"]))
         return rows
@@ -526,6 +550,161 @@ def pref_enabled() -> bool:
     return os.environ.get("PREF_LIST", "off").strip().lower() not in ("off", "0", "false", "no")
 
 
+# ---------------------------------------------------------------------------
+# 批次 G2「低开买入榜」（2026-10-29 用户点名口径）
+# ---------------------------------------------------------------------------
+# 用户原话：「模型应该学，今天涨停，或者上涨，明天低开买入后，是否赚钱」。
+# 事件臂（`stock_selector_qlib/dip_event.py` + `scripts/qlib_dip_event_train.py`）只在
+# 「今日涨 ≥+0.1% ∩ 明日低开」的事件行上训练，标签=明开→明收（E1）。
+# 它**不是**全市场排序模型：非事件行不在它的训练人群里，所以这条榜先按「今天涨」筛人，
+# 再按事件臂的分排——主榜（qlib_alpha158）的模型和名次一律不动。
+DIP_MIN_CHG = 0.001          # 兜底值：只在模型 meta 没带口径时用（老产物/手工放的目录）
+
+
+def arm_spec(art) -> dict:
+    """这个模型自带的口径块（`rule_spec` 或 `event_spec`）；空表 = 全市场横截面臂。
+
+    人口闸门、买法、卖法都从这里读。写死在服务侧的常量在换臂时一定会骗人——
+    batchG_evt 训在「涨 ≥+0.1%」、batchH_r1 训在「涨 ≥+5%」，同一个入口两种人口。
+    """
+    meta = getattr(art, "meta", None) or {}
+    return dict(meta.get("rule_spec") or meta.get("event_spec") or {})
+
+
+def arm_kind(art) -> str:
+    """`rule`=低吸持有臂（拿着等涨、跌 5% 止损）／`event`=事件臂（当天收盘无条件出）／``=没有。"""
+    meta = getattr(art, "meta", None) or {}
+    if meta.get("rule_spec"):
+        return "rule"
+    return "event" if meta.get("event_spec") else ""
+
+
+def population_gate(art) -> float | None:
+    """这条臂的训练人口下界（当日涨幅 ≥ 它才可能被选中）；老臂返回 None = 不设闸门。"""
+    value = arm_spec(art).get("min_chg")
+    return None if value is None else float(value)
+
+
+def dip_min_chg(art) -> float:
+    """这条榜的人群闸门 = **这个臂自己训练时用的那条**，不是服务侧写死的常量。
+
+    闸门继续用 +0.1% 去排一个只学过 +5% 人口的模型，等于把它没学过的样本当好答案，
+    而且换臂时没人会记得改这一行 ⇒ 从 meta 的 `rule_spec`/`event_spec` 里读。
+    """
+    line = population_gate(art)
+    return DIP_MIN_CHG if line is None else line
+
+
+def dip_artifact() -> tuple[artifacts.Artifacts | None, str]:
+    """这条榜用哪个模型：只认 `QLIB_DIP_MODEL_DIR`，没配/配错就是「不出现」。
+
+    为什么不退回线上模型：线上那臂和事件臂的人口、卖法都不是一条（§44 拿全市场排序去排
+    「低开买入」就是把两个口径说成同一件事）。宁可不出现，也不冒充。
+
+    §46 之后主榜本身可能就是这条臂：`QLIB_DIP_MODEL_DIR` 指到线上模型同一个目录时
+    这条榜**并入主榜**（返回 None），不再单独立一条——同一份产物落两套一模一样的
+    1–30 名次，看的人会以为是两个模型的两个结论。删掉 `QLIB_MODEL_DIR` 那一行换回老臂，
+    这一行没动，榜就又自己回来了。
+    """
+    raw = (os.environ.get("QLIB_DIP_MODEL_DIR") or "").strip()
+    if not raw:
+        return None, "off"
+    dest = Path(raw)
+    if dest.resolve() == Path(artifacts.MODEL_DIR).resolve():
+        logger.info("低开买入榜并入主榜：QLIB_DIP_MODEL_DIR 就是线上模型目录（%s）", raw)
+        return None, "off(与主榜同一个模型，已并入主榜)"
+    if not artifacts.exists(dest):
+        logger.warning("低开买入榜不下线原因：QLIB_DIP_MODEL_DIR=%s 里没有模型产物", raw)
+        return None, "off"
+    try:
+        return artifacts.load(dest), str(dest)
+    except Exception:  # noqa: BLE001 - 事件臂坏了只关这条榜，主榜照常出票
+        logger.exception("低开买入榜模型加载失败（%s），本条榜下线", raw)
+        return None, "off(加载失败)"
+
+
+def rank_dip(pred: pd.Series, chg: pd.Series, topk: int = DEFAULT_TOPK,
+             min_chg: float | None = None, date: str = "") -> list[dict]:
+    """在「今天涨」的人群里按事件臂的分排名次（纯函数，不碰行情）。
+
+    人群闸门必须在这里，不能在调用方记着做：事件臂的训练行就是这批票，
+    排到跌票身上等于把它没学过的样本当好答案。`min_chg` 由调用方从模型 meta 带进来
+    （`dip_min_chg`），不传才用兜底值。
+    `date` 同理：调用方在护栏前做过 `xs()`，传进来的已经是单层索引，
+    不接这个参数行就会带空 asof 落库（App 上那期没有信号日）。
+    """
+    line = DIP_MIN_CHG if min_chg is None else float(min_chg)
+    if isinstance(pred.index, pd.MultiIndex):
+        day = pred.index.get_level_values("datetime").max()
+        scores = pred.xs(day, level="datetime")
+        date = str(pd.Timestamp(day).date())
+    else:
+        scores = pred
+    scores = scores.sort_index()
+    keep = [inst for inst in scores.index
+            if chg.get(inst) is not None and float(chg[inst]) >= line]
+    tail = scores[keep].sort_values(ascending=False, kind="mergesort")
+    total = len(tail)
+    rows = [{
+        "code": str(inst)[2:],
+        "qlib_symbol": str(inst),
+        "date": date,
+        "score_raw": float(raw),
+        "score": (total - position) / total,
+        "rank": position + 1,
+        "raw_rank": position + 1,
+        "universe": total,
+        "chg": float(chg[inst]),
+    } for position, (inst, raw) in enumerate(tail.items())]
+    return rows[:topk]
+
+
+def dip_scores(topk: int = DEFAULT_TOPK, refresh: bool = False) -> list[dict]:
+    """今日上涨票 × 事件臂打分 × 两条护栏 ⇒ 低开买入榜。事件臂没配就返回空榜。"""
+    art, source = dip_artifact()
+    if art is None:
+        return []
+    init_qlib()
+    date = calendar()[-1]
+    key = ("dip", art.run_id, date)
+    if not refresh:
+        with _cache_lock:
+            if _cache.get("key") == key and _cache.get("dip_rows") is not None:
+                return [dict(r) for r in _cache["dip_rows"]]
+    started = time.time()
+    pool = score_pool(art)
+    line = dip_min_chg(art)
+    chg = pd.Series(pct_of_day(pool, date), dtype="float64")
+    ups = [s for s in pool if pd.notna(chg.get(s)) and float(chg[s]) >= line]
+    if not ups:
+        logger.warning("低开买入榜：%s 今日没有一只涨 ≥%.1f%% 的票（池 %d 只），空榜",
+                       date, line * 100, len(pool))
+        return []
+    pred, stats = score_frame(art, beg=date, end=date, pool=ups)
+    day = pd.Timestamp(date)
+    if not (pred.index.get_level_values("datetime") == day).any():
+        raise RuntimeError(f"低开买入榜：{date} 事件人群 {len(ups)} 只里一只都没打到分")
+    tail = pred.xs(day, level="datetime").sort_values(ascending=False, kind="mergesort")
+    thin, yao = guardrail_flags(date, list(tail.index))
+    kept, guard = apply_guardrails(tail, thin, yao)
+    rows = rank_dip(kept, chg, topk=topk, min_chg=line,
+                    date=str(pd.Timestamp(date).date()))
+    if rows:
+        closes = _closes([r["qlib_symbol"] for r in rows], date)
+        for r in rows:
+            r["price"] = closes.get(r["qlib_symbol"])
+    logger.info("低开买入榜 %s：事件人群 %d/%d 只、打分 %d、护栏挡下 %d、进榜 %d，模型 %s，%.1f 秒",
+                date, len(ups), len(pool), stats["scored"], guard["guard_dropped"],
+                len(rows), art.run_id, time.time() - started)
+    with _cache_lock:
+        if _cache.get("key") == key:
+            _cache["dip_rows"] = [dict(r) for r in rows]
+            _cache["dip_stats"] = {"population": len(ups), "pool": len(pool),
+                                   "scored": stats["scored"], "guard_dropped": guard["guard_dropped"],
+                                   "model": art.run_id, "seconds": round(time.time() - started, 1)}
+    return rows
+
+
 def latest_pref(topk: int | None = None, refresh: bool = False) -> list[dict]:
     """用户点名的那条榜：热门板块 + 新闻利好 + 排除小市值 + 趋势向上。
 
@@ -570,6 +749,8 @@ def ranks_by_code(codes: list[str], wait: bool = True) -> dict:
     红线：票池外的代码**不编名次**。持仓里没进候选池的票（基金、ST、上市太新、成交额太薄）
     模型从来没给它们打过分，硬排一个"第 301 名"就是把猜测说成结论。
     在池里但当日没有可打分行情（停牌/日线断档）也照样不给名次，只说原因。
+    主榜换成臂之后（§46）多一类：在名单里、当日也有行情，却**没过本榜的人口线**（今天没涨够），
+    这类票的话要说成「没过人口线」，不能说成「缺行情」——前者是规则，后者才要去查数据。
 
     `wait=False` 时可能抛 `RankingNotReady`（当日还没算过），由调用方回「未就绪 + 后台预热」。
     """
@@ -583,6 +764,20 @@ def ranks_by_code(codes: list[str], wait: bool = True) -> dict:
     pool_codes = {str(symbol)[2:] for symbol in scored_pool}
     universe = rows[0]["universe"] if rows else 0
     pool_size = len(scored_pool)
+    date = rows[0]["date"] if rows else calendar()[-1]
+    # 线上是臂时，「在名单里却没名次」要先分清是没过人口线还是真缺行情 ⇒ 补一次当日涨幅
+    line = population_gate(art)
+    pcts: dict[str, float] = {}
+    if line is not None:
+        sym_by_code = {str(s)[2:]: s for s in scored_pool}
+        miss = [sym_by_code[c] for c in codes
+                if c in sym_by_code and c not in by_code and c not in blocked]
+        if miss:
+            try:
+                pcts = {str(s)[2:]: v for s, v in pct_of_day(miss, date).items()}
+            except Exception:  # noqa: BLE001 - 补不到涨幅也不能不给持仓页回话，按「判不出」说
+                logger.warning("持仓页补当日涨幅失败（%d 只），人口判定改说「判不出」", len(miss),
+                               exc_info=True)
     items = []
     for code in codes:
         hit = by_code.get(code)
@@ -597,8 +792,18 @@ def ranks_by_code(codes: list[str], wait: bool = True) -> dict:
                           "note": f"当日排第 {why['rank_raw']} 名，但被名单护栏挡下"
                                   f"（{why['reason']}），不进名单"})
         elif code in pool_codes:
+            if line is None:
+                note = f"在 {pool_size} 只候选池里，但当日没有可打分的行情（停牌或日线断档）"
+            elif pcts.get(code) is None:
+                note = f"在 {pool_size} 只名单里，但当日涨幅判不出（停牌或日线断档）⇒ 进不了本榜人口"
+            elif float(pcts[code]) < line:
+                note = (f"今天涨 {float(pcts[code]) * 100:+.1f}%，没过本榜的人口线"
+                        f"（≥+{line * 100:.1f}%）⇒ 不参与排名，不是缺行情")
+            else:
+                note = (f"过了人口线（今天涨 {float(pcts[code]) * 100:+.1f}%），"
+                        "但当日行情或因子不足以打分")
             items.append({"code": code, "in_pool": True, "rank": None, "universe": universe,
-                          "note": f"在 {pool_size} 只候选池里，但当日没有可打分的行情（停牌或日线断档）"})
+                          "note": note})
         else:
             note = (f"不在当前 {pool_size} 只候选池里，模型没给这只打过分")
             if board_excluded(code):
@@ -607,7 +812,7 @@ def ranks_by_code(codes: list[str], wait: bool = True) -> dict:
                         f"创业板 300/301），模型不给这些票打分")
             items.append({"code": code, "in_pool": False, "rank": None, "universe": universe,
                           "note": note})
-    return {"ready": True, "date": rows[0]["date"] if rows else calendar()[-1],
+    return {"ready": True, "date": date,
             "pool_size": pool_size, "universe": universe, "items": items}
 
 
