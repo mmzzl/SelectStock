@@ -5634,7 +5634,7 @@ python3 -m pytest tests/test_adj_factor.py tests/test_kline_factor_spider.py \
    `--alert` 一开就走 `ding_ops`；撤掉那行定时任务就是回滚。
 5. `suspect` 阈值改按板块涨跌停幅度（现在写死 ±20%，误标 13 段）；`gaps` 判据要么剔除基金段、
    要么给退市整理/次新股无涨跌幅的日子单独归类。
-6. 本轮全部**未提交**（含 §48 这一节）。
+6. ~~本轮全部未提交~~ ⇒ 已于 2026-10-29 18:1x 随 §49 一起提交 `1d95504`（见 49.6 第 5 条）。
 
 ## §49 接缝假跌柱：修完了 + 根因是第二台写入方（2026-10-29 17:15–18:00 CST，「有问题你就修复吧」授权下执行）
 
@@ -5741,4 +5741,7 @@ python3 -m pytest tests/test_kline_seam_repair.py tests/test_qlib_patch_bins.py 
    还在面板里，尺子和模型输入的复权口径仍未定；`$factor` 线上没人读，写进面板不生效。
 3. **B 挂 17:30 定时 + 真推钉钉**（任务 #86）。
 4. §48.9 第 5 条（`suspect` 阈值按板块、`gaps` 分类）没动。
-5. 本轮全部**未提交**（§48 + §49 两节的文档、5+2 个脚本、7 个测试文件）。
+5. **提交状态**：§48 + §49 全部已提交 `1d95504`（18 files / 2,781+ / 412−，`pytest tests/ -q` = 1,424 passed）。
+   `data/` 在 `.gitignore` 里 ⇒ 旧值 `dryrun_1745.applied.jsonl` 和面板备份 `data/qlib_panel_backup/2026-10-29_174832` **只在本机**，
+   换机器/误删就没了 —— 49.4 的回滚脚本依赖它们。`kline_spider.py` 顺带整文件 CRLF→LF 归一（实质 5 行，看 diff 用 `git diff -w`）。
+   **未推远端**（要推说一句）。
