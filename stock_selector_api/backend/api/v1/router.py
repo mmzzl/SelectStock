@@ -16,6 +16,7 @@ from api.v1 import (
     messages,
     selection,
     sector,
+    fund,
     news,
     backtest,
     ruleset,
@@ -58,6 +59,9 @@ api_router.include_router(selection.router, dependencies=_password_gate)
 
 # —— 板块热力图模块（预计算结果薄代理）——
 api_router.include_router(sector.router, dependencies=_password_gate)
+
+# —— 主力资金榜（3/7/30 交易日滚动榜，预计算薄代理）——
+api_router.include_router(fund.router, dependencies=_password_gate)
 
 # —— 消息面模块（新闻利空/风险薄代理 + 持仓相关标记）——
 api_router.include_router(news.router, dependencies=_password_gate)

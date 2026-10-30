@@ -41,21 +41,30 @@ def _norm_name(s: str) -> str:
     return _BLANK.sub("", str(s or "")).upper()
 
 
-async def _fetch(day: str | None) -> dict:
+async def _get(path: str, params: dict, empty: dict, label: str) -> dict:
+    """8002 只读接口的共用一趟：mock 模式回空壳、HTTP 失败/业务码非 0 都翻成 BizError。
+
+    三处（当日消息面、原始消息流列表、详情）走同一条错误路径，别再各写一遍 try/except。
+    """
     if settings.selection_plugin_mode != "http":
-        return dict(_EMPTY)
-    url = settings.selection_plugin_base_url.rstrip("/") + _PATH
+        return dict(empty)
+    url = settings.selection_plugin_base_url.rstrip("/") + path
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(url, params={"day": day or ""})
+            resp = await client.get(url, params=params)
             resp.raise_for_status()
             body = resp.json()
     except httpx.HTTPError as exc:
-        logger.warning("消息面插件不可用 %s: %s", url, exc)
-        raise BizError("消息面服务暂不可用，请稍后重试")
+        logger.warning("%s插件不可用 %s: %s", label, url, exc)
+        raise BizError(f"{label}服务暂不可用，请稍后重试")
     if body.get("code") != 0:
-        raise BizError(body.get("message") or "消息面数据不可用")
-    return body.get("data") or dict(_EMPTY)
+        raise BizError(body.get("message") or f"{label}数据不可用")
+    return body.get("data") or dict(empty)
+
+
+async def _fetch(day: str | None) -> dict:
+    return await _get(_PATH, {"day": day or ""}, _EMPTY, "消息面")
+
 
 
 def _mark(items: list[dict], codes: set[str], names: set[str]) -> list[dict]:
@@ -192,3 +201,19 @@ async def push_digest() -> dict:
     logger.info("消息面推送完成（%s）：机器人 %s，站内信 %d 人", data.get("day"),
                 robots or ["无可用渠道"], len(sent_users))
     return {"day": data.get("day"), "robots": robots, "users": sent_users}
+
+
+# ---------------------------------------------------------------- 原始消息流（App 详情页）
+
+_FEED_PATH = "/api/news/feed"
+_ITEM_PATH = "/api/news/item"
+_FEED_EMPTY = {"rows": [], "limit": 0, "next_cursor": None}
+
+async def feed(limit: int = 30, before: str | None = None) -> dict:
+    """原始消息流一页。不做持仓匹配：这一层是「源说了什么」，判定仍在 /daily 那条路上。"""
+    return await _get(_FEED_PATH, {"limit": limit, "before": before or ""}, _FEED_EMPTY, "消息流")
+
+
+async def item(news_id: str) -> dict:
+    return await _get(_ITEM_PATH, {"id": news_id}, {}, "消息")
+

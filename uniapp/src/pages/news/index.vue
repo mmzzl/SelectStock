@@ -44,11 +44,16 @@ function goStock(it) {
   if (!it.isStock) return;
   uni.navigateTo({ url: `/pages/sector/kline?code=${it.code}&name=${encodeURIComponent(it.name)}` });
 }
+
+function goFeed() {
+  uni.navigateTo({ url: "/pages/news/feed" });
+}
 </script>
 <template>
   <view class="p">
     <view class="hd">
       <text class="dt">{{ data.day ? `${data.day} 批次` : "暂无批次" }}</text>
+      <text class="rf" @click="goFeed">实时消息</text>
       <text class="rf" @click="load">{{ loading ? "刷新中…" : "刷新" }}</text>
     </view>
 

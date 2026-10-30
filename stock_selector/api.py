@@ -15,6 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .core.selector import list_strategies, run_select, strategy_details
+from .fundflow.rank import FundDataMissing as FundRankDataMissing
+from .fundflow.rank import rank as fund_rank
 from .news import read as news_read
 from .sector_heat import HeatDataMissing, board_detail, heat, stock_kline
 
@@ -100,6 +102,47 @@ def news_daily(day: str = Query("", max_length=10, description="YYYY-MM-DD；留
     if db is None:
         return {"code": 1, "message": "消息面数据源不可用", "data": None}
     return {"code": 0, "data": news_read.daily(db, day or None, limit=limit)}
+
+
+@app.get("/api/news/feed")
+def news_feed(limit: int = Query(30, ge=1, le=100),
+              before: str = Query("", max_length=24, description="上一页末条的 id；留空从最新开始")):
+    """原始消息流（东财 10 秒线，每 30 秒在采），按采集序倒序一页。"""
+    db = news_read.connect()
+    if db is None:
+        return {"code": 1, "message": "消息面数据源不可用", "data": None}
+    try:
+        return {"code": 0, "data": news_read.feed(db, limit=limit, before=before or None)}
+    except ValueError as exc:
+        return {"code": 2, "message": str(exc), "data": None}
+
+
+@app.get("/api/news/item")
+def news_item(id: str = Query(..., min_length=24, max_length=24)):
+    """一条原始消息的详情：标题 + 摘要 + 关联标的。"""
+    db = news_read.connect()
+    if db is None:
+        return {"code": 1, "message": "消息面数据源不可用", "data": None}
+    try:
+        doc = news_read.item(db, id)
+    except ValueError as exc:
+        return {"code": 2, "message": str(exc), "data": None}
+    if doc is None:
+        return {"code": 3, "message": "没有这条消息（可能已被源清理）", "data": None}
+    return {"code": 0, "data": doc}
+
+
+@app.get("/api/fund/rank")
+def fund_rank_list(window: int = Query(3, ge=1, le=250),
+                   side: str = Query("in", pattern="^(in|out)$"),
+                   limit: int = Query(50, ge=1, le=200)):
+    """主力资金榜：最近 N 个交易日的累计净流入/净流出（单位元，换算交给前端）。"""
+    try:
+        return {"code": 0, "data": fund_rank(window=window, side=side, limit=limit)}
+    except FundRankDataMissing as exc:
+        return {"code": 1, "message": str(exc), "data": None}
+    except ValueError as exc:
+        return {"code": 2, "message": str(exc), "data": None}
 
 
 @app.get("/api/health")

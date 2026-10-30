@@ -578,3 +578,67 @@ export function newsBanner(data) {
   }
   return { text: "", cls: "" };
 }
+
+// ---------------------------------------------------------------- 主力资金榜
+
+/** 亿/万换算后补正号：负数 yiText 自带负号，这里只给流入加「+」，避免出现 "+-2亿"。 */
+function signedYi(v) {
+  const n = num(v);
+  if (n === null) return "—";
+  return `${n > 0 ? "+" : ""}${yiText(n)}`;
+}
+
+/** 榜里的一行。后端给的是元与小数占比，量纲全在这里换，页面只拿字符串。 */
+export function toFundRow(r) {
+  const code = String(r.code || "");
+  const net = num(r.net_inflow);
+  const ratio = num(r.ratio);
+  return {
+    code,
+    name: r.name || code || "—",
+    close: num(r.close),
+    net,
+    netText: signedYi(net),
+    ratio,
+    ratioText: ratio === null ? "—" : signedPct(ratio * 100),
+    ret: num(r.ret_pct),
+    retText: signedPct(r.ret_pct),
+    days: num(r.days),
+    isInflow: net !== null && net > 0,
+    isStock: /^\d{6}$/.test(code),
+  };
+}
+
+/**
+ * 榜单抬头。空榜一定要把后端为什么空念出来（哪一天采薄了），
+ * 只显示「没有数据」会被读成「这几天主力没有动向」。
+ */
+export function fundHeadline(data) {
+  if (!data) return { text: "资金榜还没有数据", cls: "muted" };
+  if (data.notice) return { text: data.notice, cls: "bad" };
+  if (!data.asof) return { text: "资金榜还没有数据", cls: "muted" };
+  return { text: `截至 ${data.asof} · ${data.window} 个交易日 · 全市场 ${data.total ?? 0} 只`, cls: "" };
+}
+
+// ---------------------------------------------------------------- 原始消息流
+
+/** 关联标的是 `市场.代码` 形式：BK 开头是板块，六位数字才是能开 K 线的个股。 */
+export function toNewsFeedRow(d) {
+  const stocks = [];
+  const boards = [];
+  for (const raw of (Array.isArray(d.stockList) ? d.stockList : [])) {
+    const text = String(raw);
+    const code = (text.includes(".") ? text.split(".")[1] : text).toUpperCase();
+    if (/^BK\d{4}$/.test(code)) boards.push(code);
+    else if (/^\d{6}$/.test(code)) stocks.push(code);
+  }
+  return {
+    id: d.id || "",
+    title: d.title || "",
+    summary: d.summary || "",
+    time: String(d.showTime || "").slice(5, 16),
+    stocks,
+    boards,
+  };
+}
+

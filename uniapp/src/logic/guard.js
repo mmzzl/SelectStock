@@ -2,7 +2,7 @@
 export const TAB_PATHS = [
   "pages/holdings/index",
   "pages/selection/index",
-  "pages/diag/index",
+  "pages/fund/index",
   "pages/messages/index",
   "pages/mine/index",
 ];
@@ -19,6 +19,9 @@ export const PAGE_PATHS = [
   "pages/sector/board",
   "pages/sector/kline",
   "pages/news/index",
+  "pages/news/feed",
+  "pages/news/detail",
+  "pages/diag/index",
   "pages/diag/detail",
   "pages/mine/password",
 ];

@@ -5976,3 +5976,69 @@ R4 的 ≤3pp 门槛要求的正是这个它拿不到的信息。
 这条与 R1 不冲突（barrier 单列仍严格单调），但它意味着「今天的数 vs 昨天的数」
 本身带 ±10pp 级别的抖动，日频读数不能当差分用。要治得改预测口径
 （折内多 Booster 平均 / 或对该票的分数做时间平滑），单独预注册再动，先如实记下。
+
+---
+
+## §51 App 新增「资金」页与「实时消息」详情层（2026-10-30 09:00–10:10 CST）
+
+需求原话：**「可以在 uniapp 上新增新闻和资金相关的页面，资金可以查看最近 3 天、7 天、30 天流入和流出的股票，新闻页面显示新闻数据就好了」**，
+补了三句约束：**「新闻分析保留」**（消息面那套 LLM 分析一律不动，新页面是叠加不是替换）、
+**「增加的是新闻详情页面」**（要的是原始消息流 + 单条原文，不是又一层分析）、
+以及三个口径回答：**资金进 tabBar 替掉「诊断」**、**主力净额 = 超大单 + 大单**、**详情层只要标题 + 摘要**。
+
+资金侧的口径、读数与薄日缺口单独落在《资金流数据口径与防前瞻红线》**§九**（那一节是准绳），
+这里只记 App/接口这条链的做法。
+
+### 1. 五层链条（照板块热力图逐层复制，没有新发明）
+
+| 层 | 文件 | 职责边界 |
+| --- | --- | --- |
+| 预计算 | `scripts/build_fund_rank.py` | 只有它碰原始分区，产出 `data/fund_rank/rank.parquet + meta.json` |
+| 只读内核 | `stock_selector/fundflow/rank.py`、`stock_selector/news/read.py` | mtime 缓存、缺产物抛 `FundDataMissing`；不写任何状态 |
+| 8002 路由 | `stock_selector/api.py` | `/api/fund/rank`、`/api/news/feed`、`/api/news/item`；`{code,data}` 信封 |
+| 8010 代理 | `backend/services/{fund,news}_service.py`、`backend/api/v1/{fund,news}.py` | 带鉴权、只转发；上游坏 ⇒ `BizError`，不给空榜 |
+| 前端 | `uniapp/src/pages/{fund/index,news/feed,news/detail}.vue` + `logic/view.js` | 只做量纲换词与排版，不重算任何统计量 |
+
+### 2. 消息流这一层：游标为什么从 showTime 换成 `_id`
+
+Mongo `eastmoney_news.news`（15,137 条，字段 `title/summary/showTime/stockList/pinglun_Num/share/...`）。
+原设计用 `showTime` 字符串做翻页游标，实现时发现它**不唯一**：同一秒内多条消息时
+`{showTime: {$lt: cursor}}` 会整秒跳过、`$lte` 会整秒重复。
+`_id` 是 ObjectId，实测 **`_id` 升序与 `showTime` 升序同向**且天然唯一 ⇒ 游标改 `_id` 的 24 位十六进制，
+前端拿 `next_cursor` 续翻。详情接口 `item?id=<_id>` 只多回 `pinglun_Num/share`，正文仍只有 `summary`
+（他点名「只要标题 + 摘要」，原文不在库里，页面底部注明「摘自东方财富实时消息，未经改写」）。
+`stockList` 是 `"市场.代码"` 形式，前端拆成个股码与板块码（`BK` 开头）分别渲染，个股码可点进 K 线页。
+
+翻页一次性把「消息」页的入口加在右上角（`实时消息`），不改那条 LLM 分析日榜的任何行为。
+
+### 3. tabBar 换位的收尾：诊断不能变成进不去的页
+
+`pages/diag/index` 从 tabBar 挪到「我的」列表里（新增一行「诊断历史」）。
+这条有测试钉住：`uniapp/tests/fund-news.test.js` 断言 ①诊断不再在 tab 上、
+②守卫表 `PAGE_PATHS` 仍含诊断且 `resolveRoute` 放行、③`mine/index.vue` 里必须出现
+`pages/diag/index` 这个跳转目标。**少了第 ③ 条，页面就会变成只有直连 URL 才进得去的死页。**
+
+### 4. 验证读数（2026-10-30 10:04 CST 全部实跑）
+
+- 仓库根 `pytest tests/ -q` ⇒ **1,472 passed**；`cd stock_selector_api/backend && pytest -q` ⇒ **352 passed**。
+  本轮新增 Python 测试四个文件：`test_fund_rank.py`(11)、`test_fund_rank_read.py`(11)、
+  `test_news_feed.py`(8)、`test_fund_news_routes.py`(6)、`test_fund_news_proxy.py`(15)。
+- `cd uniapp && node --test tests/*.test.js`（nvm node v24.21.0；`/usr/bin/node` 是 v12 会误解析 `??`）⇒ **111 passed**。
+- `npx uni build --outDir /tmp/...` 编译通过，产物里 `pages-fund-index`、`pages-news-feed`、
+  `pages-news-detail`、`pages-mine-index` 四个 chunk 都在（临时目录已删，`dist/` 未动）。
+- 直接打 8002 的 `/api/fund/rank` 与 `/api/news/feed` ⇒ **404**（进程还是旧的，代码没加载）。
+
+### 5. 现在还没生效的东西（不隐瞒）
+
+1. **8002/8010 要重启**才认新路由；**前端要重新出 H5/APK** 才有新页面。
+   APK 在他手机上装不了（HarmonyOS 7 / API 26，见《App 出包》那条记忆），能看新页面的路径是 H5 重新部署。
+2. **`build_fund_rank.py` 还没挂定时任务**，需要他点头改 `config/inputs.conf` + 重启 scheduler；
+   现在这份产物是 2026-10-30 09:41 手跑的，`as_of=2026-10-29`。
+3. **30 日档当前 0 只票**（10-14/15/16/19 四天采薄，尤其 10-16 只有 186 行），
+   页面会说明原因而不是显示空榜。要不要联网回补这四天 = 等他拍板（§九第 3 条已算过离线补不了）。
+
+### 6. 回滚
+
+- 数据/接口层：`mv data/fund_rank /tmp/` ⇒ 8002 变回「缺产物」，8010 变回业务错误，页面无假数据。
+- 前端：还原 `uniapp/src/pages.json` + `logic/guard.js` 两个表（tab 换回诊断），
+  「我的」里那行诊断入口可以留着，不影响任何行为。

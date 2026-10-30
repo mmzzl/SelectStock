@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime, timedelta
 
 logger = logging.getLogger("news.read")
@@ -131,3 +132,58 @@ def holdings_hits(db, day: str, codes: list[str]) -> list[dict]:
     rows = [_doc_to_item(d) for d in db.watch_target.find(
         {"collect_date": day, "code": {"$in": list(codes)}})]
     return _sorted("bearish", rows)
+
+
+# ---------------------------------------------------------------- 原始消息流（App 新闻详情页）
+
+FEED_MAX_LIMIT = 100
+_FEED_FIELDS = ("title", "summary", "showTime", "stockList")
+_ID_RE = re.compile(r"^[0-9a-fA-F]{24}$")
+
+
+def _oid(value):
+    """游标/详情 id 换成 ObjectId。非法值直接 ValueError——路由层出 code:2，不能让它 500。"""
+    if value is None or str(value).strip() == "":
+        return None
+    text = str(value).strip()
+    if not _ID_RE.match(text):
+        raise ValueError("新闻 id 需为 24 位十六进制的 _id")
+    from bson import ObjectId
+
+    return ObjectId(text)
+
+
+def _feed_doc(d: dict) -> dict:
+    return {
+        "id": str(d["_id"]),
+        "title": d.get("title") or "",
+        "summary": d.get("summary") or "",
+        "showTime": d.get("showTime") or "",
+        "stockList": [str(x) for x in (d.get("stockList") or [])],
+    }
+
+
+def feed(db, limit: int = 30, before: str | None = None) -> dict:
+    """原始消息流倒序一页。
+
+    游标用 `_id` 不用 `showTime`：`_id` 唯一且与采集顺序同向（实测 15,137 条全部是
+    ObjectId、升序与 showTime 升序一致），按时间字符串翻页会在同一秒撞车时重条或漏条。
+    """
+    limit = max(1, min(int(limit), FEED_MAX_LIMIT))
+    cursor = _oid(before)
+    query = {"_id": {"$lt": cursor}} if cursor is not None else {}
+    docs = list(db.news.find(query, {f: 1 for f in _FEED_FIELDS})
+                .sort([("_id", -1)]).limit(limit))
+    rows = [_feed_doc(d) for d in docs]
+    return {"rows": rows, "limit": limit,
+            "next_cursor": rows[-1]["id"] if rows else None}
+
+
+def item(db, news_id: str) -> dict | None:
+    """一条原始消息：标题 + 摘要 + 关联标的 + 互动数。找不到返回 None（调用方出空态）。"""
+    doc = db.news.find_one({"_id": _oid(news_id)})
+    if not doc:
+        return None
+    return {**_feed_doc(doc), "pinglun_Num": int(doc.get("pinglun_Num") or 0),
+            "share": int(doc.get("share") or 0)}
+

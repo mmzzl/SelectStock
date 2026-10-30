@@ -7,8 +7,9 @@ import { selectionApi } from "../api/selection.js";
 import { messagesApi } from "../api/messages.js";
 import { upgradeApi } from "../api/upgrade.js";
 import { sectorApi } from "../api/sector.js";
+import { fundApi } from "../api/fund.js";
 import { newsApi } from "../api/news.js";
-import { loadSession, clearSession, setSession } from "../store/session.js";
+import { loadSession, clearSession, setSession, setTokens } from "../store/session.js";
 
 const BASE = import.meta.env.VITE_API_BASE || "";
 
@@ -18,6 +19,10 @@ export function useClient() {
   const client = createClient({
     baseUrl: BASE,
     getToken: () => loadSession().token,
+    // access 令牌只有 30 分钟，服务端 /auth/refresh 会连 refresh_token 一起换发。
+    // 以前 App 只把 refresh 存在 storage 里从不调用，所以半小时一到就踢人回登录页。
+    getRefreshToken: () => loadSession().refresh,
+    onTokenRefreshed: (tokens) => setTokens(tokens),
     onUnauthorized: () => {
       clearSession();
       globalThis.uni?.reLaunch?.({ url: "/pages/login/index" });
@@ -32,6 +37,7 @@ export function useClient() {
     messages: messagesApi(client),
     upgrade: upgradeApi(client),
     sector: sectorApi(client),
+    fund: fundApi(client),
     news: newsApi(client),
   };
   return _cached;

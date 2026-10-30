@@ -12,6 +12,9 @@
     { "path": "pages/sector/board", "style": { "navigationBarTitleText": "板块详情" } },
     { "path": "pages/sector/kline", "style": { "navigationBarTitleText": "日K线" } },
     { "path": "pages/news/index", "style": { "navigationBarTitleText": "消息面" } },
+    { "path": "pages/news/feed", "style": { "navigationBarTitleText": "实时消息", "enablePullDownRefresh": true } },
+    { "path": "pages/news/detail", "style": { "navigationBarTitleText": "消息详情" } },
+    { "path": "pages/fund/index", "style": { "navigationBarTitleText": "主力资金" } },
     { "path": "pages/diag/index", "style": { "navigationBarTitleText": "诊断历史" } },
     { "path": "pages/diag/detail", "style": { "navigationBarTitleText": "诊断明细" } },
     { "path": "pages/messages/index", "style": { "navigationBarTitleText": "消息" } },
@@ -32,7 +35,7 @@
     "list": [
       { "pagePath": "pages/holdings/index", "text": "持仓" },
       { "pagePath": "pages/selection/index", "text": "选股" },
-      { "pagePath": "pages/diag/index", "text": "诊断" },
+      { "pagePath": "pages/fund/index", "text": "资金" },
       { "pagePath": "pages/messages/index", "text": "消息" },
       { "pagePath": "pages/mine/index", "text": "我的" }
     ]

@@ -27,6 +27,8 @@ function logout() { clearSession(); uni.reLaunch({ url: "/pages/login/index" });
 const goPassword = () => uni.navigateTo({ url: "/pages/mine/password" });
 const goSector = () => uni.navigateTo({ url: "/pages/sector/index" });
 const goNews = () => uni.navigateTo({ url: "/pages/news/index" });
+// 诊断从 tab 挪下来了，入口收在这里，否则这个页面就没地方进去了
+const goDiag = () => uni.navigateTo({ url: "/pages/diag/index" });
 
 // #ifdef APP-PLUS
 function isAndroidApp() {
@@ -93,6 +95,10 @@ function checkUpgrade() {
       </view>
       <view class="cell" @click="goNews">
         <text class="t">消息面</text>
+        <text class="arrow">›</text>
+      </view>
+      <view class="cell" @click="goDiag">
+        <text class="t">诊断历史</text>
         <text class="arrow">›</text>
       </view>
       <view class="cell" @click="checkUpgrade">

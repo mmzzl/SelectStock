@@ -10,5 +10,5 @@ test("pages.json 含 5 个 Tab 与全部页面", () => {
                    "pages/diag/index", "pages/diag/detail", "pages/messages/index", "pages/mine/index"])
     assert.ok(paths.includes(p), `missing ${p}`);
   assert.equal(cfg.tabBar.list.length, 5);
-  assert.deepEqual(cfg.tabBar.list.map((t) => t.text), ["持仓", "选股", "诊断", "消息", "我的"]);
+  assert.deepEqual(cfg.tabBar.list.map((t) => t.text), ["持仓", "选股", "资金", "消息", "我的"]);
 });
