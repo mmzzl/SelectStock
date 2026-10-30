@@ -17,6 +17,24 @@ export function setSession({ access_token, refresh_token, user }) {
   }
 }
 
+/**
+ * 续期只换两份令牌，user 原样保留。
+ * 走 setSession 会把它按「没传 user」处理成 null ——「我的」页用户名当场变空，
+ * 等于每半小时续一次期就丢一次身份。服务端 /auth/refresh 的返回里本来就没有 user。
+ */
+export function setTokens({ access_token, refresh_token } = {}) {
+  memory = {
+    ...memory,
+    token: access_token || memory.token,
+    refresh: refresh_token || memory.refresh,
+  };
+  const u = globalThis.uni;
+  if (u?.setStorageSync) {
+    u.setStorageSync(K_TOKEN, memory.token);
+    u.setStorageSync(K_REFRESH, memory.refresh);
+  }
+}
+
 export function loadSession() {
   const u = globalThis.uni;
   if (u?.getStorageSync) {

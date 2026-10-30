@@ -93,6 +93,93 @@ test("上传返回字符串 body：JSON.parse 后解包", async () => {
   assert.deepEqual(out, { url: "/u/x.apk" });
 });
 
+// ---------------------------------------------------------------------------
+// token 自动续期（服务端 access 30 分钟过期，refresh 7 天且每次轮换）
+// 成因：App 把 refresh_token 存进 storage 后从来没调过 /api/v1/auth/refresh，
+// 所以半小时一到就被踢回登录页重新输密码 + 验证码。
+// ---------------------------------------------------------------------------
+const REFRESH_OK = {
+  statusCode: 200,
+  data: { code: 0, message: "刷新成功", data: { access_token: "T2", token_type: "bearer", refresh_token: "R2" } },
+};
+const UNAUTH = { statusCode: 401, data: { code: 401, message: "未认证" } };
+const HOLDINGS_OK = { statusCode: 200, data: { code: 0, data: { items: [{ code: "600519" }] }, message: "ok" } };
+
+function scriptedAdapter(responder) {
+  const calls = [];
+  return {
+    calls,
+    request(cfg) { calls.push(cfg); return Promise.resolve(responder(cfg, calls)); },
+    upload(cfg) { calls.push(cfg); return Promise.resolve({ statusCode: 200, data: { code: 0, data: {} } }); },
+  };
+}
+const isRefresh = (cfg) => cfg.url.endsWith("/api/v1/auth/refresh");
+
+test("续期：401 时先换新 token 再重放，不该把用户踢回登录页", async () => {
+  let cleared = false;
+  let refreshed = null;
+  const a = scriptedAdapter((cfg, calls) => {
+    if (isRefresh(cfg)) return REFRESH_OK;
+    return calls.filter((c) => !isRefresh(c)).length === 1 ? UNAUTH : HOLDINGS_OK;
+  });
+  const c = createClient({
+    adapter: a, baseUrl: "", getToken: () => "T1", getRefreshToken: () => "R1",
+    onTokenRefreshed: (t) => { refreshed = t; }, onUnauthorized: () => { cleared = true; },
+  });
+  assert.deepEqual(await c.get("/api/v1/holdings"), { items: [{ code: "600519" }] });
+  assert.equal(cleared, false, "续期成功就不该清会话跳登录页");
+  const rc = a.calls.find(isRefresh);
+  assert.equal(rc.method, "POST");
+  assert.deepEqual(rc.data, { refresh_token: "R1" });
+  assert.equal(a.calls.at(-1).header.Authorization, "Bearer T2", "重放必须用新 token");
+  assert.equal(refreshed.refresh_token, "R2", "轮换出来的新 refresh 要交回调用方存着");
+});
+
+test("续期：并发两个 401 只刷一次，两边都用新 token 重放", async () => {
+  const a = scriptedAdapter((cfg) => (isRefresh(cfg) ? REFRESH_OK
+    : cfg.header.Authorization === "Bearer T2" ? HOLDINGS_OK : UNAUTH));
+  let refreshCount = 0;
+  const counting = {
+    calls: a.calls,
+    request(cfg) { if (isRefresh(cfg)) refreshCount += 1; return a.request(cfg); },
+    upload: a.upload,
+  };
+  const c = createClient({ adapter: counting, getToken: () => "T1", getRefreshToken: () => "R1" });
+  const [x, y] = await Promise.all([c.get("/api/v1/holdings"), c.get("/api/v1/holdings/pnl")]);
+  assert.equal(refreshCount, 1, "refresh 每次调用都会轮换 refresh_token，同时发两份是自己打自己");
+  assert.deepEqual(x, y);
+});
+
+test("续期失败才清会话：refresh 也 401 ⇒ 抛 UnauthorizedError 且不重放", async () => {
+  let cleared = false;
+  const a = scriptedAdapter((cfg) => (isRefresh(cfg) ? UNAUTH : UNAUTH));
+  const c = createClient({
+    adapter: a, getToken: () => "T1", getRefreshToken: () => "R-已过期",
+    onUnauthorized: () => { cleared = true; },
+  });
+  await assert.rejects(() => c.get("/api/v1/holdings"), (e) => e.name === "UnauthorizedError");
+  assert.equal(cleared, true);
+  assert.equal(a.calls.filter((cfg) => !isRefresh(cfg)).length, 1, "续期没成功就不该再打业务接口");
+});
+
+test("没存 refresh_token 时行为不变：一条额外请求都不发", async () => {
+  let cleared = false;
+  const a = scriptedAdapter(() => UNAUTH);
+  const c = createClient({ adapter: a, getToken: () => "T1", getRefreshToken: () => "",
+    onUnauthorized: () => { cleared = true; } });
+  await assert.rejects(() => c.get("/api/v1/holdings"), (e) => e.name === "UnauthorizedError");
+  assert.equal(a.calls.length, 1);
+  assert.equal(cleared, true);
+});
+
+test("重放只试一次：续期后仍然 401 就认，不能无限循环", async () => {
+  const a = scriptedAdapter((cfg) => (isRefresh(cfg) ? REFRESH_OK : UNAUTH));
+  const c = createClient({ adapter: a, getToken: () => "T1", getRefreshToken: () => "R1" });
+  await assert.rejects(() => c.get("/api/v1/holdings"), (e) => e.name === "UnauthorizedError");
+  assert.equal(a.calls.filter((cfg) => !isRefresh(cfg)).length, 2, "原始一次 + 重放一次，到此为止");
+  assert.equal(a.calls.filter(isRefresh).length, 1);
+});
+
 test("领域 API 路径映射（契约消费）", async () => {
   const a = fakeAdapter();
   const c = createClient({ adapter: a, getToken: () => "T" });

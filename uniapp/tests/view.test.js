@@ -617,3 +617,30 @@ test("选股页把三档价位和口径句子都渲染出来", async () => {
   assert.ok(page.includes("buyLevelText(r)"), "价位行没接上");
   assert.ok(page.includes("levelNoteText(r)"), "口径句子没渲染——光给三个数字会被读成模型预测的价格");
 });
+
+// 下面两条量的是「一进页面发几个来回」。口径：走公网隧道单请求实测 0.23~0.92 秒
+// （本机 2026-10-30 连打 10 次，热连接），内网直连同一接口只有 16~22 毫秒。
+// 也就是说每多一个串行来回就是多等将近一秒，跟服务端快慢无关。
+test("持仓页：list 与 pnl 在同一次并发里发出，名次仍排在 list 之后", async () => {
+  const { readFileSync } = await import("node:fs");
+  const page = readFileSync(new URL("../src/pages/holdings/index.vue", import.meta.url), "utf8");
+  assert.match(page, /Promise\.allSettled\(\s*\[[\s\S]{0,240}?holdings\.list\([\s\S]{0,240}?holdings\.pnl\(/,
+    "这两条互不依赖，串行 await 就是白等一个隧道来回");
+  // 原来「插件不可用时只降级掉汇总条、不打空持仓列表」那条边界必须还在
+  assert.match(page, /summary\.value = pnlRes\.status === "fulfilled"/,
+    "汇总取数失败只能降级汇总条，不能把列表一起打空");
+  assert.ok(page.indexOf("loadRanks()") > page.indexOf("Promise.allSettled"),
+    "名次接口要的是持仓代码，必须排在 list 之后");
+});
+
+test("选股页轮询：切走停掉、回来续上（tabBar 页不触发 onUnload）", async () => {
+  const { readFileSync } = await import("node:fs");
+  const page = readFileSync(new URL("../src/pages/selection/index.vue", import.meta.url), "utf8");
+  assert.match(page, /import \{[^}]*\bonHide\b[^}]*\} from "@dcloudio\/uni-app"/,
+    "onHide 没引进来，下面那句清理就是死代码");
+  assert.match(page, /onHide\(\(\) => \{[^}]*clearInterval\(timer\)/,
+    "任务 running 时切走只触发 onHide：不清 timer 就是后台每 2 秒一直抢隧道");
+  assert.match(page, /onShow\(async \(\) => \{[\s\S]{0,300}?startPoll\(/,
+    "任务还没结束就切走再回来，轮询要续上，不能停在「计算中」永远不动");
+});
+

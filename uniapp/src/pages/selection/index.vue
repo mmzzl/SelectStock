@@ -1,7 +1,7 @@
 <!-- uniapp/src/pages/selection/index.vue -->
 <script setup>
 import { computed, ref } from "vue";
-import { onShow, onUnload } from "@dcloudio/uni-app";
+import { onShow, onHide, onUnload } from "@dcloudio/uni-app";
 import { useClient } from "../../composables/useClient.js";
 import { toSelectionResultRow, toStrategyOption, riskText, riskClass, isNa, sortByRiskDesc, buyLevelText, levelNoteText, orderPlanText, riskAdjustText, posteriorText, gateText, scoreText } from "../../logic/view.js";
 
@@ -15,6 +15,8 @@ const err = ref("");
 let timer = null;
 
 onShow(async () => {
+  // 任务还在跑就切走过（onHide 停了轮询），回来先续上，不然页面永远停在「计算中」不动。
+  if (job.value && !["done", "failed"].includes(job.value.status)) startPoll(job.value.jobId);
   // 每次进页都刷新：策略下线（例如 hot_pref）后，旧选项不能继续留在页面上被点中。
   // 刷新失败时保留旧列表并报错，不能把「插件连不上」显示成「没有策略」。
   try {
@@ -31,6 +33,11 @@ onShow(async () => {
   err.value = "";
   chosen.value = chosen.value.filter((n) => strategies.value.some((s) => s.name === n));
 });
+onHide(() => {
+  // 这是 tabBar 页，切走只触发 onHide、不触发 onUnload。任务 running 期间那台 2 秒轮询
+  // 不清掉就会在后台一直抢这条公网隧道（单请求实测 0.23~0.92 秒），回来再续上。
+  clearInterval(timer); timer = null;
+});
 onUnload(() => { clearInterval(timer); timer = null; });
 
 async function trigger() {
@@ -42,6 +49,7 @@ async function trigger() {
   } catch (e) { err.value = e.message; }
 }
 function startPoll(jobId) {
+  if (timer) clearInterval(timer);        // 连点两次不能留两条轮询同时写同一个 job
   polling.value = true;
   timer = setInterval(async () => {
     try {

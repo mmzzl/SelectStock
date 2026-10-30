@@ -16,12 +16,18 @@ const today = () => new Date().toISOString().slice(0, 10);
 
 onShow(async () => {
   loading.value = true; err.value = "";
-  try {
-    const data = await holdings.list({});
-    rows.value = (data.items || data || []).map(toHoldingRow);
-    // 汇总条与列表分开取：插件不可用时只降级掉汇总，不影响持仓列表
-    try { summary.value = toPnlView(await holdings.pnl({ natural_day: today() })); } catch { summary.value = null; }
-  } catch (e) { err.value = e.message; } finally { loading.value = false; }
+  // 列表和汇总两条互不依赖，一次并发发出去。口径：走公网隧道一个来回实测 0.23~0.92 秒
+  // （内网直连同一服务只有 16~22 毫秒），串行 await 就是白等将近一秒。
+  // 用 allSettled 不用 all：汇总条取不到只该降级掉汇总条，不能把持仓列表一起打空。
+  const [listRes, pnlRes] = await Promise.allSettled([
+    holdings.list({}),
+    holdings.pnl({ natural_day: today() }),
+  ]);
+  if (listRes.status === "fulfilled") {
+    rows.value = (listRes.value.items || listRes.value || []).map(toHoldingRow);
+  } else { err.value = listRes.reason?.message || "持仓读取失败"; }
+  summary.value = pnlRes.status === "fulfilled" ? toPnlView(pnlRes.value) : null;
+  loading.value = false;
   // 名次不挂在 loading 上：这条接口现在**不会等打分**（引擎当日榜单没算好时立刻回 ready=false
   // 并自己起后台预热，全市场约 2,900 只冷打分要几百秒，放进请求里一定被超时打断）。
   // 先让持仓列表出来，名次到了再填，取不到就只说名次这件事的状态。

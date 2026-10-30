@@ -67,18 +67,52 @@ function handle({ statusCode, data }, { onUnauthorized }) {
   return data;
 }
 
-export function createClient({ adapter, getToken, onUnauthorized, baseUrl = "" } = {}) {
+export function createClient({ adapter, getToken, getRefreshToken, onTokenRefreshed, onUnauthorized, baseUrl = "" } = {}) {
   const ad = adapter || defaultAdapter();
+  let refreshing = null;        // 并发 401 共用同一次续期（见 refreshOnce）
+
+  /**
+   * 用 refresh_token 换一份新 access。成功返回令牌对，任何失败都返回 null 让调用方走老路。
+   *
+   * 为什么要共用一个 promise：服务端每次刷新都会**轮换** refresh_token，同一页几个请求各自
+   * 去刷就是各自拿着旧令牌互相作废；实测持仓页一次进 3 条请求。
+   * 走 ad.request 而不是本客户端的 request，否则 401 会自己递归。
+   */
+  async function refreshOnce() {
+    const rt = getRefreshToken ? getRefreshToken() : "";
+    if (!rt) return null;
+    if (!refreshing) {
+      refreshing = (async () => {
+        try {
+          const res = await ad.request({
+            url: `${baseUrl}/api/v1/auth/refresh`, method: "POST", data: { refresh_token: rt },
+            timeout: GET_TIMEOUT_MS, header: { "Content-Type": "application/json" },
+          });
+          const data = typeof res.data === "string" ? JSON.parse(res.data) : res.data;
+          const tokens = data?.data;
+          if (res.statusCode !== 200 || !tokens?.access_token) return null;
+          onTokenRefreshed?.(tokens);
+          return tokens;
+        } catch {
+          return null;
+        } finally {
+          refreshing = null;
+        }
+      })();
+    }
+    return refreshing;
+  }
+
   return {
     async request(method, path, { query, body, header, silentUnauthorized } = {}) {
       const qs = query ? toQuery(query) : "";
-      const token = getToken ? getToken() : "";
+      const url = `${baseUrl}${path}${qs}`;
       // 登录接口自己的 401 是「用户名或密码错误」，不是「会话失效」。走全局处理会
       // clearSession + reLaunch 回登录页，把刚写上去的错误提示连同表单一起冲掉，
       // 用户看到的就是「点了登录，页面闪一下又空了」。
       const auth = silentUnauthorized ? null : onUnauthorized;
-      const cfg = {
-        url: `${baseUrl}${path}${qs}`,
+      const cfgFor = (token) => ({
+        url,
         method,
         data: body,
         // 统一 20 秒。以前按接口放宽过（榜内名次给到 60 秒），那次是因为引擎会在请求里
@@ -86,20 +120,28 @@ export function createClient({ adapter, getToken, onUnauthorized, baseUrl = "" }
         // 没有任何一条读接口需要等计算，所以这个参数整体删掉了。
         timeout: GET_TIMEOUT_MS,
         header: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...header },
-      };
+      });
       // 公网隧道（Cloudflare 边缘 + 移动网络）首包能到 1.5s 以上，偶发一次失败就让页面
       // 停在「暂无记录」再也翻不过来，所以 GET 补一次重试；POST 不重试（选股会重复建任务）。
-      if (method.toUpperCase() !== "GET") {
+      const send = async (cfg) => {
+        if (method.toUpperCase() !== "GET") {
+          try { return await ad.request(cfg); } catch (e) { throw netError(e); }
+        }
         let res;
-        try { res = await ad.request(cfg); } catch (e) { throw netError(e); }
-        return handle(res, { onUnauthorized: auth });
-      }
-      let res;
-      try {
-        res = await ad.request(cfg);
-      } catch (e) {
-        await sleep(RETRY_DELAY_MS);
-        try { res = await ad.request(cfg); } catch (e2) { throw netError(e2); }
+        try {
+          res = await ad.request(cfg);
+        } catch (e) {
+          await sleep(RETRY_DELAY_MS);
+          try { res = await ad.request(cfg); } catch (e2) { throw netError(e2); }
+        }
+        return res;
+      };
+      let res = await send(cfgFor(getToken ? getToken() : ""));
+      // access 令牌只有 30 分钟，而 App 以前从不调 /auth/refresh —— 半小时就被踢回登录页
+      // 重输密码和验证码。这里补上：能续就续，续完**只重放一次**，还不行就按老路报未认证。
+      if (res.statusCode === 401 && !silentUnauthorized && getRefreshToken) {
+        const tokens = await refreshOnce();
+        if (tokens) res = await send(cfgFor(tokens.access_token));
       }
       return handle(res, { onUnauthorized: auth });
     },
