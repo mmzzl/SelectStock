@@ -1,5 +1,6 @@
 import sys
 import os
+import argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import time
 import traceback
@@ -45,6 +46,98 @@ def in_universe(market: str, pure: str) -> bool:
 SHARES_PER_LOT = 100.0          # 一手的股数：sina 全按「股」给，腾讯只有科创板按「股」给
 VOLUME_UNIT = "lot"             # 入库口径标记，让单位折算的补数脚本可以被反复执行
 STAR_PREFIXES = ("688", "689")  # 689 是 CDR（九号公司），腾讯和 688 一样给「股」
+
+# 腾讯日线的两个入口，同一个数据的两种域名：
+# - 主源 ifzq.gtimg.cn 会被 WAF 整域挡（HTTP 501 + stgw，见 `_is_waf_page`）；
+# - 镜像 proxy.finance.qq.com 的 newfqkline 给 10 列，下标 0-5 与主源同构，
+#   下标 8 是成交额（万元，见 backfill_kline_amount.py 的核对）。
+# 用「域名 + 取哪一列」成对描述，好让同一个解析函数吃两种响应。
+TENCENT_ENDPOINTS = (
+    ("ifzq", "https://ifzq.gtimg.cn/appstock/app/fqkline/get"),
+    ("proxy", "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"),
+)
+# 撞过 WAF 的端点名。一次运行内熔断，避免 6922 只每只都去撞一次墙、每只白等 6 秒。
+_TENCENT_DEAD: set = set()
+
+# 复权口径写死裸价（§48.1）：静默回落 qfqday 会让同一天的两根 K 线来自两个复权基准，
+# 因子表里 600272 那批错标就是这么来的。requests 一改口径，`adjust` 字段和入库的
+# `adjust` 标签都要跟着变，所以做成常量而不是散落的字面量。
+TENCENT_ADJUST = "raw"
+
+
+def _tencent_token(market: str, code: str, count: int, adjust: Optional[str] = None) -> str:
+    """拼腾讯 K 线的 `param`。第 6 个字段不能省，省了回 `bad params`。
+
+    实测（2026-11-02）三种写法：
+      `sh600519,day,,,320`     → {"code":1,"msg":"bad params"}，只有 version
+      `sh600519,day,,,320,`    → code=0，读 `day`（裸价）
+      `sh600519,day,,,320,qfq` → code=0，读 `qfqday`（前复权）
+    注意 qfq 与裸价是同一天两个数（600519 在 2025-07-08：qfq=1358.73 / raw=1410.71），
+    所以口径必须显式选，不能两个都试。
+
+    `adjust` 默认取 None 再回读 `TENCENT_ADJUST`，而不是写成 `adjust=TENCENT_ADJUST`：
+    默认参数在 **def 那一刻**就绑死了，运行期改常量不会生效（2026-11-02 自己踩过）。
+    """
+    adjust = TENCENT_ADJUST if adjust is None else adjust
+    tail = "qfq" if adjust == "qfq" else ""
+    return f"{market}{code},day,,,{count},{tail}"
+
+
+# 当天落库只数的下限：2026-11-02 那轮 6,922 只里只落了 595 只（8.6%），一路静默到 17:16
+# 才由面板那层的覆盖率告警喊出来，榜上已经只剩 2 只了。采集这层自己必须会喊。
+DAY_BAR_MIN_RATIO = 0.9
+
+
+def day_bar_problem(day: str, fetched: int, with_bar: int,
+                    min_ratio: float = DAY_BAR_MIN_RATIO) -> Optional[Dict[str, Any]]:
+    """当天真落库的只数明显少于应抓只数 ⇒ 给出读数；否则 None。
+
+    `with_bar == 0` 不算问题：周末/休市那天全场都不该有柱子，报出来就是天天刷屏。
+    """
+    if fetched <= 0 or with_bar <= 0:
+        return None
+    ratio = with_bar / fetched
+    if ratio >= min_ratio:
+        return None
+    return {"day": day, "with_bar": with_bar, "fetched": fetched,
+            "ratio": round(ratio, 3), "min_ratio": min_ratio}
+
+
+def codes_with_bar(col, day: str) -> int:
+    """库里当天有日线的只数（读库，不读循环计数）。
+
+    循环里的 `success` 数的是「这次带回了新柱子」的票：重跑/补跑时全场都是 0，
+    而榜单依赖的是「库里有那天的行」——两者不能混。
+    """
+    nxt = (datetime.strptime(day, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    pipe = [{"$match": {"date": {"$gte": day, "$lt": nxt}, "frequency": 9}},
+            {"$group": {"_id": None, "n": {"$sum": 1}}}]
+    for row in col.aggregate(pipe, allowDiskUse=True):
+        return int(row.get("n") or 0)
+    return 0
+
+
+def alert_day_bar_problem(problem: Optional[Dict[str, Any]]) -> bool:
+    """把当天的采集缺口推钉钉（和 qlib_update_bin 同一个机器人）。返回 True = 真发了。"""
+    if not problem:
+        return False
+    text = (f"{problem['day']} 日线落库 {problem['with_bar']}/{problem['fetched']} 只"
+            f"（{problem['ratio'] * 100:.1f}%，下限 {problem['min_ratio'] * 100:.0f}%）\n"
+            "主源（腾讯 ifzq.gtimg.cn）当天多半回的是 200 空 body，日志里看是 skipped 不是 failed；"
+            "备源 sina 没有成交额列，当日精确值还要等 merge_snapshot_amount 从盘后快照并回。\n"
+            "后果：17:15 的面板增量、17:30 的选股名单都只看得见这一小片市场，"
+            "别把今天的名单当全市场结论用。")
+    try:
+        import alert_pusher
+
+        name, url, secret = alert_pusher.resolve_webhook(alert_pusher.DINGTALK, "ding_ops")
+        if alert_pusher.send(alert_pusher.DINGTALK, url, secret, "K线当日落库缺口", text):
+            logging.info("已推钉钉（%s）：当日落库缺口", name)
+            return True
+        logging.warning("钉钉返回失败，缺口只在日志里")
+    except Exception as exc:  # noqa: BLE001 - 告警发不出去也不能把爬虫带崩
+        logging.warning("钉钉告警发不出去：%s", exc)
+    return False
 
 
 def _tencent_volume(code: str, raw: float) -> int:
@@ -93,34 +186,84 @@ def _parse_api_response(code: str, bars: List, source: str = "tencent") -> List[
     return records
 
 
+def _is_waf_page(r) -> bool:
+    """腾讯 WAF 拦截页：HTTP 501 + `Server: stgw` + 一段跳 `waf.tencent.com/501page.html` 的 HTML。
+
+    2026-11-02 22:4x 实测：`ifzq.gtimg.cn` 整域被挡（含实时行情路径），603/688/605/601
+    号段 72 只全 501，连 22:36 还成功过的 600519 也 501；而 `proxy.finance.qq.com` 与
+    `qt.gtimg.cn` 同时都还是 200——按域名/路径的封，不是封 IP。
+    """
+    if getattr(r, "status_code", None) == 501:
+        return True
+    try:
+        return "waf.tencent.com" in (r.text or "")
+    except Exception:  # noqa: BLE001 - 读不出 body 就当不是 WAF 页
+        return False
+
+
 def _tencent_kline(code: str, count: int = TENCENT_MAX, retries: int = MAX_RETRIES) -> Optional[List[Dict]]:
+    """主源 + 镜像轮询。返回 None = 所有腾讯端点都拿不到（该让 sina 上场）。
+
+    主源 `ifzq.gtimg.cn` 会被 WAF 整域挡（见 `_is_waf_page`），镜像 `proxy.finance.qq.com`
+    是同一个数据（`backfill_kline_amount.py` 已核实下标 0-5 与主源同构）。所以：
+    - 某端点一旦回 WAF 页，**立刻**换下一个、不重试（WAF 不是抖动，重试只是白等；
+      旧代码每只白等 2s+4s，6922 只就是 11 小时）；
+    - 撞过 WAF 的端点记进 `_TENCENT_DEAD` 熔断，后续 code 直接跳过，不再每只都再撞一遍。
+    """
     market = "bj" if code.startswith("8") else ("sh" if code.startswith(("6", "5")) else "sz")
-    url = "https://ifzq.gtimg.cn/appstock/app/fqkline/get"
-    params = {"param": f"{market}{code},day,,,{count}"}
+    token = _tencent_token(market, code, count)
+    # 和第 6 字段一一对应：要 qfq 就读 qfqday，要裸价就读 day，不互相兜底。
+    field = "qfqday" if TENCENT_ADJUST == "qfq" else "day"
+    live = [ep for ep in TENCENT_ENDPOINTS if ep[0] not in _TENCENT_DEAD]
+    if not live:  # 全被判死过：给一次复活机会，别真就一直不用了
+        _TENCENT_DEAD.clear()
+        live = list(TENCENT_ENDPOINTS)
+
     last_exc = None
-    for attempt in range(1, retries + 1):
-        try:
-            r = requests.get(url, params=params, timeout=10)
-            r.raise_for_status()
-            d = r.json()
-            if not (d.get("data")):
-                return []
-            data = list(d["data"].values())[0]
-            # 只认裸价那一组：静默回落 qfqday 会让同一天的两根 K 线来自两个复权基准（§48.1）
-            bars = data.get("day")
-            if not bars or not isinstance(bars, list):
-                return []
-            records = _parse_api_response(code, bars, source="tencent")
-            if attempt > 1:
-                logging.info(f"tencent {code}: retry {attempt} succeeded, {len(records)} bars")
-            return records
-        except Exception as e:
-            last_exc = e
-            if attempt < retries:
-                backoff = RETRY_BACKOFF * (2 ** (attempt - 1))
-                logging.warning(f"tencent {code}: attempt {attempt}/{retries} failed ({e}), retry in {backoff:.1f}s")
-                time.sleep(backoff)
-    logging.error(f"tencent {code}: all {retries} attempts failed, last error: {last_exc}")
+    for name, url in live:
+        for attempt in range(1, retries + 1):
+            try:
+                r = requests.get(url, params={"param": token}, timeout=10)
+                if _is_waf_page(r):
+                    logging.error(f"tencent[{name}] {code}: WAF 拦截页"
+                                  f"（HTTP {getattr(r, 'status_code', '?')}），换下一个端点，不重试")
+                    _TENCENT_DEAD.add(name)
+                    break
+                r.raise_for_status()
+                d = r.json()
+                # code!=0 是「请求本身不合规」（bad params 等），不是「这只票今天没柱子」。
+                # 不单独认出来的话，它会掉进下面的空 payload 分支，日志只剩一句
+                # 「200 but no day series」——2026-11-02 那次就是靠猜才找到根因的。
+                if d.get("code") not in (0, None):
+                    logging.error(f"tencent[{name}] {code}: api error code={d.get('code')} "
+                                  f"msg={d.get('msg')!r} param={token}")
+                    break
+                data = list((d.get("data") or {}).values())
+                data = data[0] if data and isinstance(data[0], dict) else {}
+                # 只认裸价那一组：静默回落 qfqday 会让同一天的两根 K 线来自两个复权基准（§48.1）
+                bars = data.get(field)
+                if not isinstance(bars, list) or not bars:
+                    # 2026-11-02 实测：源回 HTTP 200，body 里只有 {"version": ...}。
+                    # 空 payload 是「这个源今天没给数据」，不是「这根 K 线不存在」——
+                    # 当成成功会让备源永远不上场（那轮 6922 只里 6304 只静默记成 skipped）。
+                    logging.warning(f"tencent[{name}] {code}: 200 but no `{field}` series "
+                                    f"(keys={sorted(data.keys())[:4]}), treating as source failure")
+                    break
+                records = _parse_api_response(code, bars, source="tencent")
+                if not records:
+                    logging.warning(f"tencent[{name}] {code}: `{field}` series had no parsable bar")
+                    break
+                if attempt > 1:
+                    logging.info(f"tencent[{name}] {code}: retry {attempt} succeeded, {len(records)} bars")
+                return records
+            except Exception as e:
+                last_exc = e
+                if attempt < retries:
+                    backoff = RETRY_BACKOFF * (2 ** (attempt - 1))
+                    logging.warning(f"tencent[{name}] {code}: attempt {attempt}/{retries} failed ({e}), "
+                                    f"retry in {backoff:.1f}s")
+                    time.sleep(backoff)
+    logging.error(f"tencent {code}: 所有端点都没拿到数据，最后错误: {last_exc}")
     return None
 
 
@@ -349,7 +492,8 @@ class StockKlineScraper:
         total = len(codes)
         workers = 10
         self._semaphore = Semaphore(self._rate_limit)
-        results = {"success": 0, "skipped": 0, "failed": 0}
+        # total 一起带出去：__main__ 的当日覆盖率自检要分母，别让它再读一遍 all_stock.csv
+        results = {"success": 0, "skipped": 0, "failed": 0, "total": total}
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(self._fetch_kline, code): code for code in codes}
@@ -401,5 +545,17 @@ if __name__ == "__main__":
     if single.is_running():
         logging.error("there is script lock {}".format(pid_file))
         sys.exit(0)
+    parser = argparse.ArgumentParser(description="全市场日线增量落库 + 当日覆盖率自检")
+    parser.add_argument("--no-alert", dest="alert", action="store_false",
+                        help="只写日志，不推钉钉（手动试跑用；定时任务默认要推）")
+    args = parser.parse_args()
     spider = StockKlineScraper()
-    klines = spider.fetch_daily_klines()
+    stats = spider.fetch_daily_klines()
+    today = datetime.now().strftime("%Y-%m-%d")
+    problem = day_bar_problem(today, stats.get("total", 0), codes_with_bar(spider.storage, today))
+    if problem:
+        logging.warning("当日落库缺口：%s/%s 只有当天的柱子（%.1f%%，下限 %.0f%%）",
+                        problem["with_bar"], problem["fetched"],
+                        problem["ratio"] * 100, problem["min_ratio"] * 100)
+        if args.alert:
+            alert_day_bar_problem(problem)

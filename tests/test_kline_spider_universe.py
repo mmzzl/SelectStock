@@ -1,5 +1,7 @@
 import importlib.util
 
+import pytest
+
 SCRIPT = "scripts/kline_spider.py"
 
 
@@ -142,7 +144,58 @@ def test_tencent_source_without_bare_series_falls_back_to_sina(monkeypatch):
             return {"data": {"sh600519": {"qfqday": [["2026-09-30", "8.0", "8.4", "8.6", "7.9", "3"]]}}}
 
     monkeypatch.setattr(mod.requests, "get", lambda url, params=None, timeout=None, **kw: _Resp())
-    assert mod._tencent_kline("600519") in (None, [])
+    assert mod._tencent_kline("600519") is None
+
+
+def test_tencent_empty_payload_is_not_a_successful_fetch(monkeypatch):
+    """2026-11-02 实测：腾讯回 HTTP 200，但 body 里只有 `{"version": ...}`、没有 `day` 数组。
+
+    以前这种响应返回 `[]`，`_multi_source_kline` 只认 `None` 才回落备源 ⇒ 6922 只里
+    6304 只静默记成「skipped（没有新柱子）」，当天全场只落库 595 只，qlib 榜只剩 2 只。
+    「源没给数据」必须是失败，不能让空响应长得像「今天这根确实没有」。
+    """
+    mod = _load_script()
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"code": 0, "data": {"sh600000": {"version": "231202020"}}}
+
+    monkeypatch.setattr(mod.requests, "get", lambda url, params=None, timeout=None, **kw: _Resp())
+    assert mod._tencent_kline("600000") is None
+
+
+def test_multi_source_uses_sina_when_tencent_returns_empty_payload(monkeypatch):
+    """空 payload 要真的把备源叫上来：2026-11-02 22:12 实测 sina 有当天的柱子。"""
+    mod = _load_script()
+    asked: list[str] = []
+
+    class _TencentResp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"code": 0, "data": {"sh600000": {"version": "231202020"}}}
+
+    class _SinaResp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [{"day": "2026-11-02", "open": "10", "high": "11", "low": "9",
+                     "close": "10.5", "volume": "2501689"}]
+
+    def _get(url, params=None, timeout=None, **kw):
+        asked.append(url)
+        return _SinaResp() if "sina" in url else _TencentResp()
+
+    monkeypatch.setattr(mod.requests, "get", _get)
+    recs = mod._multi_source_kline("600000")
+    assert [u for u in asked if "sina" in u], f"没回落备源：{asked}"
+    assert recs[0]["date"] == "2026-11-02 15:00"
+    assert recs[0]["source"] == "sina"
 
 
 def test_sina_source_labels_raw(monkeypatch):
@@ -159,3 +212,186 @@ def test_sina_source_labels_raw(monkeypatch):
 
     monkeypatch.setattr(mod.requests, "get", lambda url, params=None, timeout=None, **kw: _Resp())
     assert mod._sina_kline("600519")[0]["adjust"] == "raw"
+
+
+# ------------------------------------------------ 当天落库只数的自检（2026-11-02 那轮的洞）
+def test_day_bar_problem_fires_on_the_2026_11_02_shape():
+    """2026-11-02 实测：应抓 6,922 只，当天真落库 595 只（8.6%），qlib 榜只剩 2 只。
+
+    这一轮跑完只留了一行 `success=596, skipped=6304`，没有任何告警；面板那层的覆盖率
+    告警要等到 17:16 才响。采集这层自己得会喊。
+    """
+    mod = _load_script()
+    p = mod.day_bar_problem("2026-11-02", fetched=6922, with_bar=595)
+    assert p is not None
+    assert (p["with_bar"], p["fetched"]) == (595, 6922)
+    assert p["ratio"] == pytest.approx(0.086, abs=0.002)
+
+
+def test_full_day_is_not_a_problem():
+    mod = _load_script()
+    assert mod.day_bar_problem("2026-10-29", fetched=6922, with_bar=6890) is None
+
+
+def test_a_non_trading_day_stays_quiet():
+    """周末/休市：那天全场都不该有柱子，`with_bar=0` 不能当成缺数天天刷屏。"""
+    mod = _load_script()
+    assert mod.day_bar_problem("2026-11-01", fetched=6922, with_bar=0) is None
+
+
+def test_the_boundary_is_the_min_ratio():
+    mod = _load_script()
+    assert mod.day_bar_problem("2026-11-02", fetched=1000, with_bar=900) is None
+    assert mod.day_bar_problem("2026-11-02", fetched=1000, with_bar=899) is not None
+
+
+def test_codes_with_bar_counted_from_the_db_not_from_the_loop():
+    """判据要读库，不能拿循环里的 `success` 凑：`success` 数的是「这次有新柱子的票」，
+    而补跑/重跑时全场都是 0——库里有当天柱子就是有的，那才是榜单真正依赖的那一列。"""
+    mod = _load_script()
+
+    class _FakeCol:
+        def aggregate(self, pipeline, **kw):
+            assert pipeline[0]["$match"]["date"] == {"$gte": "2026-11-02",
+                                                     "$lt": "2026-11-03"}
+            return [{"_id": None, "n": 595}]
+
+    assert mod.codes_with_bar(_FakeCol(), "2026-11-02") == 595
+
+
+# ------------------------------------------------ 腾讯参数格式（2026-11-02 "bad params" 回归）
+def test_tencent_params_need_the_trailing_field(monkeypatch):
+    """腾讯 fqkline 现在必须在第 6 个字段留个空位：`sh600519,day,,,320` 回 `bad params`。
+
+    2026-11-02 22:4x 实测（同一个 code，只差一个尾逗号）：
+      `sh600519,day,,,320`  → HTTP 200, 66 字节, {"code":1,"msg":"bad params"}，只有 version
+      `sh600519,day,,,320,` → HTTP 200, 24,541 字节, code=0，`day` 数组 320 根，末根是当天
+    所以这不是「源今天没给数据」，是请求本身不合规：一个尾逗号 = 全市场 0 根。
+    """
+    mod = _load_script()
+    seen = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"code": 0, "data": {"sh600519": {"day": [
+                ["2026-11-02", "1410.000", "1439.100", "1447.000", "1395.020", "82691.000"]]}}}
+
+    def _get(url, params=None, timeout=None, **kw):
+        seen.update(params or {})
+        return _Resp()
+
+    monkeypatch.setattr(mod.requests, "get", _get)
+    mod._tencent_kline("600519")
+    assert seen["param"].endswith(","), f"param 少第 6 个字段，腾讯会回 bad params：{seen['param']}"
+    assert seen["param"] == "sh600519,day,,,320,"
+
+
+def test_tencent_bad_params_response_is_a_source_failure(monkeypatch):
+    """`{"code":1,"msg":"bad params"}` 必须当成源失败（None），不能当成「今天没有新柱子」的 []。"""
+    mod = _load_script()
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"code": 1, "msg": "bad params", "data": {"sh600519": {"version": "16"}}}
+
+    monkeypatch.setattr(mod.requests, "get", lambda url, params=None, timeout=None, **kw: _Resp())
+    assert mod._tencent_kline("600519") is None
+
+
+# ------------------------------------------------ 腾讯 WAF 501（2026-11-02 22:4x 实测）
+def test_waf_501_page_is_a_source_failure_not_a_parse_error(monkeypatch):
+    """`ifzq.gtimg.cn` 整域被腾讯 WAF 挡了：HTTP 501 + `Server: stgw` + 一段跳
+    `waf.tencent.com/501page.html` 的 HTML。
+
+    2026-11-02 22:4x 实测：603/688/605/601 号段 72 只全 501，连 22:36 还成功过的
+    600519 也 501。这是「这个域名不给你了」，不是「这只票没柱子」——必须返回 None
+    让备源上场，而不是抛 JSON 解析异常、也不是静默记 skipped。
+    """
+    mod = _load_script()
+
+    class _Resp:
+        status_code = 501
+
+        def raise_for_status(self):
+            raise AssertionError("WAF 页不该走 raise_for_status 才算失败判据")
+
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+        @property
+        def text(self):
+            return ('<!DOCTYPE html><html><head><script>var i=location.href;'
+                    'window.location.href="https://waf.tencent.com/501page.html?u="+location.origin;'
+                    '</script></head></html>')
+
+    monkeypatch.setattr(mod.requests, "get", lambda url, params=None, timeout=None, **kw: _Resp())
+    assert mod._tencent_kline("603000") is None
+
+
+def test_tencent_falls_to_proxy_endpoint_when_primary_is_walled(monkeypatch):
+    """主域被 WAF 挡时，要真的打到 proxy.finance.qq.com 那个镜像拿回数据。
+
+    backfill_kline_amount.py 里已核实：proxy 域名的 `newfqkline/get` 给 10 列，
+    下标 0-5 与主源同构（日期/开/收/高/低/量），下标 8 是成交额（万元）。
+    """
+    mod = _load_script()
+    hit = []
+
+    class _Walled:
+        status_code = 501
+        text = "<html>waf.tencent.com/501page.html</html>"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            raise ValueError("not json")
+
+    class _Proxy:
+        status_code = 200
+        text = "{}"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"code": 0, "data": {"sh603000": {"day": [
+                ["2026-11-02", "15.01", "16.21", "16.29", "14.92", "297602.00",
+                 {}, "2.69", "46810.99", "0.00", "0.00"]]}}}
+
+    def _get(url, params=None, timeout=None, **kw):
+        hit.append(url)
+        return _Proxy() if "proxy.finance.qq.com" in url else _Walled()
+
+    monkeypatch.setattr(mod.requests, "get", _get)
+    recs = mod._tencent_kline("603000")
+    assert recs, f"主域被挡时没去 proxy 镜像：{hit}"
+    assert any("proxy.finance.qq.com" in u for u in hit)
+    assert recs[0]["date"] == "2026-11-02 15:00"
+    assert recs[0]["close"] == 16.21
+
+
+# ------------------------------------------------ 第 6 字段：qfq vs 裸价（两项目口径不同）
+def test_qfq_mode_asks_for_qfq_field_and_reads_qfqday(monkeypatch):
+    """QuantPosition 那份版本用的是 `...,320,qfq`，读 `qfqday`。
+
+    SelectStock 这版必须守裸价（§48.1：静默回落 qfqday 会让同一天两根 K 线来自两个
+    复权基准）。但「第 6 个字段」的写法要能被两种口径复用，所以抽成 _tencent_token。
+    """
+    mod = _load_script()
+    assert mod._tencent_token("sh", "600519", 320, adjust="qfq") == "sh600519,day,,,320,qfq"
+    assert mod._tencent_token("sh", "600519", 320) == "sh600519,day,,,320,"
+    assert mod._tencent_token("sz", "000001", 320) == "sz000001,day,,,320,"
+
+
+def test_qfq_mode_is_not_the_default():
+    """默认必须还是裸价：改成 qfq 会污染 §48 那套复权链。"""
+    mod = _load_script()
+    assert mod.TENCENT_ADJUST == "raw"
+    assert mod._tencent_token("sh", "600519", 320).split(",")[-1] == ""
