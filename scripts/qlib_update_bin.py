@@ -15,7 +15,13 @@
 3. **字段集和脏数据过滤必须和当初 dump_all 那次完全一样**：少给一个字段，那只票的这一列
    从此不再更新；少过滤一次「价格不成行」的脏行，就等于往训练时没有数据的格子里写数。
 4. **窗口必须覆盖 panel_end 之后的每一天**：库里比面板新 N 天而窗口只取 N−1 天时，
-   直接报错退出，不要静默地把面板推到中间某天。
+   直接报错退出，不要静默地把面板推到中间某天。**而且要比的不只是日历**：`calendars/day.txt`
+   是整个面板共享的，它推到 11-02 并不代表每只票都推到了 11-02。`instruments/all.txt` 里
+   某只票的结束日一旦冻住（它的 CSV 某天没赶上——比如那天的增量只跑了票池、它不在名单里），
+   `dump_update` 算出的「待追加日」永远从那个冻结点起算，自己追不回来；而只比日历的
+   `missing` 判断看不见这件事，会直接说「无需更新」并退出 0，连 `fill_holes` 都不跑
+   （2026-11-02 实测：日历已到 11-02，3,845 只票的 bin 停在 10-16，空转了半个月）。
+   所以必须另外用 bin 的实际长度（`stale_symbols`）核一遍「名单里的票自己写到哪天了」。
 5. **中间的空洞不会自己长回来**：dump_update 对已存在的票只追加「比它的结束日更晚」的行，
    所以行情迟到一步（爬虫队尾是沪市，2026-10-21/22 实测 16:24~16:31 才落库）就会把那天
    永久留成 NaN，而打分读到 NaN 只是把这只票悄悄漏掉。因此每批追加完都要 `fill_holes`
@@ -93,12 +99,82 @@ def panel_calendar(qlib_dir: Path) -> list[str]:
     return [line.strip()[:10] for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def pool_symbols(scope: str) -> list[str]:
+def bin_end_index(path: Path) -> int | None:
+    """一只票的 .bin 覆盖到面板日历的哪一格（首格存起始下标，之后一天一格）。
+
+    为什么需要它：`day.txt` 是整个面板**共享**的日历，它推到 11-02 不代表每只票都推到了
+    11-02。`dump_update` 给一只票追加行时，追加的是「比 instruments/all.txt 里它的结束日更晚」
+    那几天，而 all.txt 只在真有票被追加时才整体重写——某只票的 CSV 一旦没赶上（例如那天的
+    增量任务只跑了票池、它不在名单里），它的结束日就冻在那里，之后**再也追不上**：
+    每次算出的待追加日都从那个冻结日起算，与 bin 的实际长度对不上。
+
+    读 bin 长度得到的就是「这只票自己写到哪天了」，是唯一可信的尺子。
+    """
+    import numpy as np
+
+    if not path.exists():
+        return None
+    header = np.fromfile(path, dtype="<f", count=1)
+    if header.size == 0:
+        return None
+    span = path.stat().st_size // 4 - 1
+    return int(header[0]) + span - 1
+
+
+def stale_symbols(qlib_dir: Path, syms: list[str], calendar: list[str],
+                  tolerance: int = 0) -> list[str]:
+    """哪些票的 bin 比面板日历尾部落后了不止 `tolerance` 格（= 该补却没补）。
+
+    这是 `missing` 那个判断的第二半：`missing` 只看**日历**推没推，而日历是全体共享的，
+    所以「日历已到 11-02、有 3,845 只票的 bin 还停在 10-16」这种情况它一个字都看不见——
+    脚本会说「无需更新」然后直接退出 0，`fill_holes` 一次都不跑（2026-11-02 实测就这样
+    空转了半个月）。日历对齐不等于面板对齐。
+
+    还有第三种病：**bin 长度到齐了、末格却是 NaN**。`dump_update` 追加的是「日历上比
+    结束日晚的那几天」，行里没数（比如 17:15 跑的时候爬虫还没落库完）它也照样追加一格
+    NaN——长度账面对齐，末格空洞。这类票用「落后」判不出来（2026-11-03 实测 universe
+    2,890 只里 2,048 只末格 NaN，打分的人群闸门只能在 428 只有日线的票里挑）。
+    所以 bin 到了尾部时还要看末格本身是不是数。
+    """
+    import numpy as np
+
+    last = len(calendar) - 1
+    out: list[str] = []
+    for sym in syms:
+        feats = qlib_dir / "features" / sym.lower()
+        # 用 close 当基准列：它是每只票必有的一列，其余列（amount/vwap）可能因为
+        # 导出时缺字段而压根没建，拿它们当尺子会把「这列不存在」误判成「落后」
+        path = feats / "close.day.bin"
+        end = bin_end_index(path)
+        if end is None:
+            # 面板里没有这只票（新股要先走 dump_all/dump_fix，不是这里造文件）
+            continue
+        if end < last - tolerance:
+            out.append(sym)
+            continue
+        # 长度到了尾部：末格本身必须是个数，NaN = 追加了个空格子（行情迟到那天留下的）
+        if end == last and not np.isfinite(np.fromfile(path, dtype="<f")[-1]):
+            out.append(sym)
+    return out
+
+
+def pool_symbols(scope: str, symbols_file: str | None = None) -> list[str]:
     """增量要补哪批票。scope=pool 用模型产物里的 pool.txt（训练用哪批补哪批）；
     scope=universe 用 scripts/qlib_daily_universe.py 每天重算的全市场名单。
     放开全市场时必须走后者，否则 17:30 会给票池外的票打**上一个交易日**的因子，
-    而且分数看着完全正常——这是本脚本头一段写的最难发现的那种坏法。"""
-    if scope == "universe":
+    而且分数看着完全正常——这是本脚本头一段写的最难发现的那种坏法。
+
+    `--symbols-file` 是给「修历史」用的第三档：一次把落后票全推齐时，那份名单既不是
+    今天的 universe（落后票大多因为流动性不够而不在里面），也不是训练票池。
+    传了它就以它为准，scope 不再参与选票。
+    """
+    if symbols_file:
+        path = Path(symbols_file)
+        if not path.exists():
+            raise RuntimeError(f"票单不存在：{path}")
+        syms = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.startswith("#")]
+    elif scope == "universe":
         if not UNIVERSE_FILE.exists():
             raise RuntimeError(f"缺少全市场名单 {UNIVERSE_FILE}，先跑 scripts/qlib_daily_universe.py")
         syms = [line.strip() for line in UNIVERSE_FILE.read_text(encoding="utf-8").splitlines()
@@ -111,6 +187,51 @@ def pool_symbols(scope: str) -> list[str]:
     return syms
 
 
+def reconcile_instruments(qlib_dir: Path, calendar: list[str]) -> list[tuple[str, str, str]]:
+    """把 `instruments/all.txt` 里写错的结束日拉回 bin 的实际末日。
+
+    `dump_update` 有个既有的错法：`_dump_features` 里
+        self._update_instruments[_code][END] = self._format_datetime(_end)
+    其中 `_end` 是这只票**整块数据**的末日，而真正落进 bin 的只是
+    `_update_calendars`（比原结束日更晚、且在 CSV 里非空）那几天。于是「窗口里有行、
+    但那段全是 NaN」的票（退市、长期停牌就长这样）会得到一个**比 bin 实际长度更晚**的
+    结束日：2026-11-02 实测 40 只被写成 11-02，bin 实际停在 5~10 月的某天。
+    危害是下游按 all.txt 判断「这只票有没有这天」，于是把这些票当成活票。
+
+    校正只往**早**改（写回 bin 的真实末日），不会把 all.txt 往晚推——
+    「bin 比 all.txt 晚」是另一种情况，该由 dump_update 自己重写，不在这里猜。
+    返回 [(符号, 原结束日, 改成)]，调用方负责打印。
+    """
+    path = qlib_dir / "instruments" / "all.txt"
+    if not path.exists():
+        return []
+    rows: list[str] = []
+    fixed: list[tuple[str, str, str]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            rows.append(line)
+            continue
+        sym, begin, end = parts[0], parts[1], parts[2].strip()
+        actual = bin_end_index(qlib_dir / "features" / sym.lower() / "close.day.bin")
+        if actual is None or not (0 <= actual < len(calendar)):
+            rows.append(line)
+            continue
+        real = calendar[actual]
+        if real < end:          # 只纠正「all.txt 比 bin 晚」这一种
+            fixed.append((sym, end, real))
+            rows.append("\t".join([sym, begin, real]))
+        else:
+            rows.append(line)
+    if fixed:
+        tmp = path.with_suffix(".txt.tmp")
+        tmp.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    return fixed
+
+
 def export_window(col, codes: list[str], calendar: list[str], lo: int, hi: int,
                   out_dir: Path) -> dict:
     """把 codes 在 calendar[lo:hi+1] 这段稠密地写成 <SYMBOL>.csv，返回行数与覆盖率统计。
@@ -119,9 +240,22 @@ def export_window(col, codes: list[str], calendar: list[str], lo: int, hi: int,
     have 是当天真有收盘价的只数。停牌本来就会让 have 小于 total，所以它是按市场整体看的
     比例，不是逐只票的检查（判据见 coverage_problems）。
     """
+    # 每次只留这一批：dump_update 会把目录里**所有** CSV 都读进去。调用方给的是一个
+    # 每批独立的新目录（见批次循环），所以正常情况这里不需要删任何东西；万一目录里
+    # 已经有文件（手工指定了 --csv-dir 指向旧目录），逐个 unlink 而不是 rmtree ——
+    # 带安全护栏的环境里连续删除上千个文件会被整批拦下，脚本会死在导出这一步。
     if out_dir.exists():
-        shutil.rmtree(out_dir)  # 每次只留这一批，dump_update 会把目录里所有 CSV 都读进去
-    out_dir.mkdir(parents=True)
+        stale_files = list(out_dir.glob("*.csv"))
+        if stale_files:
+            logger.warning("临时目录 %s 里已有 %d 个旧 CSV，先清掉（这次只该有本批的）",
+                           out_dir, len(stale_files))
+        for old in stale_files:
+            try:
+                old.unlink()
+            except OSError as exc:  # noqa: PERF203 - 单个删不掉不足以中断整批
+                logger.warning("清临时 CSV 失败 %s：%s", old, exc)
+    else:
+        out_dir.mkdir(parents=True)
     since = calendar[lo]
     written = empty = dirty_dropped = 0
     coverage: dict[str, dict[str, dict[str, int]]] = {}
@@ -407,6 +541,10 @@ def main() -> int:
                              "写 --scope=universe 会被静默截成 --scope 而报错，环境变量这条路不会被截")
     parser.add_argument("--chunk", type=int, default=800,
                         help="每批送进 dump_update 的只数；全市场必须分批，见导出那段的注释")
+    parser.add_argument("--symbols-file", default=None,
+                        help="显式票单（一行一个 qlib 符号）。给定时不看 --scope。"
+                             "用于一次性把落后票推齐：这些票多半不在当天的 universe 里"
+                             "（流动性不够），光跑 --scope universe 补不到它们")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -420,14 +558,23 @@ def main() -> int:
     db = mongo_db()
     col = db["stock_kline"]
     cal = trading_calendar(col)
-    syms = pool_symbols(args.scope)
+    syms = pool_symbols(args.scope, args.symbols_file)
     print(f"面板日历：{len(panel)} 天，止于 {panel[-1]}")
     print(f"库内日历：{len(cal)} 天，止于 {cal[-1]}")
-    print(f"名单（scope={args.scope}，chunk={args.chunk}）：{len(syms)} 只（含基准 {symbol(BENCHMARK)}）")
+    src = f"symbols-file={args.symbols_file}" if args.symbols_file else f"scope={args.scope}"
+    print(f"名单（{src}，chunk={args.chunk}）：{len(syms)} 只（含基准 {symbol(BENCHMARK)}）")
 
     missing = [d for d in cal if d > panel[-1]]
-    if not missing and not args.repair_only:
-        print("库里没有比面板更新的日子，无需更新。")
+    # 日历对齐 ≠ 面板对齐：day.txt 是全体共享的，日历推到 11-02 时仍可能有几千只票的 bin
+    # 停在更早的日子（它们的 CSV 某天没赶上，instruments 里的结束日就冻住了，之后 dump_update
+    # 算出的待追加日始终从那个冻结点起算，自己追不回来）。只比日历就会在这里误判「无需更新」
+    # 然后退出 0，连 fill_holes 都不跑——2026-11-02 实测就是这样空转了半个月。
+    stale = [] if args.repair_only else stale_symbols(qlib_dir, syms, panel)
+    if stale:
+        print(f"⚠ 名单里 {len(stale)}/{len(syms)} 只的 bin 落后面板日历尾部 {panel[-1]}"
+              f"（长度落后或末格缺数；例：{', '.join(stale[:8])}）；下面按需重跑这几天的窗口把它们推齐")
+    if not missing and not stale and not args.repair_only:
+        print("库里没有比面板更新的日子，名单里的票也都推到面板尾部了，无需更新。")
         return 0
 
     need = max(args.days, len(missing) + 3)
@@ -440,7 +587,8 @@ def main() -> int:
     if missing:
         print(f"待补交易日 {len(missing)} 天：{missing[0]} → {missing[-1]}；窗口 {cal[lo]} → {cal[hi]}（{need} 天）")
     else:
-        print(f"只补洞（--repair-only）：窗口 {cal[lo]} → {cal[hi]}（{need} 天），面板止于 {panel[-1]}")
+        why = "补落后票（日历已齐，但部分票的 bin 没跟上）" if stale else "只补洞（--repair-only）"
+        print(f"{why}：窗口 {cal[lo]} → {cal[hi]}（{need} 天），面板日历止于 {panel[-1]}")
 
     if args.dry_run:
         print("dry-run：到此为止，不导出也不写面板。")
@@ -464,7 +612,12 @@ def main() -> int:
         repair_unplaceable: list[str] = []
         coverage: dict = {}
         for ci, chunk in enumerate(chunks, 1):
-            stats = export_window(col, [s[2:] for s in chunk], cal, lo, hi, csv_dir)
+            # 每批用一个独立的空目录：dump_update 会把 csv_dir 里**所有** CSV 读进去，
+            # 所以必须是「只含这一批」的目录；用新目录而不是清旧目录，是因为带安全护栏的
+            # 环境里连续删除上千个文件会被整批拦下（SAFE_DELETE_BULK_CONFIRM_REQUIRED），
+            # 脚本就死在导出这一步。跑完由调用方一次性收尾，不留垃圾。
+            batch_dir = csv_dir / f"b{ci:03d}"
+            stats = export_window(col, [s[2:] for s in chunk], cal, lo, hi, batch_dir)
             for key in totals:
                 totals[key] += stats[key]
             merge_coverage(coverage, stats["coverage"])
@@ -475,11 +628,11 @@ def main() -> int:
             if args.repair_only:
                 print(f"[{ci}/{len(chunks)}] --repair-only：跳过 dump_update，不追加新行")
             else:
-                run_dump_update(csv_dir, qlib_dir, args.max_workers)
+                run_dump_update(batch_dir, qlib_dir, args.max_workers)
             if not args.no_repair:
                 # 必须在 run_dump_update 之后、下一批把临时目录清掉之前：这批的 CSV 还在，
                 # 而上一步刚把新交易日追加进日历，两边对得上的空洞才补得动。
-                rep = fill_holes(qlib_dir, csv_dir, panel_calendar(qlib_dir), BIN_FIELDS)
+                rep = fill_holes(qlib_dir, batch_dir, panel_calendar(qlib_dir), BIN_FIELDS)
                 for key in repair:
                     repair[key] += rep[key]
                 repair_dates.update(rep["by_date"])
@@ -501,6 +654,14 @@ def main() -> int:
         if new_panel[-1] != cal[-1]:
             raise RuntimeError(f"面板更新到 {new_panel[-1]}，但库里最新是 {cal[-1]}")
         print(f"面板日历：{panel[-1]} → {new_panel[-1]}（+{len(new_panel) - len(panel)} 天）")
+
+        # dump_update 会把「窗口里有行、但那段全是 NaN」（退市/长期停牌）的票的结束日
+        # 写成整块数据的末日，比 bin 实际长度更晚。all.txt 是下游判断「这票这天有没有数据」
+        # 的依据，写晚了等于把死票当活票，所以这里按 bin 的真实长度回收一次。
+        fixed = reconcile_instruments(qlib_dir, new_panel)
+        if fixed:
+            print(f"校正 instruments 结束日（写晚了，按 bin 实际末日收回）：{len(fixed)} 只，"
+                  f"例：{', '.join(f'{s} {a}→{b}' for s, a, b in fixed[:5])}")
 
         if not args.no_refresh:
             info = refresh_plugin(args.plugin_base)

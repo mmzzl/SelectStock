@@ -30,6 +30,11 @@
    取不到成交额的票（amount.day.bin 整列空/非正，或这 20 格里有效天不足 10 天，
    退市和长期停牌就落在这里）**单独计数并剔除**——
    「判不了流动性」不等于「过了流动性筛」，和第 2 条对「取不到名字」的处理是同一个原则。
+   但**「bin 自己没长到日历尾部」不算这一类**：那是增量链还没轮到它，不是它没有成交额。
+   两者混在一个 None 里会接成一个闭环——17:15 的增量只补本名单里的票，于是
+   「面板落后 ⇒ 进不了名单 ⇒ 继续落后」（2026-11-02 实测 2,118 只这么卡在 10-16，
+   占全部「判不了流动性」的 98%）。这类票按**自己最后 20 格**算成交额，并在报告的
+   `lagging` 计数里单独报出来，不让「面板落后」伪装成「没上市/退市」。
 
 用法：
     python3 scripts/qlib_daily_universe.py                 # 生成名单并打印各类计数
@@ -109,21 +114,50 @@ def panel_stocks() -> list[str]:
                   and (p / "close.day.bin").exists())
 
 
+def bin_end_index(path: Path) -> int | None:
+    """一只票的 .bin 覆盖到面板日历的哪一格（首格是起始下标，之后一天一格）。
+
+    bin 只存「有数据的那一段」，所以**它的长度就是这只票的自述末日**。增量链没把某只票
+    写进来时，这个数会稳稳停在几天前——退市、长期停牌则是真的没数。读得出这个下标，
+    才谈得上区分「面板落后」和「这票没行情」。
+    """
+    import numpy as np
+
+    if not path.exists():
+        return None
+    header = np.fromfile(path, dtype="<f", count=1)
+    if header.size == 0:
+        return None
+    span = path.stat().st_size // 4 - 1
+    return int(header[0]) + span - 1
+
+
 def panel_stats(symbols: list[str],
-                 calendar: list[str] | None = None) -> dict[str, tuple[int, float | None]]:
+                calendar: list[str] | None = None,
+                lagging: list[str] | None = None) -> dict[str, tuple[int, float | None]]:
     """每只票 -> (面板里有行情的天数, 面板日历最后 20 格的日均成交额【元】)。
 
     成交额读 `<field>.day.bin`（float32 小端，首格是起始日历下标），口径和
     `qlib_export_kline` 落进去的一样是元。窗口取的是**面板日历**的最后 `AMT_WINDOW` 格，
-    不是这只票自己那串数的尾巴——打分读的就是这个坐标系，票的 bin 短到窗口里有效天不足
-    `AMT_MIN_DAYS`（退市、长期停牌、或增量链没覆盖到它）时给 None。
-    两种情况给 None：整列都是空/非正（东财断供那几天 amount 就是空值），或有效天不足。
-    **判不了流动性就等于不可成交**，不能当成「过了流动性筛」放过去——这和本脚本
-    对「取不到名字的票」的处理是同一个原则。
+    不是这只票自己那串数的尾巴——打分读的就是这个坐标系。
+
+    给 None 的只有一种情况：**这票的 bin 已经覆盖到日历尾部，但窗口里有效天不足**
+    （整列空/非正 = 东财断供，或有效天 < `AMT_MIN_DAYS` = 退市/长期停牌）。
+    **判不了流动性就等于不可成交**，不能当成「过了流动性筛」放过去。
+
+    另一种情况单独摘出来、不算 None：**bin 自己就没长到日历尾部**（比尾部早了一格以上）。
+    那不是「没有成交额」，那是增量链还没轮到它——17:15 的 `qlib_update_bin --scope universe`
+    只补这份名单里的票，于是「面板落后 ⇒ 进不了名单 ⇒ 继续落后」会自己接成一个闭环
+    （2026-11-02 实测 2,118 只卡在 10-16，amount 窗口整个落在 bin 之外）。
+    这类票的成交额按**它自己最后 20 格**算：口径仍是「最近 20 个交易日日均」，只是锚点
+    跟着这只票自己的数据走。**判不了流动性 ≠ 面板落后**，两者混在一个 None 里，
+    名单就会无声缩掉一截，而且缩掉的正是最该补的那批。
+    落后的符号追加进 `lagging`（调用方给列表时），报告里要能看见。
     """
     import numpy as np
 
     cal = calendar if calendar is not None else panel_calendar()
+    last = len(cal) - 1
     tail_lo = len(cal) - AMT_WINDOW
     out: dict[str, tuple[int, float | None]] = {}
     for sym in symbols:
@@ -132,12 +166,20 @@ def panel_stats(symbols: list[str],
         if not path.exists():
             continue
         close = np.fromfile(path, dtype="<f")
+        end = bin_end_index(path)
+        behind = end is not None and end < last
+        if behind and lagging is not None:
+            lagging.append(sym)
+        # 落后就退回这只票自己的尾部；没落后就用面板尾部（打分读的那段）
+        hi = end if behind else last
+        lo = max(tail_lo if not behind else hi - AMT_WINDOW + 1, 0)
         values: list[float] = []
         amt_path = base / "amount.day.bin"
         if amt_path.exists():
             amt = np.fromfile(amt_path, dtype="<f")
             start, span = int(amt[0]), amt.size - 1
-            for i in range(max(tail_lo, start), min(len(cal) - 1, start + span - 1) + 1):
+            amt_end = start + span - 1
+            for i in range(max(lo, start), min(hi, amt_end) + 1):
                 value = amt[i - start + 1]
                 if np.isfinite(value) and value > 0:
                     values.append(float(value))
@@ -182,7 +224,8 @@ def build(min_bars: int, keep_st: bool, names_mode: str = "live",
     symbols = panel_stocks()
     names, name_report = resolve_names(symbols, names_mode, timeout)
     cal = panel_calendar()
-    stats = panel_stats(symbols, cal)
+    lagging: list[str] = []
+    stats = panel_stats(symbols, cal, lagging)
     report = {
         "panel_stocks": len(symbols),
         "panel_end": cal[-1] if cal else "",
@@ -192,6 +235,8 @@ def build(min_bars: int, keep_st: bool, names_mode: str = "live",
         "short_history": 0,
         "dropped_illiquid": 0,
         "dropped_no_amount": 0,
+        "lagging": len(lagging),
+        "lagging_symbols": sorted(lagging)[:20],
         "min_bars": min_bars,
         "min_amount": min_amount,
     }
@@ -210,8 +255,10 @@ def build(min_bars: int, keep_st: bool, names_mode: str = "live",
             report["short_history"] += 1
             continue
         if amount is None:
-            # 20 天里有效成交额不足一半：不是「不流动」，是「判不了」——同样不进名单，但单独计数，
+            # 窗口里有效成交额不足一半：不是「不流动」，是「判不了」——同样不进名单，但单独计数，
             # 否则某天面板 amount 整列断供时，名单会无声缩掉一截，看起来像「筛过了」。
+            # 注意这条只接「bin 已到日历尾部却算不出额」；bin 本身落后（lagging）的票
+            # 在 panel_stats 里已按它自己的尾部算过额，不会落到这里。
             report["dropped_no_amount"] += 1
             continue
         if amount < min_amount:
@@ -242,6 +289,12 @@ def main() -> int:
     if args.names == "live" and report["names_live"] < 0.9 * report["panel_stocks"]:
         print(f"警告：只有 {report['names_live']}/{report['panel_stocks']} 只拿到现名，"
               f"其余按 {NAME_FILE}（{_snapshot_date()} 的快照）兜底，ST 判据可能过期",
+              file=sys.stderr)
+    if report["lagging"] > 0.1 * report["panel_stocks"]:
+        print(f"警告：{report['lagging']}/{report['panel_stocks']} 只的 bin 没长到面板尾部"
+              f"（{report['panel_end']}），它们的成交额是按各自最后 20 格算的。"
+              f"这是增量链没轮到，不是退市——先跑 qlib_update_bin --scope universe 补上，"
+              f"否则这批票会一直在名单边缘打转（例：{', '.join(report['lagging_symbols'][:5])}）",
               file=sys.stderr)
     if report["dropped_no_amount"] > 0.1 * report["panel_stocks"]:
         print(f"警告：{report['dropped_no_amount']}/{report['panel_stocks']} 只判不了流动性被剔除，"

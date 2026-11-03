@@ -195,14 +195,20 @@ def test_the_liquidity_window_is_the_panel_calendar_tail(sandbox):
     """流动性看的是**面板日历最后 20 格**，不是这只票自己那串数的尾巴。
 
     这是换成 bin 口径的意义：csv 面板那份拷贝停在 10-16（2026-10-23 实测），于是「最近 20 天」
-    事实上是 9/17~10/16，打分读的却是到 10-22 的面板。SH600002 只有日历头 20 天有额、
-    最近 20 天全空，必须按「判不了」剔掉，不能拿它自己那串旧数当最近行情放进来。
+    事实上是 9/17~10/16，打分读的却是到 10-22 的面板。SH600002 的 bin 已经写到日历尾部
+    （所以不会被当成「面板落后」），但尾部这 20 格没有额、只有更早那 20 格有——
+    必须按「判不了」剔掉，不能拿它自己那串旧数当最近行情放进来。
+
+    注意「bin 没写到尾部」是另一条路径（见下面 lagging 那组用例）：那种情况要按票自己的
+    尾部算额。这里的区别是 bin **已经**到尾部、新的那几天确实没有成交额。
     """
     cn = uni.BIN_PANEL
-    _bin(cn, "SH600002", 0, [1.0] * 20, [LIQ_OK] * 20)          # 额只在旧的那段
+    _bin(cn, "SH600002", 0, [1.0] * CAL_DAYS,
+         [LIQ_OK] * 20 + [None] * (CAL_DAYS - 20))    # 额只在旧的那 20 格
     kept, report = uni.build(min_bars=3, keep_st=False, names_mode="live")
     assert "SH600002" not in kept
     assert report["dropped_no_amount"] == 1
+    assert report["lagging"] == 0                     # 已到尾部，不算落后
 
 
 def test_candidates_are_the_bin_dirs_that_scoring_can_read(sandbox):
@@ -225,3 +231,49 @@ def test_the_report_says_which_day_the_panel_ends(sandbox):
     """
     kept, report = uni.build(min_bars=3, keep_st=False, names_mode="live")
     assert report["panel_end"] == DAYS[-1]
+
+
+# -------------------------------------------- 面板落后 ≠ 判不了流动性（2026-11-02 实测的闭环）
+
+def test_a_lagging_bin_is_scored_on_its_own_tail_not_dropped(sandbox):
+    """bin 停在日历中段、但那段里成交额充足 ⇒ 要按**它自己的最后 20 格**算额并进名单。
+
+    这是那个闭环的另一半：17:15 的增量只补本名单里的票，所以
+    「面板落后 ⇒ 判不了流动性 ⇒ 进不了名单 ⇒ 继续落后」会自己转起来。
+    2026-11-02 实测 2,118 只这么卡在 10-16（占全部 dropped_no_amount 的 98%），
+    而它们落在 Mongo 里的行情是齐的。判不了流动性 ≠ 面板还没轮到它。
+    """
+    cn = uni.BIN_PANEL
+    # SH600002 只写到日历第 20 格，之后一格都没有：不是退市，是增量没轮到
+    _bin(cn, "SH600002", 0, [1.0] * 20, [LIQ_OK] * 20)
+    kept, report = uni.build(min_bars=3, keep_st=False, names_mode="live")
+    assert "SH600002" in kept
+    assert report["lagging"] >= 1
+    assert "SH600002" in report["lagging_symbols"]
+
+
+def test_a_lagging_bin_with_no_amount_still_does_not_enter(sandbox):
+    """落后不豁免流动性：自己那段里也拿不到额（整列空）就还是剔除，只是归到 no_amount。"""
+    cn = uni.BIN_PANEL
+    _bin(cn, "SH600002", 0, [1.0] * 20, [None] * 20)
+    kept, report = uni.build(min_bars=3, keep_st=False, names_mode="live")
+    assert "SH600002" not in kept
+    assert report["dropped_no_amount"] == 1
+
+
+def test_a_current_bin_is_not_reported_as_lagging(sandbox):
+    """已经在日历尾部的票不能被算成 lagging——否则该告警天天响，就没人看了。"""
+    kept, report = uni.build(min_bars=3, keep_st=False, names_mode="live")
+    assert report["lagging"] == 0
+    assert report["lagging_symbols"] == []
+
+
+def test_the_tail_window_on_a_lagging_bin_is_still_twenty_days(sandbox):
+    """落后票的窗口是它自己的最后 20 格，不是「从头 20 格」：早期放量、最近缩量的票要按最近的算。"""
+    cn = uni.BIN_PANEL
+    amounts = [5e8] * 20 + [1e6] * 20          # 前 20 天巨量、后 20 天几乎不成交
+    _bin(cn, "SH600002", 0, [1.0] * 40, amounts)
+    kept, report = uni.build(min_bars=3, keep_st=False, names_mode="live")
+    # 按最后 20 格（1e6）算 ⇒ 过不了 1e8 门槛
+    assert "SH600002" not in kept
+    assert report["dropped_illiquid"] == 1
